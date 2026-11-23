@@ -44,6 +44,7 @@
 - For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
 - Back to stock DCS also removes the engine module's new 0.7 log files.
 - On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
+- **End DCS** could not end a DCS running with administrator rights and only said Windows did not allow it (GitHub #21, reported by @whitedear). It now asks Windows for permission once and ends it; if the prompt is declined, it says why. A healthy DCS with administrator rights is also no longer taken for "not responding".
 
 # 0.6.7 preview
 

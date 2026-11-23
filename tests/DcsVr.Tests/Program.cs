@@ -981,6 +981,37 @@ Test("A DCS that looks stuck is offered to be ended only after it stayed that wa
     Require(tracker.Update(DcsHealth.Crashed, crash) is null && tracker.Update(DcsHealth.Crashed, crash + DcsStuckTracker.CrashedPatience) == DcsHealth.Crashed, "a crash window is offered at the second reading");
     Require(DcsStuckTracker.CrashedPatience <= DcsStuckWatch.Interval && tracker.Update(DcsHealth.NotRunning, crash + TimeSpan.FromSeconds(12)) is null, "and gone once the window is closed");
 });
+Test("End DCS: a DCS Windows refuses to end (administrator rights, GitHub #21) is named, and ended through the elevated CLI", () =>
+{
+    var (health, ender, provider) = (DcsProcess.HealthProvider, DcsProcess.Ender, DcsProcess.Provider);
+    try
+    {
+        // The app's own try: access denied is counted as such, not as "ended 0".
+        DcsProcess.HealthProvider = () => DcsHealth.NoWindow; DcsProcess.Ender = () => new(0, 1, 0);
+        var denied = DcsProcess.EndStuck();
+        Require(denied is { Ended: 0, Denied: 1, Lingering: 0 }, "the refusal is reported");
+        Require(DcsProcess.EndFailure(denied!, stillRunning: true)!.Contains("administrator rights", StringComparison.Ordinal), "without the CLI: told plainly why");
+        Require(DcsProcess.EndFailure(denied!, true, declined: true)!.Contains("prompt was declined", StringComparison.Ordinal), "the Windows prompt declined");
+        Require(DcsProcess.EndFailure(denied!, true, DcsProcess.NotEndedCode)!.Contains("even with administrator rights", StringComparison.Ordinal), "refused even elevated");
+        Require(DcsProcess.EndFailure(denied!, false, DcsProcess.EndedCode) is null, "ended by the elevated CLI: nothing to tell");
+        Require(DcsProcess.EndFailure(denied!, true, DcsProcess.HealthyCode)!.Contains("responding again", StringComparison.Ordinal), "a DCS healthy as seen elevated is not ended");
+        Require(DcsProcess.EndFailure(new(0, 0, 1), true)!.Contains("still closing", StringComparison.Ordinal), "ended but not gone yet");
+        Require(DcsProcess.EndFailure(new(1, 0, 0), false) is null, "ended");
+        // The elevated command: one Windows prompt, hidden, only "end-dcs" (it checks again that DCS still looks stuck).
+        var cli = Make("end-dcs-cli/DcsVr.Cli.exe", "cli");
+        var start = DcsProcess.ElevatedEndStart(Path.GetDirectoryName(cli));
+        Require(start is { Verb: "runas", UseShellExecute: true } && start.ArgumentList.SequenceEqual([DcsProcess.EndCommand]), "elevated end-dcs");
+        Require(DcsProcess.ElevatedEndStart(Path.Combine(root, "no-cli")) is null, "no CLI, no elevated try");
+        var output = new StringWriter();
+        DcsProcess.HealthProvider = () => DcsHealth.Healthy;
+        Require(DcsProcess.EndFromCommand(output) == DcsProcess.HealthyCode, "the command leaves a healthy DCS running");
+        DcsProcess.HealthProvider = () => DcsHealth.NotResponding; DcsProcess.Ender = () => new(1, 0, 0); DcsProcess.Provider = () => [];
+        Require(DcsProcess.EndFromCommand(output) == DcsProcess.EndedCode, "the command ends a stuck DCS");
+        DcsProcess.Ender = () => new(0, 1, 0); DcsProcess.Provider = () => [new(4242, null)];
+        Require(DcsProcess.EndFromCommand(output) == DcsProcess.NotEndedCode, "and says when it could not");
+    }
+    finally { DcsProcess.HealthProvider = health; DcsProcess.Ender = ender; DcsProcess.Provider = provider; }
+});
 Test("A stuck DCS is counted on the app's own clock, not by how often the page asks (GitHub #21)", () =>
 {
     var running = DcsProcess.Provider; var health = DcsProcess.HealthProvider;
