@@ -316,7 +316,9 @@ try {
   $ao = & $Cli apply --profile $pf --dcs $draft.dcs --options $draft.options 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { throw "apply of the user profile failed: $($ao.Trim())" }
   Note "user profile applied with $cliVersion to read the engine files it installs"
   if (-not (Test-Path -LiteralPath $insIni) -or -not (Test-Path -LiteralPath $insPay)) { throw 'the apply installed no DcsQvCull.ini / DcsQvCullPayload.dll: is the engine on in the profile?' }
-  $baseIni = [IO.File]::ReadAllText($insIni); $payFrom = if ($Payload) { [IO.Path]::GetFullPath($Payload) } else { $insPay }
+  $baseIni = [IO.File]::ReadAllText($insIni)
+  # the installed payload is gone after each scene (the runner restores stock): keep a copy of it for every scene
+  $payFrom = if ($Payload) { [IO.Path]::GetFullPath($Payload) } else { $pc = Join-Path $OutDir 'package-payload\DcsQvCullPayload.dll'; New-Item -ItemType Directory -Force (Split-Path $pc) | Out-Null; Copy-Item -LiteralPath $insPay $pc -Force; $pc }
   $res.package.iniSha256 = Sha $insIni; $res.package.payloadSha256 = Sha $payFrom
   Note "engine files: ini sha256 $($res.package.iniSha256); payload sha256 $($res.package.payloadSha256) ($($res.package.payloadFrom))"
   # 5. the scenes
@@ -339,7 +341,7 @@ try {
     if ($fl) {
       $sr.runDir = Get-RelPath $OutDir $fl.FullName
       $g = Get-SceneParts $M $fl.FullName $dev; $sr.parts = $g.parts; $sr.suiteEnded = $g.info.ended; $sr.skipped = $g.info.skipped; $sr.fpsCap = $g.info.fpsCap
-      if (-not $res.dcsVersion) { $m = [regex]::Match((Read-Shared (Join-Path $fl.FullName 'dcs.log')), 'DCS/(\d+\.\d+\.\d+\.\d+)'); if ($m.Success) { $res.dcsVersion = $m.Groups[1].Value } }
+      if (-not $res.dcsVersion) { $dv = [regex]::Match((Read-Shared (Join-Path $fl.FullName 'dcs.log')), 'DCS/(\d+\.\d+\.\d+\.\d+)'); if ($dv.Success) { $res.dcsVersion = $dv.Groups[1].Value } }   # not $m: PowerShell names ignore case, $m is $M (the matrix)
       if (-not $res.profileSha256 -and (Test-Path -LiteralPath (Join-Path $fl.FullName 'profile.json'))) {
         $pj = Get-Content -LiteralPath (Join-Path $fl.FullName 'profile.json') -Raw | ConvertFrom-Json
         foreach ($k in 'developerOptions', 'engineDevMode', 'engineDevIniPath', 'engineDevPayloadPath') { $pj.PSObject.Properties.Remove($k) }
