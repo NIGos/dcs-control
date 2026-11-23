@@ -109,6 +109,12 @@ $layerSource = Join-Path $quadRoot 'openxr-api-layer/layer.cpp'
 # Log(std::string) passes the text to vsnprintf as the format: a lone '%' there ends DCS without a trace.
 $unescapedPercent = [IO.File]::ReadAllLines($layerSource) | Where-Object { $_ -match 'Log\(fmt::format\(' -and ($_ -replace '%%', '') -match '%' }
 if ($unescapedPercent) { throw "Quad Views Log text with an unescaped '%' (write '%%'): $($unescapedPercent -join ' | ')" }
+# A thread the layer starts must hold a reference to the DLL and drop it with FreeLibraryAndExitThread (patch 0033):
+# a loader unloading the layer while it runs would otherwise leave it in freed code.
+$layerText = [IO.File]::ReadAllText($layerSource)
+$threadStarts = [regex]::Matches($layerText, '\bCreateThread\s*\(').Count
+$threadEnds = [regex]::Matches($layerText, '\bFreeLibraryAndExitThread\s*\(').Count
+if ($threadStarts -gt $threadEnds) { throw "Quad Views layer starts $threadStarts thread(s) but only $threadEnds drop a DLL reference as they end (FreeLibraryAndExitThread)." }
 if ($PatchOnly) {
     Write-Host "Quad Views sources patched in $quadRoot (-PatchOnly): nothing built."
     return
