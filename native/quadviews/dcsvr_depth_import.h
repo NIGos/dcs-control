@@ -131,7 +131,15 @@ class DepthImport {
         m_device = device;
         m_resourceDevice = resourceDevice;
     }
-    void SetRenderThread(DWORD thread) { m_thread.store(thread, std::memory_order_relaxed); }
+    // Called by the render thread once per frame (Far depth on): also the place a release that came from another thread
+    // takes effect (Release).
+    void SetRenderThread(DWORD thread) {
+        m_thread.store(thread, std::memory_order_relaxed);
+        if (m_deferred.load(std::memory_order_acquire) && thread == GetCurrentThreadId()) {
+            std::lock_guard lock(m_mutex);
+            SettleLocked();
+        }
+    }
     void SetWanted(uint32_t mask) { m_wanted.store(mask, std::memory_order_relaxed); }
     uint32_t Wanted() const { return m_wanted.load(std::memory_order_relaxed); }
 
@@ -178,6 +186,7 @@ class DepthImport {
                 return DCSVR_DEPTH_PUSH_LAYOUT;
         }
         std::lock_guard lock(m_mutex);
+        SettleLocked();
         if (!OnDevice(d->texture) || (preOverlay && !OnDevice(preOverlay)) || (postTransparent && !OnDevice(postTransparent)))
             return DCSVR_DEPTH_PUSH_FOREIGN_DEVICE;
         DepthViewLatch& latch = m_views[d->hmdView];
@@ -195,10 +204,27 @@ class DepthImport {
     }
 
     // DcsVr_QuadViewsDepthRelease: drops the held references of that generation (an opaque id, not an order).
+    // From another thread than the render thread (the engine's uninstall when the render thread did not reach a pass
+    // boundary in time) the drop waits for the render thread's next call here: Validate hands out pointers into the
+    // latches, and the render thread may be composing with them right now. Quad Views' references keep the textures
+    // alive meanwhile, also after the engine dropped its own.
     void Release(uint32_t generation) {
         std::lock_guard lock(m_mutex);
-        for (auto& v : m_views)
-            if (v.texture && v.desc.generation == generation) Drop(v);
+        const DWORD thread = m_thread.load(std::memory_order_relaxed);
+        if (thread && thread != GetCurrentThreadId()) {
+            bool known = false;
+            for (uint32_t i = 0; i < m_deferredN; ++i) known = known || m_deferredGen[i] == generation;
+            if (!known) {
+                if (m_deferredN < kDeferredMax)
+                    m_deferredGen[m_deferredN++] = generation;
+                else
+                    m_deferredAll = true;  // never more than one or two in practice
+            }
+            ++m_releasesDeferred;
+            m_deferred.store(true, std::memory_order_release);
+            return;
+        }
+        DropGeneration(generation);
     }
     // The session end.
     void ReleaseAll() {
@@ -206,6 +232,9 @@ class DepthImport {
         for (auto& v : m_views) Drop(v);
         m_lastTime = 0;
         m_last = {};
+        m_deferredN = 0;
+        m_deferredAll = false;
+        m_deferred.store(false, std::memory_order_release);
     }
 
     // Once per xrEndFrame, before any dispatch: both focus views fresh, of one engine frame and one generation,
@@ -215,6 +244,7 @@ class DepthImport {
     // same (non-zero) display time, a second projection layer, returns the same frame and consumes nothing.
     DepthFrame Validate(int64_t displayTime, float focusAspect, bool requireCoverage = false) {
         std::lock_guard lock(m_mutex);
+        SettleLocked();
         if (displayTime != 0 && displayTime == m_lastTime) return m_last;
         DepthFrame f;
         f.reject = Check(displayTime, focusAspect, requireCoverage, f);
@@ -230,6 +260,7 @@ class DepthImport {
     // own references) into out and consumes the pushes. False: the right periphery is DCS's own this frame.
     bool TakeThreeViews(DepthViewLatch out[2]) {
         std::lock_guard lock(m_mutex);
+        SettleLocked();
         const DepthViewLatch& l = m_views[0];
         const DepthViewLatch& r = m_views[1];
         const uint32_t need = DCSVR_DEPTH_VALID | DCSVR_DEPTH_REVERSE_Z | DCSVR_DEPTH_VIEWINV_VALID;
@@ -247,6 +278,7 @@ class DepthImport {
 
     uint64_t Rejects(DepthReject r) const { return m_rejects[(int)r]; }
     uint64_t Accepted() const { return m_accepted; }
+    uint64_t ReleasesDeferred() const { return m_releasesDeferred; }
     const DepthViewLatch& View(int hmdView) const { return m_views[hmdView]; }
 
   private:
@@ -261,6 +293,36 @@ class DepthImport {
         v.preOverlay.Reset();
         v.postTransparent.Reset();
         v.fresh = false;
+    }
+    // Under m_mutex. The cached frame (a second projection layer of the same display time) must not hand out a
+    // dropped latch either.
+    void DropGeneration(uint32_t generation) {
+        bool any = false;
+        for (auto& v : m_views)
+            if (v.texture && v.desc.generation == generation) {
+                Drop(v);
+                any = true;
+            }
+        if (any) {
+            m_lastTime = 0;
+            m_last = {};
+        }
+    }
+    // Under m_mutex, on the render thread: the releases that came from another thread.
+    void SettleLocked() {
+        if (!m_deferred.load(std::memory_order_relaxed)) return;
+        const DWORD thread = m_thread.load(std::memory_order_relaxed);
+        if (thread && thread != GetCurrentThreadId()) return;
+        if (m_deferredAll) {
+            for (auto& v : m_views) Drop(v);
+            m_lastTime = 0;
+            m_last = {};
+        } else {
+            for (uint32_t i = 0; i < m_deferredN; ++i) DropGeneration(m_deferredGen[i]);
+        }
+        m_deferredN = 0;
+        m_deferredAll = false;
+        m_deferred.store(false, std::memory_order_release);
     }
 
     DepthReject Check(int64_t displayTime, float focusAspect, bool requireCoverage, DepthFrame& f) const {
@@ -310,6 +372,13 @@ class DepthImport {
     int64_t m_lastTime{0};
     DepthFrame m_last{};
     uint64_t m_accepted{0};
+    // Releases from another thread, applied by the render thread (Release, SettleLocked).
+    static constexpr uint32_t kDeferredMax = 8;
+    std::atomic<bool> m_deferred{false};
+    uint32_t m_deferredGen[kDeferredMax]{};
+    uint32_t m_deferredN{0};
+    bool m_deferredAll{false};
+    uint64_t m_releasesDeferred{0};
     uint64_t m_rejects[(int)DepthReject::Count]{};
 };
 
