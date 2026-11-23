@@ -124,7 +124,7 @@ public static class ProfileValidation
         if (profile.UsesQuadFocus)
             issues.Add(new("quad-focus", IssueSeverity.Info, "DLSS 5 runs only on the focus area of Quad Views, on top of DCS's own DLSS. The periphery keeps DCS's normal image."));
         if (profile.Runtime == RuntimeKind.Pimax && profile.QuadViews == QuadProvider.QuadViewsFoveated)
-            issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views takes over from Pimax's own Quad Views for DCS. Keep Quad Views turned on in Pimax Play (the tested setup)." + (PimaxFovea.UsesPimaxPlay(profile)
+            issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views takes over from Pimax's own Quad Views for DCS. Keep Quad Views turned on in Pimax Play." + (PimaxFovea.UsesPimaxPlay(profile)
                 ? "" : " The focus area comes from this profile, not from Pimax Play's Quad View settings.")));
         if (!Enum.IsDefined(profile.FoveaSource)) Error("fovea-source", "Select Pimax Play or this profile as the focus area source.");
         if (profile.CpuBoost || profile.FreeVram)
@@ -159,7 +159,7 @@ public static class ProfileValidation
         {
             if (!Enum.IsDefined(profile.BoostDcsPriority)) Error("boost-choice", "Select a recognized DCS priority.");
             if (profile.BoostDcsPriority == BoostPriority.High)
-                issues.Add(new("boost-high-priority", IssueSeverity.Warning, "High priority lets DCS take CPU time ahead of the VR compositor, headset services, audio and input handling. When DCS saturates the CPU this can cause stutter, tracking or input lag, or audio dropouts. Above normal is recommended; use High only if you have tested it."));
+                issues.Add(new("boost-high-priority", IssueSeverity.Warning, "High priority puts DCS ahead of the headset compositor, audio and input. When DCS uses every core this can cause stutter, tracking or input lag, or audio dropouts. Above normal is recommended."));
         }
         if (profile.PupilShift && profile.PupilShiftEyeRadiusMm is < VrProfile.PupilShiftEyeRadiusMin or > VrProfile.PupilShiftEyeRadiusMax)
             Error("pupil-radius", $"Eye rotation radius must be {VrProfile.PupilShiftEyeRadiusMin}–{VrProfile.PupilShiftEyeRadiusMax} mm.");
@@ -187,7 +187,7 @@ public static class ProfileValidation
         if (profile.DepthBoost && profile.DepthBoostNearM is < VrProfile.DepthBoostNearMin or > VrProfile.DepthBoostNearMax)
             Error("depth-near", $"Depth boost's cockpit distance must be {VrProfile.DepthBoostNearMin}–{VrProfile.DepthBoostNearMax} m.");
         if (profile.DepthBoost && !profile.Desktop && !profile.UsesDepthBoost)
-            issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area, because it reads where each eye looks from it. With these settings it does not run."));
+            issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area. With these settings it does not run."));
         if (profile.FrameGenFoveated && profile.FrameGen != FrameGeneration.Off && !profile.Desktop && !profile.UsesFoveatedFrameGen)
             issues.Add(new("foveated-fg-needs", IssueSeverity.Warning, "Foveated frame generation needs NVIDIA frame generation, the Pimax or Quest 3 VD route and bundled Quad Views. Until then it does not run."));
         // Visual realism: the module clamps out-of-range values itself; the profile refuses them, like the other settings.
