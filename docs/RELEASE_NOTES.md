@@ -50,6 +50,7 @@
 - On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
 - After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because DCS Control has not been checked against that DCS version yet. Before, they stopped without a word.
 - Uninstalling also removes the setups kept for Go back.
+- **End DCS** could not end a DCS running with administrator rights and only said Windows did not allow it (GitHub #21, reported by @whitedear). It now asks Windows for permission once and ends it; if the prompt is declined, it says why. A healthy DCS with administrator rights is also no longer taken for "not responding".
 
 # 0.6.7 preview
 

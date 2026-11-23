@@ -80,6 +80,10 @@ public sealed class DcsStuckWatch : IDisposable
     public void Dispose() => _timer?.Dispose();
 }
 
+/// <summary>What ending DCS did (<see cref="DcsProcess.EndAll"/>): how many DCS.exe ended, how many Windows refused to end
+/// (access denied: a DCS with administrator rights, GitHub #21) and how many were told to end and were still there 5 s later.</summary>
+public sealed record DcsEndResult(int Ended, int Denied, int Lingering);
+
 /// <summary>The running DCS processes, in one place: every "is DCS running" check asks here.</summary>
 public static class DcsProcess
 {
@@ -95,23 +99,70 @@ public static class DcsProcess
     public static DcsHealth Health() => HealthProvider();
 
     /// <summary>Ends every DCS.exe (the user asked for it, for a DCS that is stuck) and waits a moment for them to go.
-    /// Returns how many were ended.</summary>
-    public static int EndAll()
+    /// Replaceable for tests, like <see cref="Provider"/>.</summary>
+    public static Func<DcsEndResult> Ender { get; set; } = EndProcesses;
+    public static DcsEndResult EndAll() => Ender();
+
+    private static DcsEndResult EndProcesses()
     {
-        var processes = Process.GetProcessesByName("DCS"); var ended = 0;
+        var processes = Process.GetProcessesByName("DCS"); int ended = 0, denied = 0, lingering = 0;
         try
         {
             foreach (var process in processes)
-                try { process.Kill(); if (process.WaitForExit(5000)) ended++; }
+                try { process.Kill(); if (process.WaitForExit(5000)) ended++; else lingering++; }
+                // Access denied (GitHub #21): DCS has administrator rights this app does not have (started elevated, or set
+                // to run as administrator), or it is already ending and hangs there.
+                catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == ErrorAccessDenied) { denied++; }
                 catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { }
-            return ended;
+            return new(ended, denied, lingering);
         }
         finally { foreach (var process in processes) process.Dispose(); }
     }
 
     /// <summary>Ends DCS as <see cref="EndAll"/> does, unless it looks healthy now: it was offered because it looked stuck,
     /// and a DCS that only took long to load a mission may answer again before the pilot confirms. Null: left running.</summary>
-    public static int? EndStuck() => Health() == DcsHealth.Healthy ? null : EndAll();
+    public static DcsEndResult? EndStuck() => Health() == DcsHealth.Healthy ? null : EndAll();
+
+    /// <summary>The CLI command <see cref="ElevatedEndStart"/> runs, and its exit codes.</summary>
+    public const string EndCommand = "end-dcs";
+    public const int EndedCode = 0, NotEndedCode = 1, HealthyCode = 2;
+
+    /// <summary>The elevated <c>DcsVr.Cli end-dcs</c> (one Windows prompt) for a DCS this app may not end itself
+    /// (<see cref="DcsEndResult.Denied"/>); null without the CLI. It ends DCS only if it still looks stuck from there.</summary>
+    public static ProcessStartInfo? ElevatedEndStart(string? cliDirectory = null)
+    {
+        var directory = cliDirectory ?? AppContext.BaseDirectory;
+        var cli = new[] { "DcsVr.Cli.exe", "DcsVr.Cli" }.Select(name => Path.Combine(directory, name)).FirstOrDefault(File.Exists);
+        if (cli is null) return null;
+        var start = new ProcessStartInfo(cli) { WorkingDirectory = Path.GetDirectoryName(cli)!, UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+        start.ArgumentList.Add(EndCommand);
+        return start;
+    }
+
+    /// <summary>The <see cref="EndCommand"/> command: ends a DCS that still looks stuck; the exit code says how it went.</summary>
+    public static int EndFromCommand(TextWriter output)
+    {
+        if (EndStuck() is not { } result) { output.WriteLine("DCS is responding, so it was not ended."); return HealthyCode; }
+        output.WriteLine($"DCS.exe ended: {result.Ended}, refused: {result.Denied}, still closing: {result.Lingering}.");
+        return AnyRunning() ? NotEndedCode : EndedCode;
+    }
+
+    /// <summary>What End DCS tells the pilot when DCS is still running after it. <paramref name="result"/>: this app's own
+    /// try; <paramref name="elevatedExit"/>: the exit code of the elevated try (<see cref="ElevatedEndStart"/>), null when
+    /// none ran; <paramref name="declined"/>: the Windows prompt for it was declined. Null: nothing to tell (it ended).</summary>
+    public static string? EndFailure(DcsEndResult result, bool stillRunning, int? elevatedExit = null, bool declined = false)
+    {
+        const string manual = " End DCS.exe in Task Manager's Details tab.";
+        if (elevatedExit == HealthyCode) return "DCS is responding again, so it was not ended.";
+        if (!stillRunning) return null;
+        if (declined) return "DCS runs with administrator rights, so ending it needs your permission, and the Windows prompt was declined." + manual;
+        if (elevatedExit is not null) return "Windows did not let DCS end, even with administrator rights. It may be hanging while it closes: wait a minute, or restart Windows if it stays." + manual;
+        if (result.Denied > 0) return "DCS runs with administrator rights, so Windows does not let DCS Control end it." + manual;
+        if (result.Lingering > 0) return "DCS was told to end but is still closing. Wait a minute; if it stays, end DCS.exe in Task Manager's Details tab.";
+        return "Windows did not let DCS Control end DCS." + manual;
+    }
+
+    private const int ErrorAccessDenied = 5;
 
     /// <summary>A DCS with no window at all (what ending it from Task Manager's app list can leave behind, GitHub #21),
     /// whose window does not answer Windows, or that crashed and still shows its crash window. One healthy DCS among
@@ -130,7 +181,7 @@ public static class DcsProcess
                 try
                 {
                     var window = process.MainWindowHandle;
-                    one = window == IntPtr.Zero ? DcsHealth.NoWindow : Classify(WindowClass(window), process.MainWindowTitle, process.Responding);
+                    one = window == IntPtr.Zero ? DcsHealth.NoWindow : Classify(WindowClass(window), process.MainWindowTitle, Responds(window));
                 }
                 catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { one = DcsHealth.Healthy; }
                 if (one == DcsHealth.Healthy) return DcsHealth.Healthy;
@@ -150,6 +201,19 @@ public static class DcsProcess
         : responding ? DcsHealth.Healthy : DcsHealth.NotResponding;
 
     private static readonly string[] CrashTitles = ["DCS Crash", "DCS failure"];
+
+    /// <summary>Whether DCS's window answers, asked as <see cref="Process.Responding"/> asks (WM_NULL, 5 s). A DCS with
+    /// administrator rights may refuse that message from this app (Windows' privilege isolation: access denied), which
+    /// Process.Responding takes for "not responding", so a healthy elevated DCS would be offered for ending. Then
+    /// Windows' own hung-window check, which works across that boundary, decides.</summary>
+    private static bool Responds(IntPtr window)
+    {
+        if (SendMessageTimeout(window, 0 /* WM_NULL */, IntPtr.Zero, IntPtr.Zero, 0x0002 /* SMTO_ABORTIFHUNG */, 5000, out _) != IntPtr.Zero) return true;
+        return Marshal.GetLastWin32Error() == ErrorAccessDenied && !IsHungAppWindow(window);
+    }
+
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
+    [DllImport("user32.dll")] private static extern bool IsHungAppWindow(IntPtr window);
 
     private static string? WindowClass(IntPtr window)
     {

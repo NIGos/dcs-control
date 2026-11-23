@@ -894,9 +894,24 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // The pilot asked, twice, to end a DCS that has no window or does not answer: nothing else can be
                     // launched or put back while it stays.
                     if (offline) { _offlineDcs = false; _offlineStuck = null; }
-                    // Between the offer and the second click DCS may have come back (a long mission load): then it stays.
-                    else if (DcsProcess.EndStuck() is not { } ended) throw new InvalidOperationException("DCS is responding again, so it was not ended.");
-                    else if (ended == 0 && DcsProcess.AnyRunning()) throw new InvalidOperationException("Windows did not let DCS Control end DCS. End DCS.exe in Task Manager's Details tab.");
+                    else
+                    {
+                        // Between the offer and the second click DCS may have come back (a long mission load): then it stays.
+                        // Off the window's thread: each DCS.exe gets up to 5 s to go.
+                        if (await Task.Run(DcsProcess.EndStuck) is not { } ended) throw new InvalidOperationException("DCS is responding again, so it was not ended.");
+                        int? elevatedExit = null; var declined = false;
+                        // A DCS with administrator rights (GitHub #21): ended by the CLI with them, after one Windows prompt.
+                        if (ended.Denied > 0 && DcsProcess.AnyRunning() && DcsProcess.ElevatedEndStart() is { } elevated)
+                        {
+                            _status = "Asking Windows for permission to end DCS…";
+                            (elevatedExit, declined) = await Task.Run(() =>
+                            {
+                                try { using var process = Process.Start(elevated); if (process is null) return ((int?)null, false); process.WaitForExit(); return (process.ExitCode, false); }
+                                catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1223) { return (null, true); } // the prompt was declined
+                            });
+                        }
+                        if (DcsProcess.EndFailure(ended, DcsProcess.AnyRunning(), elevatedExit, declined) is { } failure) { Invalidate(); _status = failure; throw new InvalidOperationException(failure); }
+                    }
                     Invalidate(); _status = "DCS ended."; break;
                 case "presetSave":
                     {   // These settings under a new name (or over a preset, when the page asked first); edits follow it from now on.
