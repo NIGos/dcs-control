@@ -37,6 +37,7 @@
 
 **Fixes:**
 - The engine module's GPU-bound guard took a steady CPU- or GPU-bound frame rate that happened to sit near half or a third of the refresh rate for a frame-rate cap, and held back for seconds (GitHub #27, reported by @deamonesque).
+- A step the GPU-bound guard took without a measured gain (loading, the menu, too few frames) no longer carries over into the next mission: it is undone when a mission loads, you change slot or the mission ends.
 - The engine's test suite stopped at once on a headset without quad views ("nothing to compare"). It now compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
 - AltGr+Shift+F11 now works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt, so it cannot trigger the engine module's reserved Ctrl+Alt keys (GitHub #32).
 - In the diagnostic package, a PC named after its user ("JOHN-PC") is now replaced as `<pc>` instead of `<user>-PC` (GitHub #31, reported by @Mav87th).

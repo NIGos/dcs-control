@@ -1043,6 +1043,16 @@ inline bool HeatSkipOk(int kind, int heatSeen, int composeSeen, bool allIdle) {
   if (kind != 2 && kind != 3) return false;
   return heatSeen > 0 && allIdle && heatSeen >= composeSeen + (kind == 2 ? 1 : 0);
 }
+// A mission event (main/exports.inc): the pass objects are rebuilt and new ones may reuse old addresses, so every
+// per-pass cache (labels, SSAO flag, hot-air kind) is dropped by the render thread at its next top-level pass.
+std::atomic<bool> g_cacheReset{false};
+inline void NoteMissionEvent() { g_cacheReset.store(true, std::memory_order_release); }
+inline void TakeCacheReset() {
+  if (!g_cacheReset.load(std::memory_order_relaxed) || !g_cacheReset.exchange(false, std::memory_order_acq_rel)) return;
+  g_heatKind.clear();
+  g_passLabel.clear();
+  g_passSsao.clear();
+}
 int HeatKind(void* pass, const std::string& label) {
   auto it = g_heatKind.find(pass);
   if (it != g_heatKind.end()) return it->second;
@@ -1063,10 +1073,11 @@ ptiming::ExecFn HeatIntercept(void* pass, uint64_t) {
   if (!(g_mask.load(std::memory_order_relaxed) & 2u) || g_fault.load(std::memory_order_relaxed)) return nullptr;
   ptiming::ExecFn r = nullptr;
   __try {
+    TakeCacheReset();
     int k = HeatKind(pass, LabelOf(pass));
     // The kind is cached per pass object at its first sight. An object freed and another one made at its address
     // (passes rebuilt on a mission load) would keep a copy / compose kind and not be executed: those two kinds are
-    // checked by name again, and a mismatch classes the pass afresh.
+    // checked by name again, and a mismatch classes the pass afresh (a mission event also drops every cache).
     if ((k == 2 || k == 3) && !fixdepth::PassIs(pass, k == 2 ? "HotAirCopySourcePass" : "HotAirComposePass")) {
       g_heatKind.erase(pass);
       g_passLabel.erase(pass);
@@ -1123,7 +1134,9 @@ ID3D11PixelShader* PreBody(Ctx* c, int kind, UINT count, UINT inst) {
 }
 // Before DCS's draw: census record, SSAO swap. Returns DCS's PS to restore (AddRef'd) or null.
 ID3D11PixelShader* Pre(Ctx* c, int kind, UINT count, UINT inst) {
-  if (c != g_ctx || t_inHook || g_fault.load(std::memory_order_relaxed)) return nullptr;
+  // Stopping: no swap to a variant Shutdown is about to release.
+  if (c != g_ctx || t_inHook || g_fault.load(std::memory_order_relaxed) || g_stopping.load(std::memory_order_relaxed))
+    return nullptr;
   t_inHook = true;
   ID3D11PixelShader* restore = nullptr;
   __try {
@@ -1181,6 +1194,8 @@ void* const kHooks[kDkCount] = {
     reinterpret_cast<void*>(&E_DispatchInd)};
 void Rearm(Ctx* c) {
   if (c != g_ctx || g_armDepth < 0 || !g_vt || *reinterpret_cast<void***>(c) != g_vt) return;
+  // Stopping (Shutdown restores the slots) or faulted (the pass end takes the arms out): never armed again.
+  if (g_stopping.load(std::memory_order_relaxed) || g_fault.load(std::memory_order_relaxed)) return;
   for (int k = 0; k < kDkCount; ++k) {
     if (!g_armed[k]) continue;
     void* cur = g_vt[g_slot[k]];
@@ -1250,6 +1265,11 @@ bool AnyArmed() {
     if (a) return true;
   return false;
 }
+bool ArmedAll(int k0, int k1) {
+  for (int k = k0; k < k1; ++k)
+    if (!g_armed[k]) return false;
+  return true;
+}
 
 // Census frame boundaries and read-back (render thread, at top-level pass begins).
 void CensusFrameStep(Ctx* c, uint64_t frame) {
@@ -1301,6 +1321,7 @@ void OnBoundaryBody(void* pass, bool begin, int depth) {
         CensusFrameStep(g_ctx, ptiming::g_execFrame.load(std::memory_order_relaxed));
       }
       const bool census = g_cState.load(std::memory_order_relaxed) == 2;
+      TakeCacheReset();
       const std::string& label = LabelOf(pass);
       const bool ssao = g_passSsao[pass] && g_identWanted.load(std::memory_order_relaxed) && g_ssao.build.load() == 1;
       if (census) {
@@ -1325,8 +1346,11 @@ void OnBoundaryBody(void* pass, bool begin, int depth) {
         if (census && !armed) ++g_cRefusedPasses;
         g_swapPass = ssao && armed;
         g_armDepth = armed ? 0 : -1;
-        g_heatPass = heat && armed;
-        if (heat && !armed) {
+        // A heat pass is watched only with every draw entry armed: a draw through a refused slot (another hook) would
+        // not be counted, and the frame would read idle while heat is drawn.
+        const bool allDraws = armed && ArmedAll(0, kDDisp);
+        g_heatPass = heat && allDraws;
+        if (heat && !allDraws) {
           g_heatAllIdle = false;
           g_heatUnwatched.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1353,12 +1377,27 @@ void OnBoundaryBody(void* pass, bool begin, int depth) {
   }
 }
 void OnBoundary(void* pass, bool begin, int depth) {
-  if (g_stopping.load(std::memory_order_relaxed) || g_fault.load(std::memory_order_relaxed)) return;
+  if (g_stopping.load(std::memory_order_relaxed)) return;
   if (GetCurrentThreadId() != ptiming::g_topTid.load(std::memory_order_relaxed) || !g_ctx) return;
+  if (g_fault.load(std::memory_order_relaxed)) {
+    // A fault in a draw hook (Pre) mid-pass: the arms of that pass come out at its end, as without the fault (they
+    // would otherwise stay in DCS's table for the session and every other feature's per-pass arm be refused).
+    if (!begin && depth == g_armDepth) {
+      g_armDepth = -1;
+      g_swapPass = g_heatPass = false;
+      __try {
+        Disarm();
+      } __except (EXCEPTION_EXECUTE_HANDLER) {
+      }
+    }
+    return;
+  }
   __try {
     OnBoundaryBody(pass, begin, depth);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     g_fault = true;
+    g_armDepth = -1;
+    g_swapPass = g_heatPass = false;
     if (AnyArmed()) Disarm();
   }
 }
@@ -1601,7 +1640,9 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
       g_ssao.job = nullptr;
       const int v = st == 3 ? FpVerdict(*j) : -1;
       ++g_ssao.tested;
-      j->ReleaseGpu();
+      // A stuck job (state 2) may still be read back by the render thread, which loaded it before the store above:
+      // its objects stay until Shutdown (the done list). States 3 / -1 are the render thread's last touch.
+      if (!stuck) j->ReleaseGpu();
       if (st != 3 && ++g_ssao.retries[j->dcs] < 3) {
         ++g_ssao.retried;
         Log("early shaders: fingerprint of SSAO-pass pixel shader %p %s: retried (attempt %d of 3)",
@@ -1656,12 +1697,7 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
       }
     }
   }
-  // census
-  if (wantCensus && (g_cState.load() == 0 || g_cState.load() == 4)) {
-    g_cKey = censusKey;
-    g_cState = 1;
-    Log("early shaders: census %d armed (next frame)", censusKey);
-  }
+  // census: a finished one is written (and its buffers released) before a new key arms the next
   if (g_cState.load() == 4) {
     std::string s;
     if (WriteCensus(g_cKey.load(), &s)) Log("%s", s.c_str());
@@ -1672,6 +1708,11 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
     g_classes.clear();
     g_classIdx.clear();
     g_cState = 0;
+  }
+  if (wantCensus && g_cState.load() == 0) {
+    g_cKey = censusKey;
+    g_cState = 1;
+    Log("early shaders: census %d armed (next frame)", censusKey);
   }
   static ULONGLONG lastHeat = 0;
   if ((mask & 2u) && now - lastHeat >= 60000) {
@@ -1712,7 +1753,9 @@ void Shutdown() {
   if (g_installed.exchange(false)) {
     ptiming::BoundaryFn me = &OnBoundary;
     ptiming::g_earlyBoundary.compare_exchange_strong(me, nullptr);
-    Sleep(50);  // a pass boundary already inside OnBoundary finishes
+    Sleep(50);  // a pass boundary already inside OnBoundary finishes (and a draw inside Pre: g_stopping is set)
+    g_armDepth = -1;  // Rearm stays out (it also checks g_stopping)
+    g_swapPass = g_heatPass = false;
     for (int k = 0; k < kDkCount; ++k)
       if (g_armed[k] && g_vt && g_vt[g_slot[k]] == kHooks[k]) d3ds::WriteTablePointer(&g_vt[g_slot[k]], g_orig[k]);
     for (bool& a : g_armed) a = false;

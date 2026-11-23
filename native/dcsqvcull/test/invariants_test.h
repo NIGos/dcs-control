@@ -275,6 +275,52 @@ void AllOff(const std::string& offIni) {
   Check(g_cfg.workerPlacement == 2, "invariants: all off keeps [Threads] WorkerPlacement 2 (it moves DCS Control's own threads only)");
 }
 
+// bugfix-07: the engine A/B (bench mode 11) switches the kill switch per block while the bench holds the features'
+// configuration. Early shaders' held mask was zeroed by the first OFF block's tick and every later ON block ran
+// without them. Run on the all-off ini (nothing else installs offline) with [D3D] EarlyShaders=3 only.
+void EarlyShadersUnderBench() {
+  const bool off0 = g_engineOff.load();
+  const uint32_t es0 = g_cfg.earlyShaders;
+  g_cfg.earlyShaders = 3;
+  g_engineOff = false;
+  TickEngineParts();  // no bench: the configured mask is taken
+  const uint32_t before = eshd::g_mask.load();
+  g_benchRunningFlag = true;
+  g_engineOff = true;  // an OFF block
+  TickEngineParts();
+  const uint32_t offBlock = eshd::g_mask.load();
+  g_engineOff = false;  // the next ON block
+  TickEngineParts();
+  const uint32_t onBlock = eshd::g_mask.load();
+  g_benchRunningFlag = false;
+  g_cfg.earlyShaders = es0;
+  g_engineOff = off0;
+  TickEngineParts();
+  printf("     early shaders mask: before %u, OFF block %u, ON block %u\n", before, offBlock, onBlock);
+  Check(before == 3 && offBlock == 0 && onBlock == 3,
+        "invariants: early shaders under the engine A/B: 0 in the OFF blocks, the configured mask again in the ON blocks");
+  // The kill switch takes them out at once (not at the worker's next tick).
+  eshd::g_mask = 3;
+  g_cfg.earlyShaders = 3;
+  SetEngineOff(true);
+  const uint32_t killed = eshd::g_mask.load();
+  SetEngineOff(false);
+  g_cfg.earlyShaders = es0;
+  g_engineOff = off0;
+  eshd::g_mask = 0;
+  Check(killed == 0, "invariants: the kill switch zeroes the early shaders mask in SetEngineOff");
+  // A mission event reaches the parts that keep per-scene state (exports.inc's text: OnMissionEvent is not run
+  // offline, it touches every feature).
+  const std::string ex = ReadText(SrcDir() + L"main\\exports.inc");
+  const size_t a = ex.find("void OnMissionEvent("), e = a == std::string::npos ? a : ex.find("\n}", a);
+  const std::string body = e == std::string::npos ? std::string() : ex.substr(a, e - a);
+  Check(body.find("perfmon::g_missionEvents.fetch_add") != std::string::npos &&
+            body.find("w1::g_rearms.fetch_add") != std::string::npos &&
+            body.find("eshd::NoteMissionEvent()") != std::string::npos,
+        "invariants: a mission event reverts the governor's unproven step, re-arms W1's start guard and drops early "
+        "shaders' pass caches");
+}
+
 // ---- 3. kill switch = stock ------------------------------------------------------------------------------------
 // The module-only parts the app never switches on (written on top of the all-on ini), and the second pass:
 // G-buffer batching excludes both recorders, so it gets a pass of its own.
@@ -600,6 +646,7 @@ void Run() {
   g_dir = std::wstring(tmp) + L"qv_invariants_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
   CreateDirectoryW(g_dir.c_str(), nullptr);
   AllOff(off);
+  EarlyShadersUnderBench();
   KillSwitch(on);
   RoundTrip("engine_all_off.ini", off);
   RoundTrip("engine_all_on.ini", on);

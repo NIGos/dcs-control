@@ -12,6 +12,9 @@ void ChainFastAtStart() {
   eshd::AtStart(g_cfg.suiteEarlyShaderCensus);
 }
 
+// [D3D] EarlyShaders as applied: the kill switch over the configured (or, while a bench runs, the held) mask.
+inline uint32_t EarlyShadersMask(bool engineOff, uint32_t configured) { return engineOff ? 0u : configured; }
+
 // The worker's once-a-second engine applies (kill switch, retries until DCS's modules are there; not in PerceptionOnly).
 // A function of its own so the offline invariant tests (test/invariants_test.h) can run it with the kill switch on.
 void TickEngineParts() {
@@ -59,9 +62,12 @@ void TickEngineParts() {
   // 0.7 early shaders (default 0: nothing installed): SSAO water skip, hot-air idle skip (kill switch: off), census.
   // While a benchmark / suite runs the mask is held as it was (like every other feature's Apply above), so a
   // suite measures with the configured features instead of silently without them.
+  // The held value is the configured mask; the kill switch applies on top in every tick (the engine A/B, mode 11,
+  // switches it per block: before, an OFF block's tick zeroed the held mask and every later ON block ran without).
   if (g_cfg.earlyShaders || g_cfg.suiteEarlyShaderCensus || eshd::g_installed.load()) {
-    static uint32_t esMask = 0;
-    if (!g_benchRunningFlag.load() || g_engineOff.load()) esMask = g_engineOff.load() ? 0 : g_cfg.earlyShaders;
+    static uint32_t esCfg = 0;
+    if (!g_benchRunningFlag.load()) esCfg = g_cfg.earlyShaders;
+    const uint32_t esMask = EarlyShadersMask(g_engineOff.load(), esCfg);
     eshd::Tick(esMask, g_benchRunningFlag.load() ? 0 : g_cfg.suiteEarlyShaderCensus, g_dir);
   }
   // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass

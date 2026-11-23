@@ -484,7 +484,76 @@ void HeatInterceptTests() {
   g_mask = savedMask;
 }
 
+// bugfix-07: a mission event drops the per-pass caches (pass objects are rebuilt; a new one at an old address must not
+// keep the old pass's hot-air kind, label or SSAO flag).
+void CacheResetTests() {
+  TakeCacheReset();  // an earlier suite's mission event (OnMissionEvent) may still be pending
+  int dummy = 0;
+  void* key = &dummy;
+  g_heatKind[key] = 1;
+  g_passLabel[key] = "SimplePassData:HotAirPass";
+  g_passSsao[key] = true;
+  TakeCacheReset();  // no event: kept
+  const bool kept = g_heatKind.count(key) && g_passLabel.count(key) && g_passSsao.count(key);
+  NoteMissionEvent();
+  TakeCacheReset();
+  Check(kept && g_heatKind.empty() && g_passLabel.empty() && g_passSsao.empty() && !g_cacheReset.load(),
+        "early: a mission event drops the pass caches at the render thread's next pass (none without one)");
+}
+
+// bugfix-07: on a WARP context, a HotAirPass whose draw entries are armed only in part (DrawIndexed held by another
+// hook) is not watched: a heat draw through the refused slot would not be counted and the frame would read idle.
+// And a fault inside a draw hook mid-pass: the pass end still takes the arms out.
+void ArmTests() {
+  Warp w;
+  if (!w.Make()) {
+    QvSkip("early: WARP not available: arm tests\n");
+    return;
+  }
+  ID3D11DeviceContext* const savedCtx = g_ctx;
+  ID3D11Device* const savedDev = g_dev;
+  const uint32_t savedMask = g_mask.load();
+  const DWORD savedTop = ptiming::g_topTid.load();
+  g_ctx = w.c, g_dev = w.d;
+  for (int k = 0; k < kDkCount; ++k) g_slot[k] = DcsQv_ContextSlot(kDkNames[k]);
+  void** vt = *reinterpret_cast<void***>(w.c);
+  Normalize();
+  void* const idx = vt[g_slot[kDIdx]];
+  d3ds::WriteTablePointer(&vt[g_slot[kDIdx]], reinterpret_cast<void*>(&InstallTests));  // another hook of ours
+  int passObj = 0;
+  void* pass = &passObj;
+  g_heatKind[pass] = 1;
+  g_passLabel[pass] = "SimplePassData:HotAirPass";
+  g_passSsao[pass] = false;
+  g_mask = 2;
+  HeatFrame(~0ull - 1);
+  OnBoundaryBody(pass, true, 0);
+  const bool partial = g_armed[kDDraw] && !g_armed[kDIdx];
+  const bool watched = g_heatPass, idle = g_heatAllIdle;
+  OnBoundaryBody(pass, false, 0);
+  d3ds::WriteTablePointer(&vt[g_slot[kDIdx]], idx);
+  Check(partial && !watched && !idle && !AnyArmed(),
+        "early: hot air: a pass armed only in part (DrawIndexed held by another hook) is not watched; the frame is not idle");
+  // fault mid-pass
+  ptiming::g_topTid = GetCurrentThreadId();
+  g_stopping = false;
+  const bool armed = Arm(0, kDDisp);
+  g_armDepth = armed ? 0 : -1;
+  g_fault = true;
+  OnBoundary(pass, false, 0);
+  const bool out = !AnyArmed() && vt[g_slot[kDDraw]] != kHooks[kDDraw] && g_armDepth == -1;
+  g_fault = false;
+  Check(armed && out, "early: a fault in a draw hook mid-pass: the pass end takes the arms out of DCS's table");
+  g_heatKind.erase(pass), g_passLabel.erase(pass), g_passSsao.erase(pass);
+  if (g_tiny) g_tiny->Release(), g_tiny = nullptr;
+  g_mask = savedMask;
+  ptiming::g_topTid = savedTop;
+  g_ctx = savedCtx, g_dev = savedDev;
+}
+
 void Run() {
+  CacheResetTests();
+  ArmTests();
   HeatInterceptTests();
   CensusWarpTest();
   PatchTests();
