@@ -6027,6 +6027,29 @@ Test("E2E: component settings this version writes differently are applied once a
     }
     finally { HeadsetRefresh.PimaxLogFolder = previous; }
 });
+Test("E2E: after an app update that changed only component files, Launch DCS installs this version's components once", () =>
+{
+    var f = E2e("components");
+    // The update: the same settings, new builds of the engine module and of Quad Views in the distribution.
+    void Update(string relative, byte[] bytes) { var path = Path.Combine(f.Service.DistributionRoot, "components", relative); File.WriteAllBytes(path, bytes); AtomicFile.WriteText(path + ".sha256", Hashing.FileSha256(path)); }
+    foreach (var (profile, component) in new[] { (E2eB(null), "dcsqvcull/DcsQvCullPayload.dll"),
+        (ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-qv", Name = "Quad Views only", QuadViews = QuadProvider.QuadViewsFoveated, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false }), "quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll") })
+    {
+        Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+        Require(f.Service.SyncApplied(null, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, component + ": unchanged right after the apply");
+        var source = Path.Combine(f.Service.DistributionRoot, "components", component);
+        var newer = File.ReadAllBytes(source).Concat(Encoding.ASCII.GetBytes(" (next build)")).ToArray();
+        Update(component, newer);
+        var installed = f.Service.Originals.ReadCurrent()!.Entries.Single(e => Path.GetFileName(e.Path).Equals(Path.GetFileName(component), StringComparison.OrdinalIgnoreCase)).Path;
+        f.Service.PrepareLaunchApplied(); // intact as recorded: only the distribution has a newer build
+        var updated = f.Service.SyncApplied(null, E2eInventory(f));
+        Require(updated.Kind == LaunchSyncKind.Applied && updated.Message.Contains("(this version of DCS Control installs updated components)"), component + ": " + updated.Message);
+        Require(File.ReadAllBytes(installed).AsSpan().SequenceEqual(newer), component + ": the installed file is still the earlier build");
+        Require(f.Service.SyncApplied(null, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, component + ": a second launch writes nothing");
+        Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, component + ": nor does the app's draft");
+    }
+    Require(f.Service.RestoreOriginals().Complete);
+});
 Test("E2E: the CLI's apply, launch-check and restore write exactly what the app writes", () =>
 {
     // The CLI built with this test run (DcsVr.Tests.csproj references it), never an older build lying around.

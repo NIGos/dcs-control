@@ -471,7 +471,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                      && inventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable")?.Trim() == "true") reason = "DCS's custom IPD was changed in DCS";
             // Before the frame limit: a new default (Frame generation only when needed) also changes the Match refresh
             // limit, and that is not the headset's doing. The component settings never depend on the refresh rate.
-            else if (WritersChanged(draft, inventory, applied.Journal, out planned)) reason = "this version of DCS Control writes updated settings";
+            else if (WritersChanged(draft, inventory, applied.Journal, out planned, out var writers)) reason = writers;
             else if (FrameCapChanged(draft, applied.Journal, inventory)) reason = "the headset's refresh rate changed";
             else
             {
@@ -786,11 +786,14 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// (new journal fields would make 0.5.10 refuse baseline.json, and Back to stock DCS after a downgrade must work).
     /// The writers hold no timestamps and their machine-specific content (the DCS folder, the CPU count) is the same at
     /// every launch, so the re-apply happens once: it records the new hashes. <paramref name="plan"/> is the plan when
-    /// it differs, for that re-apply.
+    /// it differs, for that re-apply. The same holds for the component files the draft copies into place (.dll, and the
+    /// engine hook .lua): after an app update that changed only those (a fixed OFXR, Quad Views or engine module build
+    /// with the same settings), the earlier version's files would otherwise stay in use until a setting changed.
+    /// <paramref name="reason"/> says which of the two it was.
     /// </summary>
-    private bool WritersChanged(VrProfile draft, InventorySnapshot inventory, TransactionJournal journal, out ApplyPlan? plan)
+    private bool WritersChanged(VrProfile draft, InventorySnapshot inventory, TransactionJournal journal, out ApplyPlan? plan, out string? reason)
     {
-        plan = null;
+        plan = null; reason = null;
         ApplyPlan next;
         try { next = Preview(draft, inventory); }
         // A plan that cannot be built now (a component missing) is not this check's to report: the intact applied profile
@@ -804,7 +807,18 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             if (wanted is null || installed is null || Hashing.BytesSha256(wanted.Content) != installed.InstalledSha256
                 || !Path.GetFullPath(wanted.Path).Equals(Path.GetFullPath(installed.Path), StringComparison.OrdinalIgnoreCase))
             {
-                plan = next;
+                plan = next; reason = "this version of DCS Control writes updated settings";
+                return true;
+            }
+        }
+        // Copied components, compared by path with what the record says was installed there.
+        foreach (var wanted in next.Files.Where(f => !f.Delete && f.LuaChanges is null && f.IniValues is null
+            && (Path.GetExtension(f.Path).Equals(".dll", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(f.Path).Equals(".lua", StringComparison.OrdinalIgnoreCase))))
+        {
+            var installed = journal.Entries.FirstOrDefault(e => Path.GetFullPath(e.Path).Equals(Path.GetFullPath(wanted.Path), StringComparison.OrdinalIgnoreCase));
+            if (installed is null || Hashing.BytesSha256(wanted.Content) != installed.InstalledSha256)
+            {
+                plan = next; reason = "this version of DCS Control installs updated components";
                 return true;
             }
         }
