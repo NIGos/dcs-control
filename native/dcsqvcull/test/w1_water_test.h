@@ -490,18 +490,18 @@ void Device() {
     r.flushInM = true;
     Frame();
     r.flushInM = false;
-    const bool lost = w1::g_cUpdLost.load() > lost0 && w1::g_gate.stock;
+    const bool lost = w1::g_cUpdLost.load() > lost0 && w1::g_gate.warm > 0 && !w1::g_gate.stock;
     Frame();
     float m2[4] = {};
     const bool rb = ReadBuffer(r.cbM, m2);
     const float want2 = (r.tag & 0xff) / 255.0f;
-    printf("     W1 flush in M: %llu blocks lost their upload hook; cbM after a stock frame %.4f (want %.4f)\n",
+    printf("     W1 flush in M: %llu blocks lost their upload hook; cbM after a guarded frame %.4f (want %.4f)\n",
            static_cast<unsigned long long>(w1::g_cUpdLost.load() - lost0), m2[1], want2);
     Check(testing && lost && rb && fabsf(m2[1] - want2) < 1e-6f && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff) &&
               tableStock(),
-          "W1 device: a Flush inside a tested view's mask pass: the lost upload hook is counted, the views run stock "
+          "W1 device: a Flush inside a tested view's mask pass: the lost upload hook is counted, the start guard runs "
           "(mask drawn, the buffer holds DCS's last upload), the table is stock after the block");
-    for (int i = 0; i < 92; ++i) Frame();  // 90 dry frames: tested again for the verify part
+    for (int i = 0; i < 4; ++i) Frame();  // the guard ends: tested again for the verify part
   }
 
   // 6. Verify: nothing skipped, the test and the real passes counted; M's target found for the mode-1 view.
@@ -523,56 +523,75 @@ void Device() {
   auto untilTested = [&] {
     for (int i = 0; i < 120 && (w1::g_gate.stock || w1::g_gate.warm > 0 || w1::g_gate.forced); ++i) Frame();
   };
-  r.waterDepth = 0.3f;
-  w1::g_probeEvery = 4;
-  w1::g_mode = 3;
-  Frame();
-  untilTested();
-  const uint32_t mask8 = MaskTag(ReadTexel(r.mask));
-  const uint64_t sk8 = Sum(w1::g_cSkipped), te8 = Sum(w1::g_cTested), kept8 = Sum(w1::g_cKept);
-  for (int i = 0; i < 8; ++i) Frame();
-  const uint64_t skipped8 = Sum(w1::g_cSkipped) - sk8, probes8 = Sum(w1::g_cTested) - te8;
-  const bool m3dry = MaskTag(ReadTexel(r.mask)) == mask8 && mask8 != (r.tag & 0xffff) && skipped8 >= 21 &&
-                     skipped8 <= 24 && probes8 >= 7 && probes8 <= 12 && Sum(w1::g_cKept) == kept8 && !w1::g_gate.stock &&
-                     tableStock();
-  if (!m3dry)
-    printf("     no-submit dry: mask %x (was %x, tag %x), skipped %llu, probes %llu, kept +%llu, stock %d\n",
-           MaskTag(ReadTexel(r.mask)), mask8, r.tag, (unsigned long long)skipped8, (unsigned long long)probes8,
-           (unsigned long long)(Sum(w1::g_cKept) - kept8), w1::g_gate.stock ? 1 : 0);
-  r.waterDepth = 0.7f;
-  Frame();
-  const uint32_t ds8a = ReadTexel(r.ds), mask8a = MaskTag(ReadTexel(r.mask));
-  Frame();
-  const uint32_t ds8b = ReadTexel(r.ds);
-  const bool m3wet = ((ds8a >> 24) & 0x38) == 0 && mask8a == mask8 && w1::g_gate.stock &&
-                     ((ds8b >> 24) & 0x38) == 0x10 && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff);
+  // A runtime table switch inside a block (w1::g_cUpdLost: the start guard runs, about once in ten runs on this rig
+  // without any Flush) changes what a window draws: such a window is measured again (at most 3 attempts).
+  bool m3dry = false, m3wet = false;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    r.waterDepth = 0.3f;
+    w1::g_probeEvery = 4;
+    w1::g_mode = 3;
+    Frame();
+    untilTested();
+    const uint64_t lost8 = w1::g_cUpdLost.load();
+    const uint32_t mask8 = MaskTag(ReadTexel(r.mask));
+    const uint64_t sk8 = Sum(w1::g_cSkipped), te8 = Sum(w1::g_cTested), kept8 = Sum(w1::g_cKept);
+    for (int i = 0; i < 8; ++i) Frame();
+    const uint64_t skipped8 = Sum(w1::g_cSkipped) - sk8, probes8 = Sum(w1::g_cTested) - te8;
+    m3dry = MaskTag(ReadTexel(r.mask)) == mask8 && mask8 != (r.tag & 0xffff) && skipped8 >= 21 && skipped8 <= 24 &&
+            probes8 >= 7 && probes8 <= 12 && Sum(w1::g_cKept) == kept8 && !w1::g_gate.stock && tableStock();
+    if (!m3dry)
+      printf("     no-submit dry: mask %x (was %x, tag %x), skipped %llu, probes %llu, kept +%llu, stock %d, upload hook "
+             "lost +%llu\n",
+             MaskTag(ReadTexel(r.mask)), mask8, r.tag, (unsigned long long)skipped8, (unsigned long long)probes8,
+             (unsigned long long)(Sum(w1::g_cKept) - kept8), w1::g_gate.stock ? 1 : 0,
+             (unsigned long long)(w1::g_cUpdLost.load() - lost8));
+    r.waterDepth = 0.7f;
+    Frame();
+    const uint32_t ds8a = ReadTexel(r.ds), mask8a = MaskTag(ReadTexel(r.mask));
+    Frame();
+    const uint32_t ds8b = ReadTexel(r.ds);
+    m3wet = ((ds8a >> 24) & 0x38) == 0 && mask8a == mask8 && w1::g_gate.stock && ((ds8b >> 24) & 0x38) == 0x10 &&
+            MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff);
+    if (w1::g_cUpdLost.load() == lost8) break;
+    printf("     no-submit: a runtime table switch inside a block during the window: measured again\n");
+  }
   Check(m3dry, "W1 device no-submit: hidden water: after the 3 guard frames each frame probes one view and does not "
                "submit the other three; the mask pass is never drawn");
   Check(m3wet, "W1 device no-submit: water appears: that frame is drawn without it (the guard is temporal), the next "
                "frame (read back) draws mask and water in every view");
 
   // 9. Verify of no-submit (mode 4): the stock picture; the frame water appears in is counted as mode 3's error.
-  r.waterDepth = 0.3f;
-  w1::g_mode = 4;
-  Frame();
-  untilTested();
-  for (int i = 0; i < 8; ++i) Frame();
-  const uint64_t wS0 = Sum(w1::g_cWrongSkip), wP0 = Sum(w1::g_cWrongProbe), bf0 = w1::g_cBadFrames.load(),
-                 ep0 = w1::g_cBadEpisodes.load();
-  const bool v9dry = wS0 == 0 && wP0 == 0 && bf0 == 0 && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff) &&
-                     !w1::g_gate.stock && Sum(w1::g_cSkipped) > 0;
-  r.waterDepth = 0.7f;
-  Frame();
-  const bool drawn9 = ((ReadTexel(r.ds) >> 24) & 0x38) == 0x10;
-  for (int i = 0; i < 3; ++i) Frame();
-  const uint64_t wS = Sum(w1::g_cWrongSkip), wP = Sum(w1::g_cWrongProbe);
-  if (!(v9dry && drawn9 && wS == 3 && wP == 1))
-    printf("     no-submit verify: dry ok %d, drawn %d, wrong skipped %llu probed %llu, bad frames %llu longest %llu, "
-           "stock %d\n", v9dry ? 1 : 0, drawn9 ? 1 : 0, (unsigned long long)wS, (unsigned long long)wP,
-           (unsigned long long)w1::g_cBadFrames.load(), (unsigned long long)w1::g_cBadLongest.load(),
-           w1::g_gate.stock ? 1 : 0);
-  Check(v9dry && drawn9 && wS == 3 && wP == 1 && w1::g_cBadFrames.load() == 1 && w1::g_cBadEpisodes.load() == ep0 + 1 &&
-            w1::g_cBadLongest.load() == 1 && w1::g_gate.stock,
+  bool v9 = false;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    r.waterDepth = 0.3f;
+    w1::g_mode = 4;
+    Frame();
+    untilTested();
+    const uint64_t lost9 = w1::g_cUpdLost.load();
+    const bool tested9 = !w1::g_gate.stock;
+    const uint64_t wSb = Sum(w1::g_cWrongSkip), wPb = Sum(w1::g_cWrongProbe), bfb = w1::g_cBadFrames.load();
+    for (int i = 0; i < 8; ++i) Frame();
+    const uint64_t wS0 = Sum(w1::g_cWrongSkip), wP0 = Sum(w1::g_cWrongProbe), bf0 = w1::g_cBadFrames.load(),
+                   ep0 = w1::g_cBadEpisodes.load();
+    const bool v9dry = wS0 == wSb && wP0 == wPb && bf0 == bfb && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff) &&
+                       !w1::g_gate.stock && Sum(w1::g_cSkipped) > 0;
+    r.waterDepth = 0.7f;
+    Frame();
+    const bool drawn9 = ((ReadTexel(r.ds) >> 24) & 0x38) == 0x10;
+    for (int i = 0; i < 3; ++i) Frame();
+    const uint64_t wS = Sum(w1::g_cWrongSkip) - wS0, wP = Sum(w1::g_cWrongProbe) - wP0;
+    v9 = v9dry && drawn9 && wS == 3 && wP == 1 && w1::g_cBadFrames.load() == bf0 + 1 &&
+         w1::g_cBadEpisodes.load() == ep0 + 1 && w1::g_cBadLongest.load() == 1 && w1::g_gate.stock;
+    if (!v9)
+      printf("     no-submit verify: dry ok %d, drawn %d, wrong skipped %llu probed %llu, bad frames %llu longest %llu, "
+             "stock %d (tested after the wait %d, upload hook lost +%llu)\n", v9dry ? 1 : 0, drawn9 ? 1 : 0,
+             (unsigned long long)wS, (unsigned long long)wP, (unsigned long long)w1::g_cBadFrames.load(),
+             (unsigned long long)w1::g_cBadLongest.load(), w1::g_gate.stock ? 1 : 0, tested9 ? 1 : 0,
+             (unsigned long long)(w1::g_cUpdLost.load() - lost9));
+    if (w1::g_cUpdLost.load() == lost9) break;
+    printf("     no-submit verify: a runtime table switch inside a block during the window: measured again\n");
+  }
+  Check(v9,
         "W1 device no-submit verify: everything drawn; dry frames count nothing; the frame water appears in counts "
         "3 skipped and 1 probed view as mode 3's error (1 frame, 1 episode), then every view is stock");
 

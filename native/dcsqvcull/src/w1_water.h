@@ -335,9 +335,10 @@ int g_slotDss = -1, g_slotBs = -1, g_slotUpd = -1;
 bool g_updOurs = false;                   // H_Upd holds the UpdateSubresource slot (a predicated block, render thread)
 // bugfix-07: blocks whose upload hook was gone at their end. A Flush (also GetData, ExecuteCommandList or a waiting
 // Map) inside the block makes d3d11 switch its table to its "after flush" entries at once (offline: a Flush in the
-// mask pass); the block's later uploads then went out predicated and unrecorded (dropped under a FALSE predicate,
-// never replayed). Such a block cannot be repaired afterwards: the gate turns stock (every view drawn, nothing
-// predicated) until 90 dry frames, so it cannot repeat every frame, and the first one is logged.
+// mask pass; the offline rig also sees it about once in ten runs without any Flush, from the runtime itself); the
+// block's later uploads then went out predicated and unrecorded (dropped under a FALSE predicate, never replayed).
+// Such a block cannot be repaired afterwards: the start guard runs (this frame's later views and the next 3 frames
+// drawn unpredicated, as after a camera cut), the first one is logged and every one counted.
 std::atomic<uint64_t> g_cUpdLost{0};
 void* volatile g_origDss = nullptr;
 void* volatile g_origBs = nullptr;
@@ -460,11 +461,13 @@ void EndUnpred() {
     void** vt = *reinterpret_cast<void***>(g_ctx);
     if (vt[g_slotUpd] == reinterpret_cast<void*>(&H_Upd)) {
       d3ds::WriteTablePointer(&vt[g_slotUpd], g_origUpd);
-    } else {  // lost inside the block (g_cUpdLost above): stock until 90 dry frames
+    } else {  // lost inside the block (g_cUpdLost above): the start guard (this frame's later views and 3 frames)
       if (g_cUpdLost.fetch_add(1, std::memory_order_relaxed) == 0)
         Log("water skip: d3d11 switched its context table inside a predicated block (a Flush or a read-back in DCS's "
-            "water passes): its later uploads were not kept; views run stock until 90 frames without water");
-      g_gate.stock = true, g_gate.dry = 0;
+            "water passes, or the runtime's own submit): its later uploads were not kept; the start guard runs "
+            "(views drawn for 3 frames); counted in the water skip line");
+      g_gate.Arm();
+      g_gate.forced = true;
     }
     g_updOurs = false;
   }
@@ -971,10 +974,10 @@ void LogCounters() {
                   u(g_cKept[v]), u(g_cForced[v]), u(g_cStock[v]));
   Log("%s; forced: unknown draw %llu, hook taken %llu, pass order %llu, start %llu; start guard armed %llu (cut or "
       "pause); switches to stock %llu (water seen), to test %llu (%d dry frames); verify: real water while the test "
-      "saw none, rivers %llu/%llu/%llu/%llu, sea %llu/%llu/%llu/%llu",
+      "saw none, rivers %llu/%llu/%llu/%llu, sea %llu/%llu/%llu/%llu; upload hook lost in a block %llu",
       t, u(g_cReasons[kRsUnknownDraw]), u(g_cReasons[kRsHookTaken]), u(g_cReasons[kRsPassOrder]), u(g_cReasons[kRsStart]),
       u(g_cArms), u(g_cSwitchStock), u(g_cSwitchTest), kDryFrames, u(g_cViolR[0]), u(g_cViolR[1]), u(g_cViolR[2]),
-      u(g_cViolR[3]), u(g_cViolS[0]), u(g_cViolS[1]), u(g_cViolS[2]), u(g_cViolS[3]));
+      u(g_cViolR[3]), u(g_cViolS[0]), u(g_cViolS[1]), u(g_cViolS[2]), u(g_cViolS[3]), u(g_cUpdLost));
   if (g_mode.load() == 4)
     Log("water skip: no-submit verify (probe every %d): view-frames with real water mode 3 would not draw: skipped "
         "%llu/%llu/%llu/%llu, probed %llu/%llu/%llu/%llu; frames with any: %llu in %llu episodes, longest %llu frames",
