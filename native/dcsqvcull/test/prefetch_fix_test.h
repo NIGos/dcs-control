@@ -223,6 +223,33 @@ void Modes(void** imp, void* impKernel) {
   Check(pffix::t_skipRun == 300 - 256, "prefetch skip: spin guard yields after 256 back-to-back skips");
   ProbeStored(g_buffer + 12288, 4096);  // a pass-through ends the run
   Check(pffix::t_skipRun == 0, "prefetch skip: a pass-through resets the spin guard");
+  // [Prefetch] SpinCap: counted over skips with pass-throughs in between (the back-to-back guard never fires there);
+  // the thread sleeps once per cap within 10 ms, never on g_noSleepTid; 0 = off.
+  {
+    const uint64_t sl0 = pffix::g_capSleeps.load();
+    pffix::g_spinCap = 64;
+    pffix::t_capSkips = 0;
+    const uint64_t sk0 = Skipped();
+    int fresh = 0;
+    for (int i = 0; i < 200; ++i) {
+      ProbeStored(g_buffer + 8192, 4096);  // a repeat: skipped
+      if (i % 20 == 19) ProbeStored(g_buffer + 65536 + 4096 * ++fresh, 4096);  // a new range: passes, ends a run
+    }
+    const uint64_t skips = Skipped() - sk0, slept = pffix::g_capSleeps.load() - sl0;
+    // A 15.6 ms tick boundary inside a 64-skip run lets that one run pass without a sleep.
+    Check(skips == 200 && pffix::t_skipRun < 20 && slept >= 1 && slept <= skips / 64,
+          "prefetch spin cap: a 1 ms sleep per 64 skips although a new range passes every 20 calls");
+    pffix::g_noSleepTid = GetCurrentThreadId();
+    const uint64_t sl1 = pffix::g_capSleeps.load();
+    for (int i = 0; i < 200; ++i) ProbeStored(g_buffer + 8192, 4096);
+    Check(pffix::g_capSleeps.load() == sl1, "prefetch spin cap: never sleeps on the render thread");
+    pffix::g_noSleepTid = 0;
+    pffix::g_spinCap = 0;
+    const uint64_t sl2 = pffix::g_capSleeps.load();
+    for (int i = 0; i < 200; ++i) ProbeStored(g_buffer + 8192, 4096);
+    Check(pffix::g_capSleeps.load() == sl2, "prefetch spin cap: off at 0");
+    pffix::t_capSkips = 0;
+  }
   pffix::Apply(pffix::kSkip, 1000);
 }
 

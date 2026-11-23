@@ -157,6 +157,32 @@ bool SetTableBits(unsigned bits) {
 thread_local uint32_t t_skipRun = 0;
 thread_local uint64_t t_spinStart = 0;
 
+// [Prefetch] SpinCap (default 0 = off: only the back-to-back guard above). The back-to-back guard never fires when a
+// new range passes every few calls: 2026-11-23, stock Germany low level, about 4.5 % of the calls pass, so a run ends
+// every ~22 calls. DCS's callers then loop about 6x faster with skip than with every call in the kernel (derived from
+// the mixed A/B: ~7.6 M calls/s in skip blocks, ~1.2 M/s in observe blocks), and the render thread read +1.30 ms per
+// frame (bench 33, observe -> skip). With a cap N, a thread that skipped N calls within kSpinWindowMs (pass-throughs
+// in between do not reset it) sleeps 1 ms, so it skips at most about N per ms. Never on g_noSleepTid (the render
+// thread, when known): a hint is never worth a stall there.
+std::atomic<uint32_t> g_spinCap{0};
+std::atomic<DWORD> g_noSleepTid{0};
+std::atomic<uint64_t> g_capSleeps{0};
+thread_local uint32_t t_capSkips = 0;
+thread_local uint64_t t_capStart = 0;
+// One skip under the cap (pure but for Sleep): true when this call slept.
+inline bool CapSkip(uint64_t now, uint32_t cap) {
+  if (!cap) return false;
+  if (t_capSkips == 0) t_capStart = now;
+  if (++t_capSkips < cap) return false;
+  const bool slept = now - t_capStart < kSpinWindowMs && GetCurrentThreadId() != g_noSleepTid.load(std::memory_order_relaxed);
+  if (slept) {
+    g_capSleeps.fetch_add(1, std::memory_order_relaxed);
+    Sleep(1);
+  }
+  t_capSkips = 0;
+  return slept;
+}
+
 inline bool SeenRecently(ULONG_PTR address, ULONG_PTR count, ULONG_PTR bytes, uint64_t now, uint32_t window) {
   uint64_t h = address * 0x9E3779B97F4A7C15ull ^ count * 0xC2B2AE3D27D4EB4Full ^ bytes * 0x165667B19E3779F9ull;
   h ^= h >> 31;
@@ -186,8 +212,9 @@ BOOL WINAPI Replacement(HANDLE process, ULONG_PTR count, PWIN32_MEMORY_RANGE_ENT
       // A caller spinning on these calls would turn a dropped prefetch into a
       // user-mode spin: yield one tick, only for back-to-back skips.
       if (t_skipRun++ == 0) t_spinStart = now;
+      bool slept = CapSkip(now, g_spinCap.load(std::memory_order_relaxed));
       if (t_skipRun >= kSpinSkips) {
-        if (now - t_spinStart < kSpinWindowMs) Sleep(1);
+        if (!slept && now - t_spinStart < kSpinWindowMs) Sleep(1);
         t_skipRun = 0;
       }
       s.exits.fetch_add(1, std::memory_order_release);
@@ -928,6 +955,12 @@ void Tick() {
     char line[256];
     FormatStats(line, sizeof(line), calls - g_logCalls0, skipped - g_logSkipped0, (now - g_lastLogMs) / 1000.0);
     LogFileLine(line);
+    static uint64_t sleeps0 = 0;  // SpinCap: its sleeps in the module log (the prefetch log's format is parsed)
+    const uint64_t sleeps = g_capSleeps.load(std::memory_order_relaxed);
+    if (g_spinCap.load(std::memory_order_relaxed) && sleeps != sleeps0)
+      Log("prefetch: spin cap %u: %.0f sleeps/s, %s", g_spinCap.load(), (sleeps - sleeps0) / ((now - g_lastLogMs) / 1000.0),
+          line);
+    sleeps0 = sleeps;
     g_logCalls0 = calls;
     g_logSkipped0 = skipped;
     g_lastLogMs = now;

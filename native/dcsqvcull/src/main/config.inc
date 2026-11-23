@@ -208,6 +208,7 @@ struct Config {
   uint32_t prefetchWindowMs = 5000;        // [Prefetch] WindowMs: repeat window (1-60000; R107: default as shipped)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
   int prefetchTableBits = 20;              // [Prefetch] TableBits: repeat table 2^n entries (16-22, default 20; R39)
+  int prefetchSpinCap = 0;                 // [Prefetch] SpinCap: skips per thread before a 1 ms sleep (0 off, 64-100000)
   // Measurement kit (measure_kit.h, LIVE_MEASUREMENT_PLAN.md; all measure-only, default off):
   bool benchPassMs = false;                // [Bench] PassMs: render-thread pass ms and G-buffer pass ms per A/B block
   int suitePassTimelineSec = 0;            // [Suite] PassTimelineSec: per-frame per-pass CPU timeline + collect timeline

@@ -9,6 +9,15 @@ void ApplyR90Config() {
 // slot restored to the real function; observe = installed, pass-through.
 void ApplyPrefetch() {
   pffix::Apply(g_engineOff.load() ? pffix::kOff : g_cfg.prefetchMode, g_cfg.prefetchWindowMs);
+  // [Prefetch] SpinCap (default 0): skipped calls per thread before a 1 ms sleep (prefetch_fix.h CapSkip).
+  const uint32_t cap = static_cast<uint32_t>(g_cfg.prefetchSpinCap);
+  if (pffix::g_spinCap.exchange(cap) != cap) {
+    if (cap)
+      Log("prefetch: spin cap %u: a thread that skipped %u calls within 10 ms sleeps 1 ms (never the render thread)", cap,
+          cap);
+    else
+      Log("prefetch: spin cap off: only 256 back-to-back skips yield");
+  }
   // R39 [Prefetch] TableBits: the repeat table's size (16 = the original 2^16 table).
   const unsigned bits = static_cast<unsigned>(g_cfg.prefetchTableBits);
   if (pffix::TableBits() != bits) {
