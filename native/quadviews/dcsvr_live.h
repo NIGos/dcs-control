@@ -54,6 +54,8 @@ namespace dcsvr::live {
 //   dcsvr_far_depth_preset, dcsvr_far_depth_world_ipd, dcsvr_far_depth_z0_m, dcsvr_far_depth_gamma
 //                              m_dcsvrFarDepth's curve (preset, world IPD, near guard, Z0, gamma)
 //   dcsvr_far_depth_toggle     m_dcsvrFarKeyVk, m_dcsvrFarKeyMods
+//   dcsvr_two_layers_opaque_ramp m_dcsvrOpaqueRamp      opaque focus: the alpha ramp's width in the focus radius, 0: no
+//                              blending (0034; read by the focus pass and the submission of every frame)
 inline constexpr const char* Keys[] = {"sharpen_focus_view",      "smoothen_focus_view_edges", "dcsvr_sharpen_taper",
                                        "dcsvr_periphery_sharpen", "dcsvr_temporal",            "dcsvr_temporal_tau_ms",
                                        "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip",       "dcsvr_saccade_widening",
@@ -61,7 +63,7 @@ inline constexpr const char* Keys[] = {"sharpen_focus_view",      "smoothen_focu
                                        "dcsvr_saccade_hold_ms",   "dcsvr_saccade_end_speed",   "dcsvr_saccade_tail",
                                        "dcsvr_gaze_deadzone",     "dcsvr_lost_ease_ms",        "dcsvr_far_depth_preset",
                                        "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m",    "dcsvr_far_depth_gamma",
-                                       "dcsvr_far_depth_toggle"};
+                                       "dcsvr_far_depth_toggle",  "dcsvr_two_layers_opaque_ramp"};
 
 inline bool IsLiveKey(const std::string& name) {
     for (const char* key : Keys) {
@@ -92,7 +94,22 @@ struct Values {
     // Far depth's in-flight key, virtual-key and modifiers (1 Ctrl, 2 Alt, 4 Shift); 0: none.
     int farKeyVk{0};
     int farKeyMods{0};
+    // Opaque focus's alpha ramp (0034): the width in the focus radius, 0 none (alpha 1, no blending).
+    float opaqueRamp{0.4f};
 };
+
+// dcsvr_two_layers_opaque_ramp's clamp: 0 or less is 0 (no ramp, no blending); otherwise 0.02 to 0.95 of the radius.
+inline float OpaqueRamp(float value) {
+    return value <= 0.f ? 0.f : std::clamp(value, 0.02f, 0.95f);
+}
+
+// The ramp as the log names it.
+inline std::string OpaqueRampText(float ramp) {
+    if (ramp <= 0.f) return "none (alpha 1, not blended)";
+    char text[64];
+    std::snprintf(text, sizeof(text), "over the outer %.2f of the radius", ramp);
+    return text;
+}
 
 inline bool SameGaze(const dcsvr::GazeSettings& a, const dcsvr::GazeSettings& b) {
     return a.widening == b.widening && a.speed == b.speed && a.leadMs == b.leadMs && a.maxExtend == b.maxExtend &&
@@ -109,7 +126,7 @@ inline bool operator==(const Values& a, const Values& b) {
     return a.sharpen == b.sharpen && a.smoothing == b.smoothing && a.taper == b.taper &&
            a.peripherySharpen == b.peripherySharpen && a.temporal == b.temporal && a.tauMs == b.tauMs &&
            a.rampDeg == b.rampDeg && a.clip == b.clip && SameGaze(a.gaze, b.gaze) && SameFarCurve(a, b) &&
-           a.farKeyVk == b.farKeyVk && a.farKeyMods == b.farKeyMods;
+           a.farKeyVk == b.farKeyVk && a.farKeyMods == b.farKeyMods && a.opaqueRamp == b.opaqueRamp;
 }
 
 // Far depth's curve for a parse's values (dcsvr_depthwarp.h DisparitySettings, any struct with these members and
@@ -249,6 +266,9 @@ inline bool ApplyKey(const std::string& name, const std::string& value, Values& 
         } else if (ToInt(value.substr(colon + 1), mods)) {
             io.farKeyMods = std::clamp(mods, 0, 7);
         }
+    } else if (name == "dcsvr_two_layers_opaque_ramp") {
+        if (!ToFloat(value, f)) return false;
+        io.opaqueRamp = OpaqueRamp(f);
     } else {
         return false;
     }
@@ -375,6 +395,7 @@ inline std::string Changes(const Values& before, const Values& after) {
     add("dcsvr_far_depth_gamma", before.farGamma, after.farGamma, "%.2f");
     add("dcsvr_far_depth_toggle", before.farKeyVk * 8 + before.farKeyMods, after.farKeyVk * 8 + after.farKeyMods,
         "%.0f");
+    add("dcsvr_two_layers_opaque_ramp", before.opaqueRamp, after.opaqueRamp, "%.2f");
     return out;
 }
 

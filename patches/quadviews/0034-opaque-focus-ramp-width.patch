@@ -1,0 +1,74 @@
+Opaque focus ramp width (dcsvr_two_layers_alpha=3, after 0031; native/quadviews/dcsvr_twolayer_ps.hlsl, dcsvr_live.h): the
+user's flight of 2026-11-23 showed the flicker of the focus rectangle again in the right eye ("solid at the edges, fading
+toward the centre"), the one 0024 (alpha 1, no blending) had removed. At edge blend 0.2 0031's ramp is the composition's
+own band, so the focus layer stores the focus colour with the composition's fade as alpha: mode 0 (Standard) in all but
+the corners, and whatever the runtime shows of its periphery layer under the focus on some frames shows again, weighted
+by 1 - alpha. New key dcsvr_two_layers_opaque_ramp (live, settings.cfg): the ramp's width in the focus radius, taken as
+set (no longer widened to the composition's band), default 0.4 (0031 unchanged at edge blend up to 0.2); 0: alpha 1 over
+the whole rectangle and the layer submitted without blend flags (0024, live too). The width reaches the focus pass as
+dcsvrEdge.w = 1 + width. Start-up log line "DCSVR two layers: opaque focus alpha ramp ...", reload line names the change.
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index ae5f4d4..c9bebbf 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1979,6 +1979,12 @@ namespace openxr_api_layer {
+                                     // blends with green's alpha, so a steep alpha (no blending, or 0025's thin rim) drew a
+                                     // red/blue line along the layer's edges (dcsvr_twolayer_ps.hlsl).
+                                     projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
++                                    // 0034: dcsvr_two_layers_opaque_ramp 0, no blending at all (0024's submission: the
++                                    // focus pass wrote alpha 1 over the whole rectangle), live like the ramp's width.
++                                    if (m_dcsvrOpaqueRamp <= 0.f) {
++                                        projectionAllocator.back().layerFlags &= ~(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
++                                                                                   XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
++                                    }
+                                 }
+                                 projectionAllocator.back().views = projectionViewAllocator.back().data();
+                                 projectionAllocator.back().viewCount = xr::StereoView::Count;
+@@ -4388,7 +4394,8 @@ namespace openxr_api_layer {
+                         focus.dcsvrBand[3] = (eyeUp - focusUp) / (eyeUp - eyeDown);
+                     }
+                     focus.dcsvrEdge[2] = 0.f;
+-                    focus.dcsvrEdge[3] = 1.f;
++                    // 0034: w = 1 + the alpha ramp's width (dcsvr_two_layers_opaque_ramp; 1 alone: alpha 1, no blending).
++                    focus.dcsvrEdge[3] = 1.f + m_dcsvrOpaqueRamp;
+                     focus.dcsvrDebug[0] = m_debugFocusView ? 1.f : 0.f;
+                 }
+                 // Sharpened: outside the rounded shape the sharpening skips tiles, the plain image fills them.
+@@ -4729,6 +4736,7 @@ namespace openxr_api_layer {
+             values.tauMs = m_dcsvrTemporal.tauMs;
+             values.rampDeg = m_dcsvrTemporal.rampDeg;
+             values.clip = m_dcsvrTemporal.clip;
++            values.opaqueRamp = m_dcsvrOpaqueRamp;
+             return values;
+         }
+ 
+@@ -4755,6 +4763,8 @@ namespace openxr_api_layer {
+             m_dcsvrTemporal.tauMs = values.tauMs;
+             m_dcsvrTemporal.rampDeg = values.rampDeg;
+             m_dcsvrTemporal.clip = values.clip;
++            // 0034: the opaque focus's ramp, read by this thread's focus pass and submission from this frame on.
++            m_dcsvrOpaqueRamp = values.opaqueRamp;
+             if (before.temporal && !values.temporal) {
+                 // Periphery stability off: its history's memory goes back now; on again, it starts over.
+                 for (auto& history : m_dcsvrHistory) {
+@@ -4979,6 +4989,10 @@ namespace openxr_api_layer {
+                                         : m_dcsvrTwoLayersAlpha == 1 ? "premultiplied"
+                                                                      : "unpremultiplied"));
+                         parsed = true;
++                    } else if (name == "dcsvr_two_layers_opaque_ramp") {
++                        m_dcsvrOpaqueRamp = dcsvr::live::OpaqueRamp(std::stof(value));
++                        Log(fmt::format("DCSVR two layers: opaque focus alpha ramp {}\n", dcsvr::live::OpaqueRampText(m_dcsvrOpaqueRamp)));
++                        parsed = true;
+                     } else if (name == "stereo_output_multiplier") {
+                         m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));
+                         parsed = true;
+@@ -5272,6 +5286,9 @@ namespace openxr_api_layer {
+         // pass writes the composed result over the whole focus rectangle, UNORM). Read at start only (it picks the
+         // swapchain).
+         int m_dcsvrTwoLayersAlpha{0};
++        // DCSVR opaque focus (0034, dcsvr_two_layers_opaque_ramp, live): the width of the focus layer's alpha ramp in the
++        // focus radius (0.4: 0031's ramp at edge blend 0.2); 0: alpha 1 everywhere and no blend flags (0024).
++        float m_dcsvrOpaqueRamp{0.4f};
+         // The outputs of the eye being drawn ([0] periphery, [1] focus), set by xrEndFrame under the swapchains' lock.
+         DcsvrOutSwapchain* m_dcsvrEyeOut[2]{};
+         ComPtr<ID3D11Buffer> m_dcsvrTwoLayerConstants;

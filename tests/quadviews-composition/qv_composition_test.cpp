@@ -748,16 +748,17 @@ int main(int argc, char** argv) {
                     return (texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx) * (1 - fy) +
                            (texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
                 };
-                // The layer's alpha byte as the shader computes it (kDcsvrOpaqueRamp 0.4).
+                // The layer's alpha byte as the shader computes it (0034: the ramp as set, 0.4 by default; 0 none).
                 const auto smooth_step = [](float e0, float e1, float v) {
                     const float s = (std::clamp)((v - e0) / (e1 - e0), 0.f, 1.f);
                     return s * s * (3 - 2 * s);
                 };
-                const auto layer_alpha = [&](UINT x, UINT y, float shape, float smoothing) {
+                const auto layer_alpha = [&](UINT x, UINT y, float shape, float smoothing, float ramp = 0.4f) {
+                    (void)smoothing;  // 0031 widened the ramp to the composition's band; 0034 takes it as set
+                    if (ramp <= 0) return 255;
                     const float ox = std::abs((x + 0.5f) / kFocus * 2 - 1), oy = std::abs((y + 0.5f) / kFocus * 2 - 1);
                     if (ox >= 1 || oy >= 1) return 0;
                     const float r = shape >= 1 ? std::pow(std::pow(ox, shape) + std::pow(oy, shape), 1 / shape) : (std::max)(ox, oy);
-                    const float ramp = (std::max)((std::clamp)(2 * smoothing, 0.01f, 0.95f), 0.4f);
                     return static_cast<int>(std::lround((1 - smooth_step(1 - ramp, 1, r)) * 255));
                 };
                 // 0025's rim, for check 5's reference only.
@@ -857,7 +858,7 @@ int main(int argc, char** argv) {
                                     k.edge[0] = edge;
                                     k.edge[1] = edge > 0.f ? k_cpu : 0.f;
                                     TwoLayer o = k;
-                                    o.edge[3] = 1.f;
+                                    o.edge[3] = 1.4f;  // 0034: 1 + the ramp (dcsvr_two_layers_opaque_ramp's default)
                                     o.band[0] = o.band[1] = area;
                                     o.band[2] = (1.f - area + offset[0]) * 0.5f;
                                     o.band[3] = (1.f - area - offset[1]) * 0.5f;
@@ -932,6 +933,80 @@ int main(int argc, char** argv) {
                                             }
                                         }
                                 }
+                // 0034, dcsvr_two_layers_opaque_ramp: a narrower ramp (0.1) and none (0: alpha 1, the layer not blended).
+                // Round shape (2), edge blend 0.2 and 0.05, both offsets, sharpened or not, edge match off. Where the
+                // stored alpha is 1 the colour must be the composed one (the runtime's periphery is not seen there:
+                // with 0.1 that is everything inside r 0.9, the composition's band included); in the ramp the runtime's
+                // blend over the periphery must give the composed colour (unclamped texels); with 0 every texel is
+                // alpha 1 and the composed colour. The chromatic aberration residual of 0.1 is reported, not limited.
+                std::size_t narrow_cases = 0, narrow_alpha_wrong = 0, narrow_border_opaque = 0, narrow_ramp = 0, narrow_opaque = 0;
+                std::size_t none_cases = 0, none_alpha_not_one = 0;
+                int narrow_worst_off = 0, none_worst = 0;
+                double narrow_worst_blend = 0, narrow_aberration = 0;
+                for (const float ramp : {0.1f, 0.f})
+                    for (const float smoothing : {0.05f, 0.2f})
+                        for (const auto& offset : {std::array<float, 2>{0.f, 0.f}, std::array<float, 2>{0.125f, -0.0625f}})
+                            for (const bool sharpen : {false, true}) {
+                                const float shape = 2.f;
+                                const Case c{shape, smoothing, offset[0], offset[1], sharpen, false, 0.f, 0.f};
+                                const auto reference = run(c, true);
+                                ID3D11ShaderResourceView* const focus_view = sharpen ? sharpened_srv.Get() : focus_srv.Get();
+                                TwoLayer o{};
+                                o.smoothing = smoothing;
+                                o.shape = shape;
+                                o.layer = 1.f;
+                                o.debug[1] = sharpen ? 1.f : 0.f;
+                                o.edge[3] = 1.f + ramp;
+                                o.band[0] = o.band[1] = area;
+                                o.band[2] = (1.f - area + offset[0]) * 0.5f;
+                                o.band[3] = (1.f - area - offset[1]) * 0.5f;
+                                const auto opaque = run_opaque(o, focus_view, focus_srv.Get());
+                                (ramp > 0 ? narrow_cases : none_cases)++;
+                                if (ramp > 0)
+                                    narrow_aberration = (std::max)(narrow_aberration, aberration_error([&](float fx, float fy) { return alpha_at(opaque, fx, fy); }));
+                                const int x0 = static_cast<int>(std::lround(o.band[2] * kOut)), y0 = static_cast<int>(std::lround(o.band[3] * kOut));
+                                for (UINT y = 0; y < kFocus; ++y)
+                                    for (UINT x = 0; x < kFocus; ++x) {
+                                        const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
+                                        const std::uint32_t r = reference[static_cast<std::size_t>(y0 + y) * kOut + x0 + x];
+                                        const int a_out = static_cast<int>(opaque[p] >> 24), a_set = layer_alpha(x, y, shape, smoothing, ramp);
+                                        int worst = 0;
+                                        for (int ch = 0; ch < 3; ++ch)
+                                            worst = (std::max)(worst, std::abs(static_cast<int>((opaque[p] >> (8 * ch)) & 255U) -
+                                                                               static_cast<int>((r >> (8 * ch)) & 255U)));
+                                        if (ramp <= 0) {
+                                            if (a_out != 255) ++none_alpha_not_one;
+                                            none_worst = (std::max)(none_worst, worst);
+                                            continue;
+                                        }
+                                        if (std::abs(a_out - a_set) > 1) ++narrow_alpha_wrong;
+                                        if ((x == 0 || y == 0 || x + 1 == kFocus || y + 1 == kFocus) && a_out != 0) ++narrow_border_opaque;
+                                        if (a_set > 0 && a_set < 255) {
+                                            ++narrow_ramp;
+                                            const float a = a_out / 255.f;
+                                            const float u = (x + 0.5f) / kFocus * o.band[0] + o.band[2];
+                                            const float v = (y + 0.5f) / kFocus * o.band[1] + o.band[3];
+                                            bool clamped = false;
+                                            double worst_here = 0;
+                                            for (int ch = 0; ch < 3; ++ch) {
+                                                const int stored = static_cast<int>((opaque[p] >> (8 * ch)) & 255U);
+                                                clamped = clamped || stored == 0 || stored == 255;
+                                                const double shown = stored * a + periphery_at(u, v, ch) * (1 - a);
+                                                worst_here = (std::max)(worst_here, std::abs(shown - static_cast<double>((r >> (8 * ch)) & 255U)));
+                                            }
+                                            if (!clamped) narrow_worst_blend = (std::max)(narrow_worst_blend, worst_here);
+                                            continue;
+                                        }
+                                        if (a_set == 255) ++narrow_opaque;
+                                        narrow_worst_off = (std::max)(narrow_worst_off, worst);
+                                    }
+                            }
+                std::printf("opaque focus ramp 0.1: %zu cases, alpha off the ramp's %zu, opaque border texels %zu, %zu opaque texels (composed worst %d codes), %zu ramp texels (runtime blend vs composed worst %.2f codes), chromatic aberration worst alpha mismatch %.3f; ramp 0: %zu cases, alpha not 1 %zu, composed worst %d codes%s",
+                    narrow_cases, narrow_alpha_wrong, narrow_border_opaque, narrow_opaque, narrow_worst_off, narrow_ramp, narrow_worst_blend, narrow_aberration,
+                    none_cases, none_alpha_not_one, none_worst, "\n");
+                const bool narrow_ok = narrow_cases == 8 && none_cases == 8 && narrow_alpha_wrong == 0 && narrow_border_opaque == 0 &&
+                                       narrow_opaque > 1000000U && narrow_worst_off <= 1 && narrow_ramp > 10000U && narrow_worst_blend <= 2.0 &&
+                                       none_alpha_not_one == 0 && none_worst <= 1;
                 focus_area = 0.34f;
                 stereo_view = nullptr;
                 std::printf("opaque focus vs composition: %zu cases, %zu sharp pixels (%zu differing from mode 0, worst %d codes), %zu blended or periphery pixels, edge match off worst %d codes (%zu of %zu exact), on worst %d codes, alpha not 1 %zu%s",
@@ -949,7 +1024,8 @@ int main(int argc, char** argv) {
                     kAberration, worst_aberration, worst_aberration * 255, rim_aberration, hard_aberration, "\n");
                 opaque_ok = worst_off <= 1 && worst_edge <= 2 && alpha_not_one == 0 && worst_sharp <= 1 && sharp > 1000000U && blended > 1000000U &&
                             rim_alpha_wrong == 0 && border_opaque == 0 && rim_ramp > 10000U && worst_rim_blend <= 2.0 && band_ramp > 10000U &&
-                            worst_band_blend <= 2.0 && worst_aberration <= 0.04 && rim_aberration > 0.3 && hard_aberration > 0.9;
+                            worst_band_blend <= 2.0 && worst_aberration <= 0.04 && rim_aberration > 0.3 && hard_aberration > 0.9 &&
+                            narrow_ok;
             }
             std::printf(opaque_ok ? "Quad Views opaque focus: the focus layer holds the composed image over its rectangle%s"
                                   : "Quad Views opaque focus FAILED%s", "\n");            two_layer_ok = two_layer_ok && opaque_ok;

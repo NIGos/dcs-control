@@ -280,6 +280,25 @@ int main() {
               dcsvr::live::Changes(Values{}, Values{0.5f}) == "sharpen_focus_view 0.70 -> 0.50",
           "the log text names the changed keys");
 
+    // 0034: the opaque focus's alpha ramp is live, 0.4 by default (0031's ramp), 0 or less is none, else 0.02-0.95.
+    {
+        Values v;
+        const bool parsed = dcsvr::live::ApplyKey("dcsvr_two_layers_opaque_ramp", "0.1", v);
+        Values none, low, high, bad;
+        dcsvr::live::ApplyKey("dcsvr_two_layers_opaque_ramp", "-1", none);
+        dcsvr::live::ApplyKey("dcsvr_two_layers_opaque_ramp", "0.001", low);
+        dcsvr::live::ApplyKey("dcsvr_two_layers_opaque_ramp", "3", high);
+        const bool skipped = !dcsvr::live::ApplyKey("dcsvr_two_layers_opaque_ramp", "x", bad);
+        Check(Near(Values{}.opaqueRamp, 0.4f) && parsed && Near(v.opaqueRamp, 0.1f) && none.opaqueRamp == 0.f &&
+                  Near(low.opaqueRamp, 0.02f) && Near(high.opaqueRamp, 0.95f) && skipped && Near(bad.opaqueRamp, 0.4f),
+              "opaque ramp: default 0.4, 0 or less none, clamped to 0.02-0.95, unparsed kept");
+        Check(!(v == Values{}) && dcsvr::live::Changes(Values{}, v) == "dcsvr_two_layers_opaque_ramp 0.40 -> 0.10",
+              "opaque ramp: a change is a reload's change and named in the log");
+        Check(dcsvr::live::OpaqueRampText(0.f) == "none (alpha 1, not blended)" &&
+                  dcsvr::live::OpaqueRampText(0.1f) == "over the outer 0.10 of the radius",
+              "opaque ramp: the log line");
+    }
+
     DeleteFileW(layerFile.c_str());
     DeleteFileW(profileFile.c_str());
     RemoveDirectoryW(dir.c_str());

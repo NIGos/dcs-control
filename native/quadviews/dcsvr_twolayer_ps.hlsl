@@ -103,8 +103,19 @@ Texture2D<float2> dcsvrDisparityField : register(t2);
 Texture2D bandPeriphery : register(t3); // opaque focus: the periphery image, for the focus pass
 #include "dcsvr_depthwarp_ps.hlsli"
 
-// Opaque focus (0031): the narrowest alpha ramp, in the focus view's radius (1 at its edge): the outer 0.4 of it, 390
-// texels of 1928 (the composition's band at edge blend 0.2).
+// Opaque focus (0031): the default alpha ramp, in the focus view's radius (1 at its edge): the outer 0.4 of it, 390
+// texels of 1928 (the composition's band at edge blend 0.2). Since 0034 the layer sets it (dcsvrEdge.w = 1 + width,
+// dcsvr_two_layers_opaque_ramp, live): the width as set, not widened to the composition's band.
+//
+// Why a narrower ramp (0034, user's flight 2026-11-23: the focus rectangle flickering in the right eye, "solid at the
+// edges, fading toward the centre"): wherever the stored alpha a is below 1 the runtime shows (1 - a) of ITS periphery
+// layer under the focus, and the colour there (P + (C - P) / a) is right only if that periphery is the one the focus pass
+// composed against. At edge blend 0.2 the 0.4 ramp is the composition's own band, so the colour there is the focus
+// colour unblended and the layer is mode 0 (Standard) in all but the corners: whatever makes the runtime's periphery
+// under the focus differ on some frames (the Standard flicker that 0024, alpha 1 and no blending, removed) shows again,
+// weighted by 1 - a, i.e. solid at the edge and fading inwards. A ramp of width w exposes only the outer w, where the
+// composition already shows mostly periphery; the chromatic aberration residual grows as 1 / w (about 3 codes of red and
+// 6 of blue at 0.4, so about 12 / 24 at 0.1, spread over the ramp instead of a line).
 static const float kDcsvrOpaqueRamp = 0.4;
 
 float3 DcsvrLinearToSrgb(float3 c) {
@@ -213,8 +224,10 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
         const float2 own = abs(texcoord * float2(2, -2) + float2(-1, 1));
         const float ownRadius = focusViewShape >= 1 ? pow(pow(own.x, focusViewShape) + pow(own.y, focusViewShape), 1 / focusViewShape)
                                                     : max(own.x, own.y);
-        const float ramp = max(clamp(2 * smoothingArea, 0.01, 0.95), kDcsvrOpaqueRamp);
-        const float layerAlpha = round((all(own < 1) ? 1 - smoothstep(1 - ramp, 1, ownRadius) : 0) * 255) / 255;
+        // 0034: the ramp's width is dcsvrEdge.w - 1 (dcsvr_two_layers_opaque_ramp, default kDcsvrOpaqueRamp), no longer
+        // widened to the composition's band; 0: alpha 1 everywhere, and the layer goes out without blending (0024).
+        const float ramp = dcsvrEdge.w - 1;
+        const float layerAlpha = ramp <= 0 ? 1 : round((all(own < 1) ? 1 - smoothstep(1 - ramp, 1, ownRadius) : 0) * 255) / 255;
         float4 periphery = 0;
         [branch] if (dcsvrDebug.x == 0 && (alpha < 1 || layerAlpha < 1)) {
             periphery = bandPeriphery.SampleLevel(sourceSampler, layer1TexCoord * dcsvrBand.xy + dcsvrBand.zw, 0);
