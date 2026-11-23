@@ -1,0 +1,105 @@
+Fovea temporal (dev/0.7-fovea-temporal, native/quadviews/dcsvr_gaze.h, dcsvr_perception.h, dcsvr_live.h): two keys, both
+live (settings.cfg), both off by default (the layer as before).
+- dcsvr_gaze_glide_ms (0-200, default 0): outside saccades a move of the focus (the gaze leaving the deadzone, drift,
+  pursuit) is shown as an exponential approach with this time constant instead of a step in one frame. At fixation the
+  eye is not suppressed and a step moved the focus edge's blend band (0.5 degree of a ramp about 8 degrees wide: up to
+  ~10 % of the focus/periphery difference at once) and the focus view's projection in the same frame: seen as a flash at
+  the border. Saccades, gaps and moves over 2 degrees still jump. Gaze statistics line: "; glided N (glide G ms)".
+- dcsvr_temporal_saccade_reset (default 1): 0 keeps the periphery stability's history through saccades. The reset was
+  taken as free (vision suppressed), but it is decided at the gaze's display time and with frame generation that frame
+  is seen 55-90 ms later, after the landing: the ring just outside the new focus edge showed unfiltered for a frame and
+  settled over the next two or three, on every saccade (54-89 per 30 s in the 2026-11-23 flight). Periphery stability
+  lines: "kept through saccades" on the "on" line, "; saccade frames kept N" on the 30 s line.
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1098,17 +1098,17 @@ namespace openxr_api_layer {
+                                         }
+                                         m_dcsvrGazeHistory.Record(sample);
+                                     }
+-                                    if (m_dcsvrGaze.widening || m_dcsvrGaze.deadzoneDeg > 0.f) {
++                                    if (m_dcsvrGaze.widening || m_dcsvrGaze.deadzoneDeg > 0.f || m_dcsvrGaze.glideMs > 0.f) {
+                                         const auto statsNow = std::chrono::steady_clock::now();
+                                         if (m_dcsvrStatsAt.time_since_epoch().count() == 0) m_dcsvrStatsAt = statsNow;
+                                         const auto& stats = m_dcsvrFilter.Stats();
+                                         if (statsNow - m_dcsvrStatsAt >= std::chrono::seconds(30) && stats.eyeFrames > 0) {
+                                             Log(fmt::format("DCSVR gaze: {} eye-frames, {} saccades, widened {} ({:.1f}%%), held {} ({:.1f}%%), peak {:.0f} deg/s; "
+-                                                            "landings {}, missed the sharp area {} ({:.1f}%%); repeated samples {}; lost gaze eased {}\n",
++                                                            "landings {}, missed the sharp area {} ({:.1f}%%); repeated samples {}; lost gaze eased {}; glided {} (glide {:.0f} ms)\n",
+                                                             stats.eyeFrames, stats.saccades, stats.widened, 100.0 * stats.widened / stats.eyeFrames,
+                                                             stats.held, 100.0 * stats.held / stats.eyeFrames, stats.peakSpeed,
+                                                             stats.landings, stats.missed, stats.landings ? 100.0 * stats.missed / stats.landings : 0.0,
+-                                                            stats.repeated, stats.eased));
++                                                            stats.repeated, stats.eased, stats.glided, m_dcsvrGaze.glideMs));
+                                             m_dcsvrFilter.ResetStats();
+                                             m_dcsvrStatsAt = statsNow;
+                                         }
+@@ -1753,17 +1753,19 @@ namespace openxr_api_layer {
+                                 m_dcsvrTemporalControl.BeginFrame(frameEndInfo->displayTime, eyes, (uint64_t)proj->space,
+                                                                   m_dcsvrGazeHistory.At(frameEndInfo->displayTime), m_dcsvrTemporalActive, m_dcsvrTemporal);
+                                 if (!m_dcsvrTemporalLogged) {
+-                                    Log(fmt::format("DCSVR periphery stability: on, {:.0f} ms, ramp {:.0f} deg, clip {:.2f}{}\n", m_dcsvrTemporal.tauMs,
+-                                                    m_dcsvrTemporal.rampDeg, m_dcsvrTemporal.clip, m_dcsvrTemporal.debug ? ", debug view" : ""));
++                                    Log(fmt::format("DCSVR periphery stability: on, {:.0f} ms, ramp {:.0f} deg, clip {:.2f}{}{}\n", m_dcsvrTemporal.tauMs,
++                                                    m_dcsvrTemporal.rampDeg, m_dcsvrTemporal.clip, m_dcsvrTemporal.debug ? ", debug view" : "",
++                                                    m_dcsvrTemporal.saccadeReset ? "" : ", kept through saccades"));
+                                     m_dcsvrTemporalLogged = true;
+                                 }
+                                 const auto statsNow = std::chrono::steady_clock::now();
+                                 if (m_dcsvrTemporalStatsAt.time_since_epoch().count() == 0) m_dcsvrTemporalStatsAt = statsNow;
+                                 const auto& stats = m_dcsvrTemporalControl.Stats();
+                                 if (statsNow - m_dcsvrTemporalStatsAt >= std::chrono::seconds(30) && stats.frames > 0) {
+-                                    Log(fmt::format("DCSVR periphery stability: {} frames, {} filtered at {:.1f} FPS, {} resets (saccade {}, gap {}, turn {}, size {}, other {}), fades out {:.0f}-{:.0f} deg\n",
++                                    Log(fmt::format("DCSVR periphery stability: {} frames, {} filtered at {:.1f} FPS, {} resets (saccade {}, gap {}, turn {}, size {}, other {}), fades out {:.0f}-{:.0f} deg; saccade frames kept {}\n",
+                                                     stats.frames, stats.filtered, stats.dtSum > 0.0 ? stats.filtered / stats.dtSum : 0.0, stats.resets,
+-                                                    stats.saccade, stats.gap, stats.turn, stats.size, stats.other, stats.falloff.startDeg, stats.falloff.endDeg));
++                                                    stats.saccade, stats.gap, stats.turn, stats.size, stats.other, stats.falloff.startDeg, stats.falloff.endDeg,
++                                                    stats.saccadeKept));
+                                     m_dcsvrTemporalControl.ResetStats();
+                                     m_dcsvrTemporalStatsAt = statsNow;
+                                 }
+@@ -4736,6 +4738,7 @@ namespace openxr_api_layer {
+             values.tauMs = m_dcsvrTemporal.tauMs;
+             values.rampDeg = m_dcsvrTemporal.rampDeg;
+             values.clip = m_dcsvrTemporal.clip;
++            values.temporalSaccadeReset = m_dcsvrTemporal.saccadeReset;
+             values.opaqueRamp = m_dcsvrOpaqueRamp;
+             return values;
+         }
+@@ -4763,6 +4766,7 @@ namespace openxr_api_layer {
+             m_dcsvrTemporal.tauMs = values.tauMs;
+             m_dcsvrTemporal.rampDeg = values.rampDeg;
+             m_dcsvrTemporal.clip = values.clip;
++            m_dcsvrTemporal.saccadeReset = values.temporalSaccadeReset;
+             // 0034: the opaque focus's ramp, read by this thread's focus pass and submission from this frame on.
+             m_dcsvrOpaqueRamp = values.opaqueRamp;
+             if (before.temporal && !values.temporal) {
+@@ -4773,7 +4777,7 @@ namespace openxr_api_layer {
+                 m_dcsvrTemporalControl.Invalidate();
+             }
+             if (before.temporal != values.temporal || before.tauMs != values.tauMs || before.rampDeg != values.rampDeg ||
+-                before.clip != values.clip) {
++                before.clip != values.clip || before.temporalSaccadeReset != values.temporalSaccadeReset) {
+                 m_dcsvrTemporalLogged = false;  // its "on" line again, with the new values
+             }
+             // 0026: the gaze filter's settings go to xrLocateViews' thread, which takes them before its next frame
+@@ -5065,6 +5069,9 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_lost_ease_ms") {
+                         m_dcsvrGaze.lostEaseMs = std::clamp(std::stof(value), 0.f, 1000.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_gaze_glide_ms") {
++                        m_dcsvrGaze.glideMs = std::clamp(std::stof(value), 0.f, 200.f);
++                        parsed = true;
+                     } else if (name == "dcsvr_far_depth") {
+                         m_dcsvrFarDepth.enabled = std::stoi(value);
+                         parsed = true;
+@@ -5189,6 +5196,9 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_temporal_clip") {
+                         m_dcsvrTemporal.clip = std::clamp(std::stof(value), 0.25f, 4.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_temporal_saccade_reset") {
++                        m_dcsvrTemporal.saccadeReset = std::stoi(value) != 0;
++                        parsed = true;
+                     } else if (name == "dcsvr_temporal_debug") {
+                         m_dcsvrTemporal.debug = std::stoi(value);
+                         parsed = true;

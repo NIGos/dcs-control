@@ -466,6 +466,93 @@ int main() {
         }
     }
 
+    // Glide (fovea temporal, dcsvr_gaze_glide_ms): outside saccades the focus approaches a new gaze over a time constant
+    // instead of stepping there in one frame; saccades, gaps and long moves still jump.
+    {
+        dcsvr::GazeSettings g = on;
+        g.glideMs = 40.f;
+        const int64_t dt = 22'222'222;  // 2X
+        // A 0.8-degree drift step (36 deg/s: no saccade) out of the deadzone.
+        {
+            dcsvr::GazeFilter f;
+            int64_t t = 1'000'000'000;
+            Locate(f, g, t, 5.f);
+            Locate(f, g, t += dt, 5.01f);
+            const float from = Ndc(5.f), to = Ndc(5.8f);
+            const Frame first = Locate(f, g, t += dt, 5.8f);
+            const float k = 1.f - std::exp(-22.222f / 40.f);
+            Check(!f.InSaccade() && std::fabs(first.gaze.x - (from + (to - from) * k)) < 1e-4f,
+                  "glide: a 0.8-degree step out of the deadzone moves the focus 1 - exp(-dt / 40 ms) of the way in its first frame");
+            bool monotonic = true;
+            float last = first.gaze.x;
+            int frames = 1;
+            while (last != to && frames < 20) {
+                const Frame fr = Locate(f, g, t += dt, 5.8f + ((frames % 2) ? 0.01f : -0.01f));
+                monotonic = monotonic && fr.gaze.x >= last;
+                last = fr.gaze.x;
+                ++frames;
+            }
+            Check(monotonic && last == to && frames >= 5 && frames <= 8 && f.Stats().glided > 0,
+                  "glide: then monotonic, at the gaze within 5-8 frames (110-180 ms at 45 FPS), counted as glided");
+            // The same display time located again shows the same focus and does not advance the glide.
+            dcsvr::GazeFilter h;
+            int64_t u = 1'000'000'000;
+            Locate(h, g, u, 5.f);
+            Locate(h, g, u += dt, 5.01f);
+            const Frame a = Locate(h, g, u += dt, 5.8f);
+            const Frame b = Locate(h, g, u, 5.8f);
+            const Frame c = Locate(h, g, u + 2'000, 5.8f);
+            Check(a.gaze.x == b.gaze.x && a.gaze.x == c.gaze.x, "glide: a frame located again (or 2 us later) shows the same focus");
+        }
+        // A saccade still jumps, in its first frame.
+        {
+            dcsvr::GazeFilter f;
+            int64_t t = 1'000'000'000;
+            Locate(f, g, t, 0.f);
+            Locate(f, g, t += dt, 0.01f);
+            const Frame s = Locate(f, g, t += dt, 10.f);
+            Check(f.InSaccade() && s.gaze.x == Ndc(10.f) && s.widened, "glide: a saccade still jumps (and leads) in its first frame");
+        }
+        // A 2.5-degree move slower than a saccade (30 FPS: 75 deg/s) and a gap of 300 ms jump too.
+        {
+            dcsvr::GazeFilter f;
+            int64_t t = 1'000'000'000;
+            Locate(f, g, t, 0.f);
+            Locate(f, g, t += 33'333'333, 0.01f);
+            const Frame m = Locate(f, g, t += 33'333'333, 2.5f);
+            Check(!f.InSaccade() && m.gaze.x == Ndc(2.5f), "glide: a move longer than 2 degrees jumps");
+            const Frame gap = Locate(f, g, t += 300'000'000, 3.5f);
+            Check(gap.gaze.x == Ndc(3.5f), "glide: after a 300 ms gap the focus jumps to the gaze");
+        }
+        // Slow drift with tracker noise (0.2 deg RMS), 1 deg/s for 4 s at 2X: the deadzone alone steps the focus by its
+        // 0.5 degrees at once; with the glide no frame moves it more than half of that, and it never lags the gaze by
+        // more than the deadzone plus a frame of the glide.
+        {
+            const auto drift = [&](const dcsvr::GazeSettings& s, float& largestStep, float& largestLag) {
+                dcsvr::GazeFilter f;
+                std::mt19937 rng(11);
+                std::normal_distribution<float> noise(0.f, 0.2f);
+                int64_t t = 1'000'000'000;
+                float last = Locate(f, s, t, 0.f).gaze.x;
+                largestStep = largestLag = 0.f;
+                for (int i = 1; i < 180; ++i) {
+                    const float eye = i * 0.0222f;
+                    const Frame fr = Locate(f, s, t += dt, eye + std::fmax(-0.4f, std::fmin(0.4f, noise(rng))));
+                    largestStep = std::fmax(largestStep, std::fabs(fr.gaze.x - last) / NdcPerDeg);
+                    largestLag = std::fmax(largestLag, std::fabs(fr.gaze.x - Ndc(eye)) / NdcPerDeg);
+                    last = fr.gaze.x;
+                }
+            };
+            float stepOff, lagOff, stepOn, lagOn;
+            drift(on, stepOff, lagOff);
+            drift(g, stepOn, lagOn);
+            std::printf("     drift: largest focus step per frame %.2f deg without the glide, %.2f with it; largest lag %.2f / %.2f deg\n",
+                        stepOff, stepOn, lagOff, lagOn);
+            Check(stepOff >= 0.5f && stepOn <= 0.5f * stepOff, "glide: drift steps the focus by at most half of the deadzone's step per frame");
+            Check(lagOn <= lagOff + 0.6f, "glide: the focus lags the drifting gaze by at most 0.6 degrees more");
+        }
+    }
+
     // Switched off, exactly the filter before the tail: the same random gaze (saccades of every size, fixation noise,
     // exact repeats, near-duplicate display times, gaps, 72 and 90 Hz) through this filter with the tail and the
     // lost-gaze ease off and through the filter as it was (tests/quadviews-gaze/reference). Every returned gaze, box,

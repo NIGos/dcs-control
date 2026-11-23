@@ -30,6 +30,12 @@
 //  - Lost gaze: when the tracker loses the eyes for good (past Quad Views' cache), the focus eases from the last gaze to
 //    the fixed focus over `lostEaseMs` instead of jumping there (0: off). When the gaze returns the focus jumps
 //    straight to it.
+//  - Glide (`glideMs`, 0: off): outside saccades a move of the focus (the gaze leaving the deadzone, a slow drift or
+//    pursuit) is shown as an exponential approach with that time constant instead of a step in one frame. A step moves
+//    the focus edge's blend band and the focus view's projection at once; at fixation the eye is not suppressed, and the
+//    band's change (the blend weight times the focus/periphery difference) showed as a flash at the border. Spread over
+//    a few frames the same change is a slow fade. Saccades (the lead's), the first frame, a gap of 200 ms or more, an
+//    older display time and moves longer than GlideMaxDeg still jump.
 #pragma once
 
 #include <algorithm>
@@ -53,11 +59,13 @@ struct GazeSettings {
     bool tail{false};       // the saccade tail: endSpeed, the latched reach, repeated samples skipped
     float endSpeed{50.f};   // with `tail`: deg/s below which a lead saccade ends (at most `speed`)
     float lostEaseMs{0.f};  // 0: the focus jumps to the fixed one when the gaze is lost
+    float glideMs{0.f};     // 0: a focus move outside saccades is shown in one frame (see "Glide")
 };
 
 struct GazeStats {
     uint64_t eyeFrames{}, widened{}, held{}, saccades{};
     uint64_t repeated{}, landings{}, missed{}, eased{};
+    uint64_t glided{};  // eye-frames whose focus was still on its way to the gaze (Glide)
     float peakSpeed{};
 };
 
@@ -69,6 +77,10 @@ class GazeFilter {
     // (a tracker slower than the frames) are one or two frame times (11-14 ms each at 72-90 Hz) and are spanned; after a
     // longer run (a blink) the speed is measured over the last frame alone, so the next saccade's start is not hidden.
     static constexpr float RepeatStretchSeconds = 0.03f;
+    // Glide: a longer move outside a lead saccade (the tail's last metres, a quick look the detector missed) jumps; the
+    // glide is for the deadzone's steps and slow drift. Closer than GlideSnapDeg the focus is at the gaze.
+    static constexpr float GlideMaxDeg = 2.f;
+    static constexpr float GlideSnapDeg = 0.02f;
 
     // Once per located frame (time in ns, a display time): the gaze unit vector's angular speed since the previous one.
     // A frame located again for the same time, a non-finite vector or a gap of 200 ms or more changes nothing. Display
@@ -144,12 +156,12 @@ class GazeFilter {
             if (dx * dx + dy * dy < s.deadzoneDeg * s.deadzoneDeg) {
                 if (e.heldTime != time) m_stats.held++;
                 e.heldTime = time;
-                return e.stable;
+                return Glide(e, time, e.stable, ndcPerDegX, ndcPerDegY, s);
             }
         }
         e.stable = projected;
         e.stableValid = true;
-        return projected;
+        return Glide(e, time, projected, ndcPerDegX, ndcPerDegY, s);
     }
 
     // Per eye: extends the focus box [min, max] (NDC, clamped to -1..1) toward the lead while a saccade lasts and fades
@@ -283,8 +295,10 @@ class GazeFilter {
         GazeVec2 min{}, max{};
     };
     struct EyeState {
-        GazeVec2 previous{}, lead{}, stable{}, reach{}, lostFrom{};
+        GazeVec2 previous{}, lead{}, stable{}, reach{}, lostFrom{}, shown{};
         int64_t time{0};
+        int64_t shownTime{0};  // Glide: the display time `shown` is for
+        bool shownValid{false};
         int64_t heldTime{0};
         int64_t lostAt{0};
         int64_t counted{0};  // the display time last counted in eyeFrames
@@ -294,6 +308,34 @@ class GazeFilter {
         Box boxes[BoxHistory]{};
         int boxNext{0};
     };
+
+    // Glide (see the header): the focus shown for this eye and display time, on its way to `target` (the deadzone's
+    // result). With glideMs 0 it is the target itself, exactly as before the glide. The same display time located
+    // again (or one within MinSampleSeconds, as Eye counts frames) shows the same focus; an older one too.
+    GazeVec2 Glide(EyeState& e, int64_t time, GazeVec2 target, float ndcPerDegX, float ndcPerDegY, const GazeSettings& s) {
+        if (s.glideMs <= 0.f) {
+            e.shownValid = false;
+            return target;
+        }
+        const auto jump = [&] {
+            e.shown = target;
+            e.shownValid = true;
+            e.shownTime = time;
+            return target;
+        };
+        if (!e.shownValid || m_leadSaccade || ndcPerDegX <= 0.f || ndcPerDegY <= 0.f) return jump();
+        if (time <= e.shownTime || (time - e.shownTime) / 1e9f < MinSampleSeconds) return e.shown;
+        const float dt = (time - e.shownTime) / 1e9f;
+        const float dx = (target.x - e.shown.x) / ndcPerDegX, dy = (target.y - e.shown.y) / ndcPerDegY;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        if (dt >= 0.2f || distance > GlideMaxDeg) return jump();
+        const float k = 1.f - std::exp(-dt * 1000.f / s.glideMs);
+        e.shown = {e.shown.x + (target.x - e.shown.x) * k, e.shown.y + (target.y - e.shown.y) * k};
+        if (distance * (1.f - k) < GlideSnapDeg) e.shown = target;
+        else m_stats.glided++;
+        e.shownTime = time;
+        return e.shown;
+    }
 
     // While a landing is checked: the gaze sampled for display time `time` is where the eye was about leadMs before it,
     // so it is compared with the box located for that earlier display time. Outside the inner 80 % of the box's

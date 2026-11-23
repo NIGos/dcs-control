@@ -42,7 +42,12 @@ DCS renders at 45 FPS in 2X and 30 FPS in 3X, so shimmer changes at most at 22.5
    Eccentricity is measured from the cyclopean gaze, the same world direction for both eyes, or from the focus centre with a fixed focus.
 5. **Resets.** One decision per frame covers both eyes, so one eye is never filtered while the other is not. The filter starts over in these cases:
    - the first frame;
-   - a saccade (dcsvr_gaze.h's detector; vision is suppressed then, so the reset is free);
+   - a saccade (dcsvr_gaze.h's detector), unless `dcsvr_temporal_saccade_reset=0` (live, not written by the app). The
+     reset was taken as free because vision is suppressed, but the decision is made at the gaze's display time, and with
+     frame generation that frame is seen 55-90 ms later, after the landing: the ring just outside the focus edge shows
+     unfiltered for a frame and settles over the next two (tests/perception (d2): +20 %, +26 %, +8 % frame-to-frame
+     change at 20-28° on the synthetic shimmer at 2X). The history needs no reset: it is the periphery as shown,
+     reprojected by the head's rotation, wherever the focus was;
    - more than 100 ms between frames (a pause, a loading screen, a scene change);
    - a head turn of more than 10° in one frame;
    - a new periphery size or a new layer space;

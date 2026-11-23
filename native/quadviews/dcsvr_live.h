@@ -49,7 +49,8 @@ namespace dcsvr::live {
 //   dcsvr_temporal_tau_ms      m_dcsvrTemporal.tauMs     its strength (DCS Control: 80 ms x strength)
 //   dcsvr_temporal_ramp_deg    m_dcsvrTemporal.rampDeg   from the focus edge to full weight
 //   dcsvr_temporal_clip        m_dcsvrTemporal.clip      neighbourhood clamp, standard deviations
-//   dcsvr_saccade_* , dcsvr_gaze_deadzone, dcsvr_lost_ease_ms
+//   dcsvr_temporal_saccade_reset m_dcsvrTemporal.saccadeReset  a saccade starts the history over (default 1)
+//   dcsvr_saccade_* , dcsvr_gaze_deadzone, dcsvr_lost_ease_ms, dcsvr_gaze_glide_ms
 //                              m_dcsvrGaze (dcsvr_gaze.h GazeSettings), handed to xrLocateViews' thread
 //   dcsvr_far_depth_preset, dcsvr_far_depth_world_ipd, dcsvr_far_depth_z0_m, dcsvr_far_depth_gamma
 //                              m_dcsvrFarDepth's curve (preset, world IPD, near guard, Z0, gamma)
@@ -63,7 +64,8 @@ inline constexpr const char* Keys[] = {"sharpen_focus_view",      "smoothen_focu
                                        "dcsvr_saccade_hold_ms",   "dcsvr_saccade_end_speed",   "dcsvr_saccade_tail",
                                        "dcsvr_gaze_deadzone",     "dcsvr_lost_ease_ms",        "dcsvr_far_depth_preset",
                                        "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m",    "dcsvr_far_depth_gamma",
-                                       "dcsvr_far_depth_toggle",  "dcsvr_two_layers_opaque_ramp"};
+                                       "dcsvr_far_depth_toggle",  "dcsvr_two_layers_opaque_ramp",
+                                       "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms"};
 
 inline bool IsLiveKey(const std::string& name) {
     for (const char* key : Keys) {
@@ -81,6 +83,7 @@ struct Values {
     float tauMs{40.f};
     float rampDeg{8.f};
     float clip{1.f};
+    bool temporalSaccadeReset{true};
     // The eye-tracking filter's settings, as m_dcsvrGaze holds them.
     dcsvr::GazeSettings gaze{};
     // Far depth's curve as the parse leaves it (layer.cpp ParseConfigurationStatement): the last valid preset line (-1:
@@ -114,7 +117,7 @@ inline std::string OpaqueRampText(float ramp) {
 inline bool SameGaze(const dcsvr::GazeSettings& a, const dcsvr::GazeSettings& b) {
     return a.widening == b.widening && a.speed == b.speed && a.leadMs == b.leadMs && a.maxExtend == b.maxExtend &&
            a.holdMs == b.holdMs && a.deadzoneDeg == b.deadzoneDeg && a.tail == b.tail && a.endSpeed == b.endSpeed &&
-           a.lostEaseMs == b.lostEaseMs;
+           a.lostEaseMs == b.lostEaseMs && a.glideMs == b.glideMs;
 }
 
 inline bool SameFarCurve(const Values& a, const Values& b) {
@@ -125,7 +128,8 @@ inline bool SameFarCurve(const Values& a, const Values& b) {
 inline bool operator==(const Values& a, const Values& b) {
     return a.sharpen == b.sharpen && a.smoothing == b.smoothing && a.taper == b.taper &&
            a.peripherySharpen == b.peripherySharpen && a.temporal == b.temporal && a.tauMs == b.tauMs &&
-           a.rampDeg == b.rampDeg && a.clip == b.clip && SameGaze(a.gaze, b.gaze) && SameFarCurve(a, b) &&
+           a.rampDeg == b.rampDeg && a.clip == b.clip && a.temporalSaccadeReset == b.temporalSaccadeReset &&
+           SameGaze(a.gaze, b.gaze) && SameFarCurve(a, b) &&
            a.farKeyVk == b.farKeyVk && a.farKeyMods == b.farKeyMods && a.opaqueRamp == b.opaqueRamp;
 }
 
@@ -207,6 +211,9 @@ inline bool ApplyKey(const std::string& name, const std::string& value, Values& 
     } else if (name == "dcsvr_temporal_clip") {
         if (!ToFloat(value, f)) return false;
         io.clip = std::clamp(f, 0.25f, 4.f);
+    } else if (name == "dcsvr_temporal_saccade_reset") {
+        if (!ToInt(value, i)) return false;
+        io.temporalSaccadeReset = i != 0;
     } else if (name == "dcsvr_saccade_widening") {
         if (!ToInt(value, i)) return false;
         io.gaze.widening = i != 0;
@@ -234,6 +241,9 @@ inline bool ApplyKey(const std::string& name, const std::string& value, Values& 
     } else if (name == "dcsvr_lost_ease_ms") {
         if (!ToFloat(value, f)) return false;
         io.gaze.lostEaseMs = std::clamp(f, 0.f, 1000.f);
+    } else if (name == "dcsvr_gaze_glide_ms") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.glideMs = std::clamp(f, 0.f, 200.f);
     } else if (name == "dcsvr_far_depth_preset") {
         // subtle, default, strong, near or 0-3 (anything else is skipped, as Quad Views' parse throws on it).
         const std::string word = Word(value);
@@ -379,6 +389,7 @@ inline std::string Changes(const Values& before, const Values& after) {
     add("dcsvr_temporal_tau_ms", before.tauMs, after.tauMs, "%.1f");
     add("dcsvr_temporal_ramp_deg", before.rampDeg, after.rampDeg, "%.1f");
     add("dcsvr_temporal_clip", before.clip, after.clip, "%.2f");
+    add("dcsvr_temporal_saccade_reset", before.temporalSaccadeReset, after.temporalSaccadeReset, "%.0f");
     add("dcsvr_saccade_widening", before.gaze.widening, after.gaze.widening, "%.0f");
     add("dcsvr_saccade_speed", before.gaze.speed, after.gaze.speed, "%.0f");
     add("dcsvr_saccade_lead_ms", before.gaze.leadMs, after.gaze.leadMs, "%.0f");
@@ -388,6 +399,7 @@ inline std::string Changes(const Values& before, const Values& after) {
     add("dcsvr_saccade_tail", before.gaze.tail, after.gaze.tail, "%.0f");
     add("dcsvr_gaze_deadzone", before.gaze.deadzoneDeg, after.gaze.deadzoneDeg, "%.2f");
     add("dcsvr_lost_ease_ms", before.gaze.lostEaseMs, after.gaze.lostEaseMs, "%.0f");
+    add("dcsvr_gaze_glide_ms", before.gaze.glideMs, after.gaze.glideMs, "%.0f");
     add("dcsvr_far_depth_preset", before.farPreset, after.farPreset, "%.0f");
     add("dcsvr_far_depth_world_ipd", before.farWorldIpdSet ? before.farWorldIpd : -1.f,
         after.farWorldIpdSet ? after.farWorldIpd : -1.f, "%.2f");

@@ -299,6 +299,24 @@ int main() {
               "opaque ramp: the log line");
     }
 
+    // Fovea temporal (0035): the periphery stability's saccade reset (default on) and the focus glide (default 0 ms,
+    // clamped 0-200) are live; each is a reload's change, named in the log; the glide is a gaze setting (it goes to
+    // xrLocateViews' thread like the other gaze keys).
+    {
+        Values off, glide, high, bad;
+        const bool parsed = dcsvr::live::ApplyKey("dcsvr_temporal_saccade_reset", "0", off) &&
+                            dcsvr::live::ApplyKey("dcsvr_gaze_glide_ms", "40", glide);
+        dcsvr::live::ApplyKey("dcsvr_gaze_glide_ms", "900", high);
+        const bool skipped = !dcsvr::live::ApplyKey("dcsvr_gaze_glide_ms", "x", bad);
+        Check(Values{}.temporalSaccadeReset && Values{}.gaze.glideMs == 0.f && parsed && !off.temporalSaccadeReset &&
+                  Near(glide.gaze.glideMs, 40.f) && Near(high.gaze.glideMs, 200.f) && skipped && bad.gaze.glideMs == 0.f,
+              "fovea temporal: saccade reset on and glide 0 by default, parsed, glide clamped to 200 ms, unparsed kept");
+        Check(!(off == Values{}) && dcsvr::live::Changes(Values{}, off) == "dcsvr_temporal_saccade_reset 1 -> 0" &&
+                  !dcsvr::live::SameGaze(Values{}.gaze, glide.gaze) &&
+                  dcsvr::live::Changes(Values{}, glide) == "dcsvr_gaze_glide_ms 0 -> 40",
+              "fovea temporal: each is a reload's change and named in the log; the glide is a gaze setting");
+    }
+
     DeleteFileW(layerFile.c_str());
     DeleteFileW(profileFile.c_str());
     RemoveDirectoryW(dir.c_str());

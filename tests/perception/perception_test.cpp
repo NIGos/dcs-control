@@ -185,6 +185,29 @@ void MathChecks() {
         Check(c.BeginFrame(t += 22 * Ms, eyes, 2, gaze, false, s) == TemporalReset::Inactive && c.BeginFrame(t += 22 * Ms, eyes, 2, gaze, true, s) == TemporalReset::First, "reset: after an inactive frame it starts over");
         const auto& st = c.Stats();
         Check(st.gap == 1 && st.saccade == 1 && st.size == 1 && st.turn == 1 && st.other == 2, "statistics count each reason");
+        {
+            // dcsvr_temporal_saccade_reset 0 (fovea temporal): the history is kept through saccades, every other reset
+            // stays; the saccade frames are counted as kept.
+            TemporalSettings keep = s;
+            keep.saccadeReset = false;
+            TemporalController kc;
+            GazeSample g{};
+            int64_t tk = 5'000'000'000;
+            kc.BeginFrame(tk, eyes, 2, g, true, keep);
+            g.inSaccade = true;
+            const TemporalReset a = kc.BeginFrame(tk += 22 * Ms, eyes, 2, g, true, keep);
+            const TemporalReset b = kc.BeginFrame(tk += 22 * Ms, eyes, 2, g, true, keep);
+            TemporalConstants kk{};
+            kc.Constants(1, {-0.36f, 0.36f, 0.36f, -0.36f}, keep, kk);
+            Check(a == TemporalReset::None && b == TemporalReset::None && kk.params[1] > 0.f && kc.Stats().saccadeKept == 2 &&
+                      kc.Stats().saccade == 0,
+                  "saccade reset off: saccade frames keep the history (both eyes), counted as kept");
+            Check(kc.BeginFrame(tk += 150 * Ms, eyes, 2, g, true, keep) == TemporalReset::Gap, "saccade reset off: a gap still starts over");
+            TemporalController dc;
+            dc.BeginFrame(tk, eyes, 2, GazeSample{}, true, s);
+            Check(dc.BeginFrame(tk += 22 * Ms, eyes, 2, g, true, s) == TemporalReset::Saccade && dc.Stats().saccadeKept == 0,
+                  "saccade reset on (the default): a saccade starts over as before");
+        }
         // Reprojection: after a 4-degree turn to the left (positive yaw), a ray straight ahead was 4 degrees left of
         // straight ahead in the previous frame's eye.
         eyes[0].pose = eyes[1].pose = Yaw(20.f);
@@ -753,6 +776,55 @@ void ShaderChecks(const std::filesystem::path& dir, bool forceWarp, bool quick) 
         Check(gap.first == dcsvr::TemporalReset::Gap && gap.second < 1e-3, "(d) a 150 ms gap: output equals input");
         Check(size.first == dcsvr::TemporalReset::Size && size.second < 1e-3, "(d) a new periphery size: output equals input");
         Check(resumed.first == dcsvr::TemporalReset::None && resumed.second > 0.05, "(d) filtering resumes on the next frame");
+    }
+
+    // (d2) Fovea temporal: what a saccade's reset does to the ring just outside the focus edge (20-28 degrees, the
+    // first band of the ramp) on the jittered still scene at 2X: the mean frame-to-frame change there, before the
+    // saccade and on the frames after it, with the reset (the default) and with dcsvr_temporal_saccade_reset 0.
+    std::printf("\n(d2) Saccade reset: mean frame-to-frame change in the 20-28 degree ring, 2X\n");
+    {
+        std::uniform_real_distribution<float> j(-0.5f, 0.5f);
+        constexpr int Count = 26, First = 14;  // saccade frames First and First + 1 (two located frames, as in flight)
+        std::vector<std::pair<float, float>> jitter;
+        for (int i = 0; i < Count; ++i) jitter.push_back({j(rng), j(rng)});
+        const auto run = [&](bool resetOn) {
+            dcsvr::TemporalSettings ss = s;
+            ss.saccadeReset = resetOn;
+            dcsvr::TemporalController c;
+            std::vector<Frame> out;
+            int64_t t = 1'000'000'000;
+            for (int i = 0; i < Count; ++i) {
+                dcsvr::TemporalEye eyes[2];
+                for (auto& e : eyes) e.fov = su.fov, e.width = su.w, e.height = su.h;
+                const dcsvr::GazeSample g{t += 22 * Ms, true, i == First || i == First + 1, {0.f, 0.f, -1.f}};
+                c.BeginFrame(g.time, eyes, 1, g, true, ss);
+                dcsvr::TemporalConstants k{};
+                c.Constants(0, su.focus, ss, k);
+                out.push_back(gpu.Run(Render(su.w, su.h, su.fov, {}, {}, jitter[i].first, jitter[i].second, false), k));
+            }
+            return out;
+        };
+        const auto change = [&](const std::vector<Frame>& f, int from, int to) {
+            double sum = 0, n = 0;
+            for (int i = from; i < to; ++i)
+                for (size_t p = 0; p < f[i].v.size(); ++p)
+                    if (su.ecc[p] >= 20.f && su.ecc[p] < 28.f) sum += std::fabs(double(f[i].v[p]) - f[i - 1].v[p]), n += 1;
+            return n ? sum / n : 0.0;
+        };
+        const auto reset = run(true), kept = run(false);
+        // The same jittered frames in both runs: before the saccade they are identical, after it the difference is the
+        // reset's alone.
+        const double baseReset = change(reset, 6, First), baseKept = change(kept, 6, First);
+        const double afterReset = change(reset, First, First + 5), afterKept = change(kept, First, First + 5);
+        const double lateReset = change(reset, First + 8, Count), lateKept = change(kept, First + 8, Count);
+        std::printf("before the saccade: reset %.4f, kept %.4f; saccade and the 4 frames after: reset %.4f, kept %.4f (reset/kept x%.2f); "
+                    "from the 8th frame after: %.4f / %.4f\n per frame from the saccade (reset/kept):",
+                    baseReset, baseKept, afterReset, afterKept, afterKept > 0 ? afterReset / afterKept : 0.0, lateReset, lateKept);
+        for (int i = First; i < First + 6; ++i) std::printf(" %.2f", change(kept, i, i + 1) > 0 ? change(reset, i, i + 1) / change(kept, i, i + 1) : 0.0);
+        std::printf("\n");
+        Check(baseReset == baseKept, "(d2) before the saccade both runs are the same");
+        Check(afterReset > afterKept * 1.05, "(d2) the reset raises the ring's frame-to-frame change on the saccade and the frames after it");
+        Check(std::fabs(lateReset - lateKept) <= 0.02 * lateKept, "(d2) eight frames later both runs change alike again");
     }
 
     // (e) The same small step (inside the clamp box, on a textured background) at 2X, 3X and Auto frame times.

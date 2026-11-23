@@ -296,6 +296,13 @@ struct TemporalSettings {
     float maxGapMs{100.f};  // a longer interval between submitted frames starts over
     float maxTurnDeg{10.f}; // so does a larger head turn between two frames
     float focusShape{0.f};  // the composition's focus_view_shape (its focus edge; < 1: the rectangle)
+    // A saccade starts over (dcsvr_temporal_saccade_reset, default on). Off: the history is kept through saccades. It is
+    // the periphery as shown, reprojected by the head's rotation, wherever the focus was (inside the old focus area it
+    // is the unfiltered periphery, which is valid history too), so nothing in it is wrong after the focus moved. The
+    // reset is not free either: it is decided at the gaze's display time, and with frame generation that frame reaches
+    // the headset 55-90 ms later, after the landing, when the eye sees again; the ring just outside the new focus edge
+    // then shows unfiltered for a frame and settles over the next two or three.
+    bool saccadeReset{true};
 };
 
 enum class TemporalReset { None, First, Gap, Saccade, Turn, Size, Space, Inactive, Scene };
@@ -333,6 +340,7 @@ struct TemporalConstants {
 
 struct TemporalStats {
     uint64_t frames{0}, filtered{0}, resets{0}, saccade{0}, gap{0}, turn{0}, size{0}, other{0};
+    uint64_t saccadeKept{0};  // saccade frames filtered on, with saccadeReset off
     double dtSum{0.0};
     FarFalloff falloff{};
 };
@@ -351,7 +359,7 @@ class TemporalController {
         else if (dt <= 0.f || dt * 1000.f > s.maxGapMs) reset = TemporalReset::Gap;
         else if (space != m_space) reset = TemporalReset::Space;
         else if (SceneCuts().load(std::memory_order_relaxed) != m_sceneCuts) reset = TemporalReset::Scene;
-        else if (gaze.inSaccade) reset = TemporalReset::Saccade;
+        else if (gaze.inSaccade && s.saccadeReset) reset = TemporalReset::Saccade;
         else if (eyes[0].width != m_eyes[0].width || eyes[0].height != m_eyes[0].height ||
                  eyes[1].width != m_eyes[1].width || eyes[1].height != m_eyes[1].height)
             reset = TemporalReset::Size;
@@ -367,6 +375,7 @@ class TemporalController {
             }
             m_dt = dt;
             m_stats.filtered++;
+            if (gaze.inSaccade) m_stats.saccadeKept++;
             m_stats.dtSum += dt;
         }
         if (reset != TemporalReset::Inactive) {
