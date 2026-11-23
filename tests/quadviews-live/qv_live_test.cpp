@@ -323,7 +323,7 @@ int main() {
               "fovea temporal: focus fade-in off by default, 0-3 frames, a reload's change named in the log");
     }
 
-    // 0035: the band match's keys are live, off by default; the strength is clamped to 0..1.
+    // 0037: the band match's keys are live, off by default; the strength is clamped to 0..1.
     {
         Values v, high, bad;
         const bool parsed = dcsvr::live::ApplyKey("dcsvr_band_match", "0.5", v) &&

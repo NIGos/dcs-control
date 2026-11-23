@@ -89,7 +89,7 @@ cbuffer ConstantBuffer : register(b0) {
     float encodeSrgb;
     float4 dcsvrWarp; // as ProjectionPS.hlsl: x on, yz focus uv -> periphery uv, w a held field
     float4 dcsvrReuse[3]; // a held field's reprojection
-    float4 dcsvrDebug; // x the periphery black, y the focus colour outside the fade from t1; band match (0035, focus pass):
+    float4 dcsvrDebug; // x the periphery black, y the focus colour outside the fade from t1; band match (0037, focus pass):
                        // z its strength (0 off), w this eye's byte offset in t4
     float4 dcsvrEdge; // edge match: x the share of the fade band (0 off), y k (one periphery texel in focus texels);
                       // z the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 premultiplied, sRGB target)
@@ -106,7 +106,7 @@ Texture2D source : register(t0);
 Texture2D plainFocus : register(t1);
 Texture2D<float2> dcsvrDisparityField : register(t2);
 Texture2D bandPeriphery : register(t3); // opaque focus: the periphery image, for the focus pass
-ByteAddressBuffer bandMatch : register(t4); // band match (0035): dcsvr_bandmatch_cs.hlsl's state, gain per eye
+ByteAddressBuffer bandMatch : register(t4); // band match (0037): dcsvr_bandmatch_cs.hlsl's state, gain per eye
 #include "dcsvr_depthwarp_ps.hlsli"
 #include "dcsvr_perception.h"
 #include "dcsvr_bandmatch.h"
@@ -224,7 +224,7 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
         }
     }
 
-    // Band match (0035, dcsvr_bandmatch.h; focus pass only): dcsvrDebug.z > 0 its strength, w this eye's byte offset in
+    // Band match (0037, dcsvr_bandmatch.h; focus pass only): dcsvrDebug.z > 0 its strength, w this eye's byte offset in
     // t4. The focus colour times gain^strength, where the eye's gain is valid, before anything composes it. 0: unchanged.
     [branch] if (dcsvrDebug.z > 0) {
         const uint4 match = bandMatch.Load4((uint)dcsvrDebug.w);

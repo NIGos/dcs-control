@@ -1,5 +1,5 @@
 // DCS Control: band match for the bundled Quad Views compositor (dcsvr_band_match, dcsvr_band_match_color,
-// dcsvr_band_stats; patches/quadviews/0035-band-match.patch; copied in by scripts/build-quadviews.ps1, tested by
+// dcsvr_band_stats; patches/quadviews/0037-band-match.patch; copied in by scripts/build-quadviews.ps1, tested by
 // tests/quadviews-composition).
 //
 // Why. Whatever makes the focus image a little brighter, darker or tinted against the periphery around it (DLSS 5's

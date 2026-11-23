@@ -524,7 +524,7 @@ int main(int argc, char** argv) {
             replace_once(two_old, "} else if (dcsvrEdge.z >= 1) {", "} else if (false) {");
             // Nor 0024's opaque focus (dcsvrEdge.w): with it 0 the pass must give the bytes of the pass before it.
             replace_once(two_old, "[branch] if (dcsvrEdge.w != 0) {", "[branch] if (false) {");
-            // Nor 0035's band match (dcsvrDebug.z): with it 0 the pass must give the bytes of the pass before it.
+            // Nor 0037's band match (dcsvrDebug.z): with it 0 the pass must give the bytes of the pass before it.
             replace_once(two_old, "[branch] if (dcsvrDebug.z > 0) {", "[branch] if (false) {");
             const auto two_new_code = compile(two_new, "main", "ps_5_0", includes);
             const auto two_old_code = compile(two_old, "main", "ps_5_0", includes);
@@ -1250,7 +1250,7 @@ int main(int argc, char** argv) {
                     std::printf("OFXR single layer: skipped (no foveated_compose.hlsl given)%s", "\n");
                 }
             }
-            // Band match (0035, dcsvr_bandmatch_cs.hlsl and the focus pass's gain): the measurement on synthetic focus /
+            // Band match (0037, dcsvr_bandmatch_cs.hlsl and the focus pass's gain): the measurement on synthetic focus /
             // periphery pairs (a gain, a tint, the step, only the band counts, the limit, a dark frame), and the focus pass
             // applying gain^strength only with a strength and a valid gain.
             bool band_ok = true;
