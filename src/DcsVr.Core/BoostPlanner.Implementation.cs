@@ -117,6 +117,10 @@ public static partial class BoostPlanner
             notes.Add("Optimizations only: no VR runtime runs, so none is moved.");
         else if (!profile.BoostMoveVrRuntime)
             notes.Add("VR runtime confinement is turned off in this profile.");
+        // A small CPU (CpuTopology.LimitToSystem keeps fewer than 4 common logical CPUs out): the helper moves nothing
+        // (BoostRuntime: no mask), so the plan lists nothing either.
+        else if (canMove && topology.VrRuntimeCores.Count == 0 && VrRuntimeServices(profile).Count > 0)
+            notes.Add("Headset services stay on every CPU: this CPU has too few cores outside DCS's render cores to give them their own.");
         else if (canMove)
             foreach (var pattern in VrRuntimeServices(profile))
             {

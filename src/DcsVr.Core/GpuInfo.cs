@@ -29,12 +29,20 @@ public static partial class GpuInfo
     /// all RTX 50 (GitHub #33): the patch is only for RTX 20-40. Null otherwise.</summary>
     public static string? PatchedRuntimeNote(bool modified) =>
         modified && OnlyRtx50 ? "Patched copy for RTX 20-40 cards. Your RTX 50 runs NVIDIA's original file." : null;
+    /// <summary>Every NVIDIA RTX adapter is a GeForce RTX 20, 30 or 40 card (by name; workstation cards and unknown names
+    /// never count), where NVIDIA's original DLSS 5 runtime does not run.</summary>
+    public static bool OnlyRtx20To40 => Adapters().Where(IsNvidiaRtx).ToList() is { Count: > 0 } rtx && rtx.All(a => Rtx20To40Regex().IsMatch(a.Name));
+    /// <summary>The saved DLSS 5 runtime's info line: the patched-copy note above, or for NVIDIA's original file on a PC
+    /// whose RTX cards are all RTX 20-40, that DLSS 5 will not apply there (in flight: "ON but not applied").</summary>
+    public static string? RuntimeNote(bool modified) => PatchedRuntimeNote(modified)
+        ?? (!modified && OnlyRtx20To40 ? "NVIDIA's original file runs only on RTX 50 cards, so DLSS 5 will not apply on this PC's " + string.Join(", ", Adapters().Where(IsNvidiaRtx).Select(a => a.Name)) + ". See \"RTX 20, 30 and 40 cards\" in the user guide." : null);
     /// <summary>"AMD Radeon RX 7900 XTX" (the names of the real adapters, for messages).</summary>
     public static string Names => string.Join(", ", Adapters().Select(a => a.Name));
 
     [GeneratedRegex(@"\bRTX\b|\bTITAN RTX\b|\b(?:A|L)\d{2,4}\b|\bH100\b", RegexOptions.IgnoreCase)] private static partial Regex RtxRegex();
     [GeneratedRegex(@"VEN_([0-9A-F]{4})", RegexOptions.IgnoreCase)] private static partial Regex VendorRegex();
     [GeneratedRegex(@"\bRTX\s*50\d0\b", RegexOptions.IgnoreCase)] private static partial Regex Rtx50Regex();
+    [GeneratedRegex(@"\bRTX\s*[234]0\d0\b", RegexOptions.IgnoreCase)] private static partial Regex Rtx20To40Regex();
 
     private static IReadOnlyList<GpuAdapter> ReadRegistry()
     {

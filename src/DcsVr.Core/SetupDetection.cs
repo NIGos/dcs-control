@@ -76,12 +76,23 @@ public static class SetupDetection
                 return new(RuntimeKind.SboysSteamVr, "SteamVR is running the headset through Sboys (" + hmd + ").", tracking);
             if (hmd.StartsWith("aapvr.", StringComparison.OrdinalIgnoreCase) || hmd.StartsWith("pimax", StringComparison.OrdinalIgnoreCase))
                 return new(null, "SteamVR is running the headset through Pimax's SteamVR driver (" + hmd + ").", tracking);
-            return new(null, "SteamVR is running a headset through " + hmd.Split('.')[0] + ".", tracking);
+            // Index, Vive, Reverb, Quest Link through SteamVR...: no route of its own (the VR pages are made for Pimax,
+            // Sboys and Quest 3 VD), so the user is told what to pick instead of being left on the Pimax route.
+            return new(null, "SteamVR is running a headset through " + hmd.Split('.')[0] + ". " + OtherHeadsetAdvice, tracking);
         }
         if (sources.ProcessRunning("pi_server"))
             return new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
-        return new(null, "No running headset software was detected. Start Pimax Play, SteamVR with Sboys, or Virtual Desktop (VDXR), then press Read settings from this PC again.", TrackingKind.Unknown);
+        // Nothing of the three routes runs. Another headset's runtime being the active one (Varjo, Meta, Windows Mixed
+        // Reality) may be that headset's or a leftover beside a Pimax whose Pimax Play is closed: both are said.
+        const string none = "No running headset software was detected. Start Pimax Play, SteamVR with Sboys, or Virtual Desktop (VDXR), then press Read settings from this PC again.";
+        var activeRuntime = sources.ActiveOpenXrRuntime();
+        if (OpenXrRuntimeNames.Other(activeRuntime) is { } other && !WindowsInventory.IsVirtualDesktopRuntime(activeRuntime))
+            return new(null, none + " Your OpenXR runtime is " + other + ": if that is your headset, choose Optimizations only in How you fly. Engine Optimizations and CPU Boost work with it, while the VR pages are made for Pimax headsets and Quest 3 on Virtual Desktop.", TrackingKind.Unknown);
+        return new(null, none, TrackingKind.Unknown);
     }
+
+    /// <summary>What a headset without a route of its own (Index, Varjo, Reverb, Quest on Link...) should pick.</summary>
+    public const string OtherHeadsetAdvice = "With this headset, choose Optimizations only in How you fly: Engine Optimizations and CPU Boost work with it, while the VR pages are made for Pimax headsets and Quest 3 on Virtual Desktop.";
 
     /// <summary>The route as the interface names it.</summary>
     public static string RouteName(RuntimeKind route) => route switch

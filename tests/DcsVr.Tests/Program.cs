@@ -1700,6 +1700,13 @@ Test("Other environments: AMD/Intel graphics, OpenBeta Saved Games, 3× at 72 Hz
         Require(GpuInfo.PatchedRuntimeNote(true) == "Patched copy for RTX 20-40 cards. Your RTX 50 runs NVIDIA's original file." && GpuInfo.PatchedRuntimeNote(false) is null, "RTX 50 note");
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0")];
         Require(GpuInfo.PatchedRuntimeNote(true) is null, "RTX 40 needs the patch: no note");
+        // NVIDIA's original file on RTX 20-40 only: DLSS 5 will not apply, said where the saved copy is shown.
+        Require(GpuInfo.RuntimeNote(false) is { } original && original.Contains("only on RTX 50") && original.Contains("RTX 4090") && GpuInfo.RuntimeNote(true) is null, "RTX 40 original note");
+        GpuInfo.Adapters = () => [new("NVIDIA RTX A4000", "NVIDIA", "32.0")];
+        Require(GpuInfo.RuntimeNote(false) is null, "a workstation card is not judged by name");
+        GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 5070 Ti", "NVIDIA", "32.0")];
+        Require(GpuInfo.RuntimeNote(false) is null && GpuInfo.RuntimeNote(true) == GpuInfo.PatchedRuntimeNote(true), "RTX 50: only the patched note");
+        GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0")];
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 5090", "NVIDIA", "32.0"), new("NVIDIA GeForce RTX 3060", "NVIDIA", "32.0")];
         Require(GpuInfo.PatchedRuntimeNote(true) is null, "an older RTX card next to it: no note");
         GpuInfo.Adapters = () => [];
@@ -1714,6 +1721,12 @@ Test("Other environments: AMD/Intel graphics, OpenBeta Saved Games, 3× at 72 Hz
     // A small CPU: background apps never land on DCS's render cores, the headset services are not squeezed.
     var small = CpuTopology.LimitToSystem(new CpuTopology(CoreRankingSource.DcsLog, "4 cores", 8, [0, 1, 2, 3], [4, 5], [3, 6, 7]), 1, 0xFF, 8);
     Require(small.HasRanking && !small.BackgroundCores.Contains(3) && small.VrRuntimeCores.Count == 0, "small CPU");
+    // ... and the plan says they stay, instead of listing them for "Common cores (none)" (the helper moves none of them).
+    var smallPlan = BoostPlanner.Compose(new VrProfile { CpuBoost = true }, small, BoostFixture());
+    Require(!smallPlan.Processes.Any(p => p.Category == "VR runtime") && smallPlan.Notes.Any(n => n.StartsWith("Headset services stay on every CPU", StringComparison.Ordinal)), "small CPU plan");
+    // A missing runtime names the route's own software: SteamVR cannot fix the Pimax route, nor Pimax Play the Sboys one.
+    Require(HeadsetRoute.RuntimeMissing(RuntimeKind.Pimax).Contains("Pimax Play") && !HeadsetRoute.RuntimeMissing(RuntimeKind.Pimax).Contains("SteamVR") && HeadsetRoute.RuntimeMissing(RuntimeKind.Pimax).Contains("Optimizations only")
+        && HeadsetRoute.RuntimeMissing(RuntimeKind.SboysSteamVr).Contains("SteamVR") && !HeadsetRoute.RuntimeMissing(RuntimeKind.SboysSteamVr).Contains("Pimax"), "runtime missing per route");
     // An 8.3 short name of the profile folder is removed from the diagnostic package too.
     Require(!Diagnostics.Redactor("Giuseppe", @"C:\Users\Giuseppe", "PC-01")(@"TEMP=C:\Users\GIUSEP~1\AppData\Local\Temp").Contains("GIUSEP"));
     // A PC named after its user becomes <pc>, not "<user>-PC" (GitHub #31).
@@ -3835,7 +3848,15 @@ Test("Setup detection never infers the Pimax route from Pimax Play alone", () =>
     Require(SetupDetection.DetectActiveRoute(none).Route is null);
     var steamVrWithoutLine = none with { ProcessRunning = name => name is "vrserver" or "pi_server" };
     Require(SetupDetection.DetectActiveRoute(steamVrWithoutLine).Route is null);
-    var idle = none with { ProcessRunning = _ => false };
+    // A headset without a route of its own is told to pick Optimizations only: through SteamVR (Index), or with
+    // another runtime active and nothing of the three routes running (Varjo). VDXR active without its Streamer is not "another".
+    var index = none with { SteamVrServerLog = Make("route-other/vrserver.txt", "Wed Nov 19 2026 20:00:00.000 [Info] - Active HMD set to lighthouse.LHR-12345678\n"), ProcessRunning = name => name == "vrserver" };
+    Require(SetupDetection.DetectActiveRoute(index) is { Route: null } i1 && i1.Summary.Contains("lighthouse") && i1.Summary.Contains("Optimizations only"), "SteamVR with an Index");
+    var varjo = none with { ProcessRunning = _ => false, ActiveOpenXrRuntime = () => @"C:\Program Files\Varjo\varjo-openxr\VarjoOpenXR.json" };
+    Require(SetupDetection.DetectActiveRoute(varjo) is { Route: null } v1 && v1.Summary.StartsWith("No running headset software was detected.", StringComparison.Ordinal) && v1.Summary.Contains("Your OpenXR runtime is Varjo:") && v1.Summary.Contains("Optimizations only"), "Varjo active");
+    Require(!SetupDetection.DetectActiveRoute(varjo with { ActiveOpenXrRuntime = () => @"C:\VD\virtualdesktop-openxr.json" }).Summary.Contains("Optimizations only"), "VDXR without its Streamer");
+    Require(!SetupDetection.DetectActiveRoute(varjo with { ActiveOpenXrRuntime = () => @"C:\Program Files\Pimax\Runtime\PiOpenXR_64.json" }).Summary.Contains("Optimizations only"), "Pimax's runtime is not another");
+    var idle = none with { ProcessRunning = _ => false, ActiveOpenXrRuntime = () => null };
     var result = SetupDetection.Detect(new VrProfile(), new(), idle);
     Require(result.Active.Route is null && result.Detected.Count == 0 && result.Notes.Count > 0 && result.Profile == new VrProfile());
 });
