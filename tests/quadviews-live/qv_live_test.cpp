@@ -294,6 +294,8 @@ int main() {
               "opaque ramp: default 0.4, 0 or less none, clamped to 0.02-0.95, unparsed kept");
         Check(!(v == Values{}) && dcsvr::live::Changes(Values{}, v) == "dcsvr_two_layers_opaque_ramp 0.40 -> 0.10",
               "opaque ramp: a change is a reload's change and named in the log");
+        Check(dcsvr::live::OpaqueRamp(std::nanf("")) == 0.4f && dcsvr::live::OpaqueRamp(0.f) == 0.f,
+              "opaque ramp: not a number (the start parse keeps \"nan\") is the default 0.4, never NaN");
         Check(dcsvr::live::OpaqueRampText(0.f) == "none (alpha 1, not blended)" &&
                   dcsvr::live::OpaqueRampText(0.1f) == "over the outer 0.10 of the radius",
               "opaque ramp: the log line");

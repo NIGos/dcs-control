@@ -551,6 +551,21 @@ int main() {
             Check(stepOff >= 0.5f && stepOn <= 0.5f * stepOff, "glide: drift steps the focus by at most half of the deadzone's step per frame");
             Check(lagOn <= lagOff + 0.6f, "glide: the focus lags the drifting gaze by at most 0.6 degrees more");
         }
+        // A glide time that is not a number (settings.cfg "nan": the start parse's std::stof keeps it) is off: the
+        // focus is the one without the glide, never NaN.
+        {
+            dcsvr::GazeSettings bad = on;
+            bad.glideMs = std::nanf("");
+            dcsvr::GazeFilter f, plain;
+            int64_t t = 1'000'000'000;
+            bool same = true;
+            for (const float deg : {5.f, 5.01f, 5.8f, 5.82f, 7.f}) {
+                const Frame a = Locate(f, bad, t, deg), b = Locate(plain, on, t, deg);
+                same = same && std::isfinite(a.gaze.x) && a.gaze.x == b.gaze.x && a.min.x == b.min.x && a.max.x == b.max.x;
+                t += dt;
+            }
+            Check(same && f.Stats().glided == 0, "glide: a glide time that is not a number is off (no NaN focus)");
+        }
     }
 
     // Switched off, exactly the filter before the tail: the same random gaze (saccades of every size, fixation noise,

@@ -113,7 +113,10 @@ struct Values {
 };
 
 // dcsvr_two_layers_opaque_ramp's clamp: 0 or less is 0 (no ramp, no blending); otherwise 0.02 to 0.95 of the radius.
+// Not a number (the layer's start parse, std::stof, keeps "nan"): the default 0.4, as an unparsed value keeps it; a
+// NaN ramp made the focus pass's alpha NaN.
 inline float OpaqueRamp(float value) {
+    if (std::isnan(value)) return 0.4f;
     return value <= 0.f ? 0.f : std::clamp(value, 0.02f, 0.95f);
 }
 

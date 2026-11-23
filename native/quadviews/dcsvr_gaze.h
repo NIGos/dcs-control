@@ -313,7 +313,9 @@ class GazeFilter {
     // result). With glideMs 0 it is the target itself, exactly as before the glide. The same display time located
     // again (or one within MinSampleSeconds, as Eye counts frames) shows the same focus; an older one too.
     GazeVec2 Glide(EyeState& e, int64_t time, GazeVec2 target, float ndcPerDegX, float ndcPerDegY, const GazeSettings& s) {
-        if (s.glideMs <= 0.f) {
+        // Not "<= 0": a glide time that is not a number is off too. The start parse (std::stof, clamp) keeps "nan" from
+        // settings.cfg, and with it every shown focus became NaN.
+        if (!(s.glideMs > 0.f)) {
             e.shownValid = false;
             return target;
         }
