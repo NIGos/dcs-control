@@ -5246,6 +5246,111 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
     }
     catch (System.ComponentModel.Win32Exception) { Skip("PowerShell 7 (pwsh) is not on PATH"); }
 });
+Test("Every value the profile checks accept is written inside the range its component keeps (Quad Views, pupil shift, Visual realism, Cheeky)", () =>
+{
+    // The value side of scripts/check-written-keys.ps1. Each number of the profile is set to values over a wide grid, on
+    // profiles that write every block; a value ProfileValidation accepts (no error the base profile does not have already)
+    // must reach the file inside the range the component clamps that key to, read from the component's own source, so the
+    // app never shows one number while the component quietly uses another (Cheeky would also rewrite its INI). The engine
+    // module's other keys are read back by its own invariant test; OFXR takes fixed sets. A component whose sources are
+    // not here (an external checkout missing) is skipped.
+    static VrProfile AllOn(VrProfile p)
+    {
+        object o = p with { };
+        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => x.PropertyType == typeof(bool) && x.SetMethod is { IsPublic: true } && x.Name != nameof(VrProfile.Desktop))) prop.SetValue(o, true);
+        return (VrProfile)o;
+    }
+    string? Read(string relative) => File.Exists(Path.Combine(workspace, relative)) ? File.ReadAllText(Path.Combine(workspace, relative)) : null;
+    var inv = System.Globalization.CultureInfo.InvariantCulture;
+    static double? Bound(string text) => double.TryParse(text.Trim().TrimEnd('f', 'F'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
+    // writer \t section \t key (section empty: any section) -> the range the component keeps; two sources of one key: both hold.
+    var ranges = new Dictionary<string, (double Lo, double Hi)>(StringComparer.OrdinalIgnoreCase);
+    void Range(string id, double lo, double hi) => ranges[id] = ranges.TryGetValue(id, out var r) ? (Math.Max(r.Lo, lo), Math.Min(r.Hi, hi)) : (lo, hi);
+    var missing = new List<string>();
+    // Quad Views: its start-up parse (layer.cpp, external checkout) and the live reload's mirror (native/quadviews/dcsvr_live.h).
+    var quad = new[] { Read("external/quadviews/openxr-api-layer/layer.cpp"), Read("native/quadviews/dcsvr_live.h") };
+    if (quad[0] is null) missing.Add("Quad Views start-up parse (external/quadviews)");
+    foreach (var text in quad.OfType<string>())
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, @"name == ""(\w+)""\)\s*\{\s*(?:if \(!ToFloat\(value, f\)\) return false;\s*)?[^;{}]*?std::(clamp|max)\(([^;]*?)\);"))
+        {
+            var args = m.Groups[3].Value.Split(',');
+            if (m.Groups[2].Value == "clamp" && args.Length == 3 && Bound(args[1]) is { } lo && Bound(args[2]) is { } hi) Range("QuadViews\t\t" + m.Groups[1].Value, lo, hi);
+            else if (m.Groups[2].Value == "max" && args.Length == 2 && Bound(args[0]) is { } min) Range("QuadViews\t\t" + m.Groups[1].Value, min, double.MaxValue);
+        }
+    // The pupil shift layer: std::clamp(ini_float(L"Key", default, path[, L"Section"]), lo, hi).
+    if (Read("native/pupil_shift/pupil_shift_layer.cpp") is { } pupil)
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(pupil, @"std::clamp\(ini_float\(L""(\w+)"",\s*[^,()]+,\s*path(?:,\s*L""(\w+)"")?\),\s*([-\d.]+f?),\s*([-\d.]+f?)\)"))
+            if (Bound(m.Groups[3].Value) is { } lo && Bound(m.Groups[4].Value) is { } hi) Range("PupilShift\t" + (m.Groups[2].Success ? m.Groups[2].Value : "PupilShift") + "\t" + m.Groups[1].Value, lo, hi);
+    // Visual realism in the engine module: the key read into a field, then the field clamped (color_grade.h SanitizeMode,
+    // vrfx.h Sanitize).
+    void Fields(string? text, string readPattern, string clampPattern, Func<string, string[]> sections)
+    {
+        if (text is null) return;
+        var clamps = System.Text.RegularExpressions.Regex.Matches(text, clampPattern).Where(m => Bound(m.Groups[2].Value) is not null && Bound(m.Groups[3].Value) is not null)
+            .GroupBy(m => m.Groups[1].Value).ToDictionary(g => g.Key, g => (Bound(g.First().Groups[2].Value)!.Value, Bound(g.First().Groups[3].Value)!.Value));
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, readPattern))
+            if (clamps.TryGetValue(m.Groups[1].Value, out var c)) foreach (var section in sections(m.Groups[2].Value)) Range(section + "\t" + m.Groups[3].Value, c.Item1, c.Item2);
+    }
+    Fields(Read("native/dcsqvcull/src/color_grade.h"), @"p\.(\w+) = Ini[DI]\(ini, (s|L""Color""), L""(\w+)""", @"p\.(\w+) = ClampD\(p\.\1, ([-\d.]+), ([-\d.]+)",
+        s => s == "s" ? ["DcsQvCull\tColorFix", "DcsQvCull\tColorEnhanced"] : ["DcsQvCull\tColor"]);
+    Fields(Read("native/dcsqvcull/src/vrfx.h"), @"p\.(\w+) = ([fi])\(L""(\w+)""", @"p\.(\w+) = c\(p\.\1, ([-\d.]+), ([-\d.]+)", _ => ["DcsQvCull\tVrFx"]);
+    // Cheeky: addon.cpp reads "Key" into settings.field, settings.cpp stores std::clamp(settings.field, lo, hi).
+    if (Read("external/cheeky/src/addon.cpp") is { } addon && Read("external/cheeky/src/settings.cpp") is { } stored)
+    {
+        var clamps = System.Text.RegularExpressions.Regex.Matches(stored, @"std::clamp\(\s*settings\.(\w+),\s*([-\d.]+F?),\s*([-\d.]+F?)\s*\)").Where(m => Bound(m.Groups[2].Value) is not null && Bound(m.Groups[3].Value) is not null)
+            .GroupBy(m => m.Groups[1].Value).ToDictionary(g => g.Key, g => (Bound(g.First().Groups[2].Value)!.Value, Bound(g.First().Groups[3].Value)!.Value));
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(addon, @"get_config_value\(\s*nullptr,\s*config_section,\s*""(\w+)"",\s*settings\.(\w+)\s*\)"))
+            if (clamps.TryGetValue(m.Groups[2].Value, out var c)) Range("Cheeky\tCheekyFoveatedDLSS\t" + m.Groups[1].Value, c.Item1, c.Item2);
+    }
+    else missing.Add("Cheeky (external/cheeky)");
+    var vr = AllOn(new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, Runtime = RuntimeKind.Pimax, ColorMode = ColorMode.Enhanced });
+    VrProfile[] bases = [vr, vr with { DepthBoostMode = DepthBoostMode.Enhanced, Gaze = GazeMode.Fixed }, vr with { QuadViews = QuadProvider.None }];
+    double[] grid = [-1000, -100, -20, -10, -5, -4, -3, -2, -1.5, -1, -0.6, -0.5, -0.25, -0.1, 0, 0.0004, 0.0005, 0.001, 0.01, 0.05, 0.1, 0.12, 0.15, 0.19, 0.2, 0.25, 0.3, 0.45,
+        0.5, 0.6, 0.75, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300, 400, 500, 1000, 2000, 3000, 5000, 10000];
+    var numbers = typeof(VrProfile).GetProperties().Where(x => (x.PropertyType == typeof(double) || x.PropertyType == typeof(int)) && x.SetMethod is { IsPublic: true }).ToArray();
+    var problems = new List<string>(); var checkedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase); var accepted = 0;
+    void Check(string writer, string ini, string what)
+    {
+        var section = "";
+        foreach (var raw in ini.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line[0] == ';' || line[0] == '#') continue;
+            if (line[0] == '[' && line[^1] == ']') { section = line[1..^1]; continue; }
+            var eq = line.IndexOf('=');
+            if (eq <= 0) continue;
+            var key = line[..eq].Trim();
+            if (!ranges.TryGetValue(writer + "\t" + section + "\t" + key, out var r) && !ranges.TryGetValue(writer + "\t\t" + key, out r)) continue;
+            if (!double.TryParse(line[(eq + 1)..].Trim(), System.Globalization.NumberStyles.Float, inv, out var v)) continue;
+            checkedKeys.Add(writer + "\t" + section + "\t" + key);
+            if (v < r.Lo - 1e-6 * Math.Max(1, Math.Abs(r.Lo)) || v > r.Hi + 1e-6 * Math.Max(1, Math.Abs(r.Hi)))
+                problems.Add($"{what}: {writer} [{section}] {key}={line[(eq + 1)..].Trim()} is outside {r.Lo.ToString(inv)}..{r.Hi.ToString(inv)}");
+        }
+    }
+    foreach (var b in bases)
+    {
+        var known = ProfileValidation.Validate(b).Where(i => i.Severity == IssueSeverity.Error).Select(i => i.Code).ToHashSet(StringComparer.Ordinal);
+        foreach (var prop in numbers)
+            foreach (var value in grid)
+            {
+                if (prop.PropertyType == typeof(int) && value != Math.Floor(value)) continue;
+                object o = b with { };
+                prop.SetValue(o, prop.PropertyType == typeof(int) ? (object)(int)value : value);
+                var p = (VrProfile)o;
+                if (ProfileValidation.Validate(p).Any(i => i.Severity == IssueSeverity.Error && !known.Contains(i.Code))) continue;
+                accepted++;
+                var what = $"{prop.Name}={value.ToString(inv)}";
+                Check("QuadViews", ConfigurationWriters.QuadViews(p), what); Check("PupilShift", ConfigurationWriters.PupilShift(p, 64), what);
+                Check("DcsQvCull", ConfigurationWriters.DcsQvCull(p, "C:/cache"), what); Check("Cheeky", ConfigurationWriters.Cheeky(p), what);
+            }
+    }
+    int Count(string writer) => checkedKeys.Count(k => k.StartsWith(writer + "\t", StringComparison.Ordinal));
+    // Each source still yields its ranges (a changed source format would otherwise make this test pass on nothing).
+    Require(accepted > 500 && Count("QuadViews") >= (quad[0] is null ? 10 : 15) && Count("PupilShift") >= 15 && Count("DcsQvCull") >= 25 && (missing.Any(m => m.StartsWith("Cheeky")) || Count("Cheeky") >= 15),
+        $"too few values checked: {accepted} accepted; keys QuadViews {Count("QuadViews")}, PupilShift {Count("PupilShift")}, DcsQvCull {Count("DcsQvCull")}, Cheeky {Count("Cheeky")}");
+    Require(problems.Count == 0, string.Join("\n", problems.Distinct().Take(30)));
+    if (missing.Count > 0) Skip("sources not here, not checked: " + string.Join(", ", missing));
+});
 Test("The engine module's invariant fixtures are what the app writes for every Engine option off and on (native/dcsqvcull/test/app_ini)", () =>
 {
     // The DcsQvCull.ini the app writes with Engine Optimizations on and every Engine-page option off (GitHub #28: that
