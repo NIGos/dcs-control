@@ -6359,11 +6359,11 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.smooth_cursor", "1", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.cursor_follow_mouse", "1", null), "the smooth cursor waits");
     Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null), "the preset waits");
     Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.backend", "nvidia", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.triple_frame_gen", "1", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null, current: false));
-    // Cheeky: the fifteen keys of dcs_live_keys, each one Cheeky's writer emits; its start-only keys never.
+    // Cheeky: the sixteen keys of dcs_live_keys, each one Cheeky's writer emits; its start-only keys never.
     var cheeky = IniFile.Parse(ConfigurationWriters.Cheeky(new VrProfile { FoveatedDlss = true }));
     var hpp = File.ReadAllText(Path.Combine(workspace, "patches/cheeky/dcs_live_reload.hpp"));
     var liveKeys = cheeky.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.NeuralFile, k, "1", null)).ToArray();
-    Require(liveKeys.Length == 15 && liveKeys.All(k => hpp.Contains('"' + k[(k.IndexOf('.') + 1)..] + '"')), "Cheeky live keys: " + string.Join(", ", liveKeys));
+    Require(liveKeys.Length == 16 && liveKeys.All(k => hpp.Contains('"' + k[(k.IndexOf('.') + 1)..] + '"')), "Cheeky live keys: " + string.Join(", ", liveKeys));
     foreach (var key in new[] { "Enabled", "D3D11D3D12Transport", "NrEnabled", "NrFoveated", "NrUseSrFoveation", "NrProcessingOrder", "PeripheralDlaa", "CenterPreset", "D3D12LowerHook", "NrWidth", "NrHeight", "NrWorkingScale", "Width", "Height", "PeripheralDlaaScale", "CenterMode", "AutoStereoAlignment", "EyeCalibrationContinuous" })
         Require(!LiveSettings.IsLiveKey(LiveSettings.NeuralFile, "CheekyFoveatedDLSS." + key, "1", null), key);
     // Tags: Quad Views, OFXR and Cheeky only for a profile a current app applied; OFXR only with NVIDIA frame generation;

@@ -21,7 +21,8 @@ namespace cheeky::dcsvr {
 // Keys a running Cheeky applies without re-initialisation. Evidence (src/dlss_nr.cpp):
 // - Read per evaluation, no allocation: NrPaperWhiteScale, NrHdrTransferStrength, NrColorStrength (codec constants),
 //   NrRoundness, NrTransitionWidth (NR region shape constants; the region size comes from NrWidth/NrHeight only),
-//   NrMotionScaleX/YMultiplier and NrDepthConvention (evaluation parameters).
+//   NrMotionScaleX/YMultiplier and NrDepthConvention (evaluation parameters), NrBrightnessMatch (codec constant; the
+//   match state buffer exists in every codec).
 // - Part of the NR FeatureKey at the same working size: NrIntensity, NrLocalToneStrength, NrLocalStructureStrength,
 //   NrSkinStructureStrength, NrStyle, NrAutomaticMask, NrUiCorrection. A change creates one new NGX DLSS-NR feature
 //   of the same size; the replaced one stays as the single cached alternate (retired_feature_capacity) and is released
@@ -30,6 +31,7 @@ inline constexpr std::string_view dcs_live_keys[]{
     "NrIntensity", "NrLocalToneStrength", "NrLocalStructureStrength", "NrSkinStructureStrength", "NrStyle",
     "NrAutomaticMask", "NrUiCorrection", "NrColorStrength", "NrHdrTransferStrength", "NrPaperWhiteScale",
     "NrDepthConvention", "NrMotionScaleXMultiplier", "NrMotionScaleYMultiplier", "NrTransitionWidth", "NrRoundness",
+    "NrBrightnessMatch",
 };
 
 inline bool dcs_live_key(std::string_view key) noexcept {

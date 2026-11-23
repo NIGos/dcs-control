@@ -252,6 +252,9 @@ public sealed record VrProfile
     public double NeuralColorStrength { get; init; } = 1;
     public double NeuralTransferStrength { get; init; } = 1;
     public double NeuralPaperWhiteScale { get; init; } = 1;
+    /// <summary>Cheeky NrBrightnessMatch=1: the DLSS 5 area keeps the brightness of the game's own image under it, so
+    /// the focus does not show as a slightly darker disc. Off by default.</summary>
+    public bool NeuralBrightnessMatch { get; init; }
     public NeuralDepthMode NeuralDepth { get; init; }
     public NeuralStyle NeuralStyle { get; init; }
     /// <summary>With the Quad Views focus adapter: DLSS 5 covers the central part of each focus view, in percent per axis

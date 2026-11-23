@@ -49,6 +49,7 @@ public static class ConfigurationWriters
         NrColorStrength={Number(p.NeuralColorStrength)}
         NrHdrTransferStrength={Number(p.NeuralTransferStrength)}
         NrPaperWhiteScale={Number(p.NeuralPaperWhiteScale)}
+        NrBrightnessMatch={(p.NeuralBrightnessMatch ? 1 : 0)}
         NrDepthConvention={Int((int)p.NeuralDepth)}
         NrMotionScaleXMultiplier={Number(p.NeuralMotionScaleX)}
         NrMotionScaleYMultiplier={Number(p.NeuralMotionScaleY)}

@@ -11,6 +11,7 @@ Cheeky	CheekyFoveatedDLSS	GazeHoldMs
 Cheeky	CheekyFoveatedDLSS	GazeSmoothingMs
 Cheeky	CheekyFoveatedDLSS	Height
 Cheeky	CheekyFoveatedDLSS	NrAutomaticMask
+Cheeky	CheekyFoveatedDLSS	NrBrightnessMatch
 Cheeky	CheekyFoveatedDLSS	NrColorStrength
 Cheeky	CheekyFoveatedDLSS	NrDepthConvention
 Cheeky	CheekyFoveatedDLSS	NrEnabled

@@ -5,7 +5,12 @@
 //    bit-identical to upstream's unconditional four-load lerp (the same source with the early-out removed) on random
 //    and edge-case inputs: HDR and SDR, the default 0.75 (exact and inexact ratios), the 32-texel floor, with and
 //    without the edge fade; at scale 1 within 1 fp16 ULP or 1/1023 (the texel, not upstream's near-zero blend).
-// --sampled also measures the rejected alternative: the decode's proxy/neural reads as one filtered fetch each
+// 3. With the brightness match off (NrBrightnessMatch=0) the decode writes the same bits as before the match existed.
+// 4. The brightness match (MatchMain): synthetic frames whose DLSS 5 output is darker or brighter by a known gain are
+//    brought back within 0.5 %; equal brightness changes nothing; the gain is bounded to 0.9..1.1; it is steady, glides
+//    at its rate without overshoot, keeps its value over a black frame and snaps on a cut with an NR history reset; per
+//    channel with mode 2. On the hardware GPU it prints the match pass's and the decode's GPU time at the focus size.
+// --match runs only 4 (after the bytecode check). --sampled also measures the rejected alternative: the decode's proxy/neural reads as one filtered fetch each
 // (SampleLevel through a linear clamp sampler). It prints its error against the loads and the decode's GPU time,
 // and asserts nothing.
 #include "nr_codec_shader.hpp"
@@ -17,13 +22,16 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -69,7 +77,9 @@ double half_ulp(double value) {
 }
 
 // Shader variants, from the shipped source.
-enum class Variant { shipped, upstream, sampled };
+// before_match: the decode as it was before the brightness match (no gain multiply, its own arithmetic inline), so
+// the match off is proven to write the same bits as before.
+enum class Variant { shipped, upstream, sampled, before_match };
 std::string variant_source(Variant variant) {
     std::string text = cheeky::foveated_dlss::nr_codec_shader;
     const auto replace_all = [&](const std::string& from, const std::string& to, int expected) {
@@ -80,7 +90,25 @@ std::string variant_source(Variant variant) {
         }
         require(count == expected, "Codec source changed: anchor '" + from + "' found " + std::to_string(count) + " times");
     };
-    if (variant == Variant::upstream) {
+    if (variant == Variant::before_match) {
+        replace_all("    const float4 processed = float4(DcsCodecProcessed(original_sample.rgb, proxy_sample.rgb, neural_sample.rgb) *\n"
+            "        DcsMatchGain(), original_sample.a);\n",
+            "    if (HdrMode == 0) {\n"
+            "        const float4 processed = float4(lerp(original_sample.rgb, neural_sample.rgb,\n"
+            "            TransferStrength * ColorStrength), original_sample.a);\n"
+            "        Output0[SourceBase + dispatch_id.xy] = lerp(original_sample, processed, foveation_weight);\n"
+            "        return;\n"
+            "    }\n"
+            "    const float3 original = max(\n"
+            "        original_sample.rgb / max(PaperWhiteScale, 0.0001),\n"
+            "        0.0\n"
+            "    );\n"
+            "    const float3 proxy = SrgbDecode(proxy_sample.rgb);\n"
+            "    const float3 neural = SrgbDecode(neural_sample.rgb);\n"
+            "    const float3 upgraded = UpgradeToneMap(original, proxy, neural);\n"
+            "    const float3 decoded = lerp(original, upgraded, ColorStrength) * PaperWhiteScale;\n"
+            "    const float4 processed = float4(max(decoded, 0.0), original_sample.a);\n", 1);
+    } else if (variant == Variant::upstream) {
         // Upstream lerps all four loads unconditionally; the shipped code skips three at working scale 1, where the
         // weights are 1, 0, 0, 0.
         replace_all("[branch] if (any(ProxySize != SourceSize))", "if (true)", 1);
@@ -117,6 +145,7 @@ struct Gpu {
     ComPtr<ID3D12RootSignature> root;
     // [variant][0 encode, 1 decode]
     ComPtr<ID3D12PipelineState> pipelines[3][2];
+    ComPtr<ID3D12PipelineState> match, decode_before_match;  // brightness match
     std::string name;
     bool hardware{};
 
@@ -133,11 +162,11 @@ struct Gpu {
     }
 };
 
-// dlss_nr.cpp's root signature (SRV t0-t2, UAV u0-u1, 40 constants) plus s0 for the --sampled probe.
+// dlss_nr.cpp's root signature (SRV t0-t2, UAV u0-u2, 40 constants) plus s0 for the --sampled probe.
 void create_pipelines(Gpu& gpu, bool sampled) {
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3U, 0U, 0U, 0U};
-    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2U, 0U, 0U, 0U};
+    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3U, 0U, 0U, 0U};
     D3D12_ROOT_PARAMETER parameters[3]{};
     parameters[0].ParameterType = parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable = {1U, &ranges[0]};
@@ -164,6 +193,14 @@ void create_pipelines(Gpu& gpu, bool sampled) {
             check(gpu.device->CreateComputePipelineState(&pipeline,
                 IID_PPV_ARGS(&gpu.pipelines[static_cast<int>(variant)][stage])), "Pipeline");
         }
+    }
+    for (auto [pipeline_out, variant, entry] : {std::tuple{std::addressof(gpu.match), Variant::shipped, "MatchMain"},
+            std::tuple{std::addressof(gpu.decode_before_match), Variant::before_match, "DecodeMain"}}) {
+        const auto code = compile(variant, entry);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+        pipeline.pRootSignature = gpu.root.Get();
+        pipeline.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+        check(gpu.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(pipeline_out->GetAddressOf())), "Pipeline");
     }
 }
 
@@ -272,15 +309,32 @@ std::vector<std::uint16_t> fill(std::uint32_t width, std::uint32_t height, Patte
     return texels;
 }
 
-// One codec dispatch: t0-t2 and u0-u1 as in dlss_nr.cpp (encode: game colour -> original copy, proxy;
-// decode: original copy, proxy, neural -> game colour).
+// The brightness match state as dlss_nr.cpp creates it: 16 bytes, UAV, zero, COMMON.
+ComPtr<ID3D12Resource> match_state(Gpu& gpu) {
+    D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = 16U; desc.Height = 1U; desc.DepthOrArraySize = 1U; desc.MipLevels = 1U;
+    desc.SampleDesc.Count = 1U; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ComPtr<ID3D12Resource> resource;
+    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+        nullptr, IID_PPV_ARGS(&resource)), "Match state");
+    return resource;
+}
+
+// One codec dispatch: t0-t2 and u0-u2 as in dlss_nr.cpp (encode: game colour -> original copy, proxy;
+// decode: original copy, proxy, neural -> game colour; u2 the brightness match state).
 struct Binding {
     ComPtr<ID3D12DescriptorHeap> heap, cpu_heap;
     std::vector<ID3D12Resource*> uavs;
+    ComPtr<ID3D12Resource> state;
 };
-Binding bind(Gpu& gpu, std::initializer_list<ID3D12Resource*> srvs, std::initializer_list<ID3D12Resource*> uavs) {
+Binding bind(Gpu& gpu, std::initializer_list<ID3D12Resource*> srvs, std::initializer_list<ID3D12Resource*> uavs,
+    ComPtr<ID3D12Resource> state = nullptr) {
     Binding b;
-    D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 5U, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
+    b.state = state ? state : match_state(gpu);
+    D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 6U, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
     check(gpu.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&b.heap)), "Descriptor heap");
     D3D12_DESCRIPTOR_HEAP_DESC cpu{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2U, D3D12_DESCRIPTOR_HEAP_FLAG_NONE};
     check(gpu.device->CreateDescriptorHeap(&cpu, IID_PPV_ARGS(&b.cpu_heap)), "CPU heap");
@@ -302,6 +356,12 @@ Binding bind(Gpu& gpu, std::initializer_list<ID3D12Resource*> srvs, std::initial
         handle.ptr += step; cpu_handle.ptr += step;
         b.uavs.push_back(resource);
     }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC state_uav{};
+    state_uav.Format = DXGI_FORMAT_R32_TYPELESS;
+    state_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    state_uav.Buffer.NumElements = 4U;
+    state_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    gpu.device->CreateUnorderedAccessView(b.state.Get(), nullptr, &state_uav, handle);
     return b;
 }
 void record(Gpu& gpu, Binding& b, ID3D12PipelineState* pipeline, const CodecConstants& constants,
@@ -471,6 +531,13 @@ int run_adapter(Gpu& gpu, bool sampled) {
                     constants.foveation_feather = feather;
                     const auto decode_shipped = run(gpu, decode, gpu.pipelines[0][1].Get(), constants, dispatch, dispatch);
                     const auto decode_upstream = run(gpu, decode, gpu.pipelines[1][1].Get(), constants, dispatch, dispatch);
+                    // Brightness match off (MatchMode 0): the same bits as the decode before the match existed.
+                    const auto decode_before = run(gpu, decode, gpu.decode_before_match.Get(), constants, dispatch, dispatch);
+                    if (std::memcmp(decode_before[0].data(), decode_shipped[0].data(), decode_before[0].size() * sizeof(float)) != 0) {
+                        std::printf("  FAIL decode region=%u working=%u %s %s feather=%.2f: match off differs from the decode "
+                            "before the match\n", region, proxy, hdr ? "HDR" : "SDR", pattern_name(pattern), feather);
+                        ++failures;
+                    }
                     const auto difference = compare(decode_upstream[0], decode_shipped[0]);
                     for (const float value : decode_shipped[0]) require(value != -7.0F, "Decode skipped a pixel");
                     // At working scale 1 the shipped decode reads the texel itself; upstream's position math
@@ -535,6 +602,262 @@ int run_adapter(Gpu& gpu, bool sampled) {
     return failures;
 }
 
+// ---- Brightness match (MatchMain, NrBrightnessMatch): synthetic frames whose DLSS 5 output is darker by a known gain.
+float srgb_encode(float value) {
+    value = std::clamp(value, 0.0F, 1.0F);
+    return value <= 0.0031308F ? 12.92F * value : 1.055F * std::pow(value, 1.0F / 2.4F) - 0.055F;
+}
+std::array<float, 4> read_state(Gpu& gpu, ID3D12Resource* state) {
+    auto staging = buffer(gpu, 16U, D3D12_HEAP_TYPE_READBACK);
+    gpu.list->CopyBufferRegion(staging.Get(), 0U, state, 0U, 16U);
+    gpu.submit_and_wait();
+    std::array<float, 4> values{};
+    void* mapped{};
+    check(staging->Map(0U, nullptr, &mapped), "Map state");
+    std::memcpy(values.data(), mapped, 16U);
+    staging->Unmap(0U, nullptr);
+    return values;
+}
+struct MatchFrame {
+    std::uint32_t region{}, proxy{};
+    ComPtr<ID3D12Resource> original, proxy_texture, neural, decoded;
+    Binding binding;
+    std::vector<float> original_values;  // what was uploaded, before fp16 rounding
+};
+MatchFrame match_frame(Gpu& gpu, std::uint32_t region, std::uint32_t proxy) {
+    MatchFrame f;
+    f.region = region; f.proxy = proxy;
+    const auto srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto fp16 = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    f.original = texture(gpu, region, region, fp16, D3D12_RESOURCE_FLAG_NONE, srv);
+    f.proxy_texture = texture(gpu, proxy, proxy, fp16, D3D12_RESOURCE_FLAG_NONE, srv);
+    f.neural = texture(gpu, proxy, proxy, fp16, D3D12_RESOURCE_FLAG_NONE, srv);
+    f.decoded = texture(gpu, region, region, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    f.binding = bind(gpu, {f.original.Get(), f.proxy_texture.Get(), f.neural.Get()}, {f.decoded.Get(), f.decoded.Get()});
+    return f;
+}
+CodecConstants match_constants(const MatchFrame& f, bool hdr, std::uint32_t mode, std::uint32_t flags) {
+    CodecConstants c{};
+    c.size[0] = c.size[1] = c.source_size[0] = c.source_size[1] = f.region;
+    c.proxy_size[0] = c.proxy_size[1] = f.proxy;
+    c.paper_white_scale = hdr ? 2.5F : 1.0F;
+    c.transfer_strength = c.color_strength = 1.0F;
+    c.hdr_mode = hdr ? 1U : 0U;
+    c.region_size[0] = c.region_size[1] = f.region;
+    c.foveation_width = c.foveation_height = 1.0F;
+    c.foveation_roundness = 1.0F; c.foveation_feather = 0.45F;  // round, the default 0.45 edge fade
+    c.padding[0] = mode; c.padding[1] = flags;
+    return c;
+}
+// A scene: smooth light-to-dark structure with fine detail, linear 0.04..0.9 of paper white (per channel).
+float scene(std::uint32_t x, std::uint32_t y, std::uint32_t c, std::uint32_t size, std::mt19937& random) {
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    const float u = (x + 0.5F) / size, v = (y + 0.5F) / size;
+    const float base = 0.45F + 0.3F * std::sin(6.0F * u + 1.3F * c) * std::cos(4.0F * v - 0.7F * c);
+    return std::clamp(base + 0.04F * (unit(random) - 0.5F), 0.04F, 0.9F);
+}
+// Uploads the original and the codec inputs of a DLSS 5 frame whose output is the input times `gain` per channel
+// (HDR: proxy and neural sRGB-encoded as the encode and the model write them). `black` = an all-black frame.
+void upload_scene(Gpu& gpu, MatchFrame& f, bool hdr, std::array<float, 3> gain, std::uint32_t seed, bool black = false) {
+    std::mt19937 random(seed);
+    const float paper = hdr ? 2.5F : 1.0F;
+    std::vector<float> linear(static_cast<std::size_t>(f.region) * f.region * 4U);
+    for (std::uint32_t y = 0; y < f.region; ++y)
+        for (std::uint32_t x = 0; x < f.region; ++x)
+            for (std::uint32_t c = 0; c < 4U; ++c)
+                linear[(static_cast<std::size_t>(y) * f.region + x) * 4U + c] = c == 3U ? 1.0F : black ? 0.0F : scene(x, y, c, f.region, random);
+    std::vector<std::uint16_t> original(linear.size()), proxy(static_cast<std::size_t>(f.proxy) * f.proxy * 4U), neural(proxy.size());
+    f.original_values.resize(linear.size());
+    for (std::size_t i = 0; i < linear.size(); ++i) {
+        f.original_values[i] = linear[i] * (i % 4U == 3U ? 1.0F : paper);
+        original[i] = to_half(f.original_values[i]);
+    }
+    // The proxy at its own size: the scene's nearest texel (the codec's bilinear reads it back exactly at scale 1).
+    for (std::uint32_t y = 0; y < f.proxy; ++y)
+        for (std::uint32_t x = 0; x < f.proxy; ++x)
+            for (std::uint32_t c = 0; c < 4U; ++c) {
+                const auto sx = std::min(f.region - 1U, (x * f.region + f.region / 2U) / f.proxy);
+                const auto sy = std::min(f.region - 1U, (y * f.region + f.region / 2U) / f.proxy);
+                const float value = linear[(static_cast<std::size_t>(sy) * f.region + sx) * 4U + c];
+                const auto at = (static_cast<std::size_t>(y) * f.proxy + x) * 4U + c;
+                if (c == 3U) { proxy[at] = neural[at] = to_half(1.0F); continue; }
+                proxy[at] = to_half(hdr ? srgb_encode(value) : value);
+                neural[at] = to_half(hdr ? srgb_encode(value * gain[c]) : value * gain[c]);
+            }
+    upload(gpu, f.original.Get(), original);
+    upload(gpu, f.proxy_texture.Get(), proxy);
+    upload(gpu, f.neural.Get(), neural);
+}
+// One frame as dlss_nr.cpp records it: the match (one group), a UAV barrier on the state, the decode.
+void run_match_frame(Gpu& gpu, MatchFrame& f, const CodecConstants& constants, bool match = true) {
+    if (match) {
+        record(gpu, f.binding, gpu.match.Get(), constants, 1U, 1U);
+        D3D12_RESOURCE_BARRIER uav_barrier{};
+        uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uav_barrier.UAV.pResource = f.binding.state.Get();
+        gpu.list->ResourceBarrier(1U, &uav_barrier);
+    }
+    record(gpu, f.binding, gpu.pipelines[0][1].Get(), constants, f.region, f.region);
+    gpu.submit_and_wait();
+}
+// Mean output / input (luminance, or one channel) over the fully weighted core (distance <= 0.5 of the round region).
+double core_ratio(const MatchFrame& f, const std::vector<float>& decoded, Gpu&, int channel = -1) {
+    const auto& original = f.original_values;
+    double in{}, out{};
+    for (std::uint32_t y = 0; y < f.region; ++y)
+        for (std::uint32_t x = 0; x < f.region; ++x) {
+            const double dx = 2.0 * (x + 0.5) / f.region - 1.0, dy = 2.0 * (y + 0.5) / f.region - 1.0;
+            if (dx * dx + dy * dy > 0.25) continue;
+            const auto at = (static_cast<std::size_t>(y) * f.region + x) * 4U;
+            const auto value = [&](const std::vector<float>& image) {
+                return channel >= 0 ? static_cast<double>(image[at + channel])
+                    : 0.2126 * image[at] + 0.7152 * image[at + 1] + 0.0722 * image[at + 2]; };
+            in += value(original); out += value(decoded);
+        }
+    return out / in;
+}
+
+int run_match_tests(Gpu& gpu) {
+    std::printf("Brightness match on %s%s\n", gpu.name.c_str(), gpu.hardware ? "" : " (WARP)");
+    int failures{};
+    const auto expect = [&](bool ok, const std::string& what) {
+        std::printf("  %s %s\n", ok ? "pass" : "FAIL", what.c_str());
+        if (!ok) ++failures;
+    };
+    char text[256]{};
+    // 1. A focus darker by a known gain is brought back within 0.5 % (luminance mode, SDR and HDR, scale 1 and 0.75).
+    for (const bool hdr : {false, true})
+        for (const auto [region, proxy] : {std::pair{256U, 256U}, std::pair{256U, 192U}})
+            for (const float k : {0.95F, 0.97F, 1.04F}) {
+                auto f = match_frame(gpu, region, proxy);
+                upload_scene(gpu, f, hdr, {k, k, k}, 7U);
+                run_match_frame(gpu, f, match_constants(f, hdr, 0U, 0U), false);
+                const double off = core_ratio(f, readback(gpu, f.decoded.Get()), gpu);
+                run_match_frame(gpu, f, match_constants(f, hdr, 1U, 0U));
+                const auto state = read_state(gpu, f.binding.state.Get());
+                const double on = core_ratio(f, readback(gpu, f.decoded.Get()), gpu);
+                std::snprintf(text, sizeof(text), "%s %ux%u working %u, output x%.2f: disc %.4f -> %.4f, gain %.4f (1/k %.4f)",
+                    hdr ? "HDR" : "SDR", region, region, proxy, k, off, on, state[0], 1.0 / k);
+                expect(std::fabs(on - 1.0) <= 0.005 && std::fabs(state[0] * k - 1.0) <= 0.005 &&
+                    state[0] == state[1] && state[1] == state[2], text);
+            }
+    // 2. Equal brightness: no change. SDR at scale 1 the gain is exactly 1 and the output the decode's own bits.
+    for (const bool hdr : {false, true}) {
+        auto f = match_frame(gpu, 256U, 256U);
+        upload_scene(gpu, f, hdr, {1.0F, 1.0F, 1.0F}, 11U);
+        run_match_frame(gpu, f, match_constants(f, hdr, 0U, 0U), false);
+        const auto off = readback(gpu, f.decoded.Get());
+        run_match_frame(gpu, f, match_constants(f, hdr, 1U, 0U));
+        const auto on = readback(gpu, f.decoded.Get());
+        const auto state = read_state(gpu, f.binding.state.Get());
+        const bool same = std::memcmp(off.data(), on.data(), off.size() * sizeof(float)) == 0;
+        std::snprintf(text, sizeof(text), "%s equal brightness: gain %.7f, output %s", hdr ? "HDR" : "SDR", state[0],
+            same ? "bit-identical" : "changed");
+        expect(hdr ? std::fabs(state[0] - 1.0F) <= 0.0005F && std::fabs(core_ratio(f, on, gpu) - 1.0) <= 0.0005
+                   : state[0] == 1.0F && same, text);
+    }
+    // 3. Bounded: a far darker or brighter output only gets 1.1 / 0.9.
+    for (const float k : {0.7F, 1.4F}) {
+        auto f = match_frame(gpu, 256U, 256U);
+        upload_scene(gpu, f, false, {k, k, k}, 13U);
+        run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+        const auto state = read_state(gpu, f.binding.state.Get());
+        const float bound = k < 1.0F ? 1.1F : 0.9F;
+        std::snprintf(text, sizeof(text), "output x%.2f: gain %.6f, bounded at %.1f", k, state[0], bound);
+        expect(std::fabs(state[0] - bound) <= 1e-6F, text);
+    }
+    // 4. Over time: steady, a slow change glides at the rate (no overshoot), a black frame keeps the gain, a cut with an
+    //    NR history reset snaps, mode 0 ignores a valid state.
+    {
+        auto f = match_frame(gpu, 256U, 256U);
+        upload_scene(gpu, f, false, {0.95F, 0.95F, 0.95F}, 17U);
+        run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+        const float first = read_state(gpu, f.binding.state.Get())[0];
+        float steady_step{};
+        for (int i = 0; i < 20; ++i) {
+            run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+            steady_step = std::max(steady_step, std::fabs(read_state(gpu, f.binding.state.Get())[0] - first));
+        }
+        std::snprintf(text, sizeof(text), "steady scene, 20 frames: gain %.5f, largest change %.2g", first, steady_step);
+        expect(steady_step <= 1e-6F, text);
+        // The scene's DLSS 5 output turns 0.97 without a reset: 0.05 of the way per frame, monotonic.
+        upload_scene(gpu, f, false, {0.97F, 0.97F, 0.97F}, 17U);
+        run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+        const float target = read_state(gpu, f.binding.state.Get())[0];  // after one step
+        float previous = target, worst_step{};
+        bool monotonic = true;
+        for (int i = 0; i < 60; ++i) {
+            run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+            const float gain = read_state(gpu, f.binding.state.Get())[0];
+            monotonic = monotonic && gain <= previous && gain >= 1.0F / 0.97F - 0.0002F;
+            worst_step = std::max(worst_step, previous - gain);
+            previous = gain;
+        }
+        std::snprintf(text, sizeof(text), "slow change 0.95 -> 0.97 without a reset: %.4f, %.4f after 1 frame, %.4f after 61 "
+            "(target %.4f), largest step %.5f, monotonic %s", first, target, previous, 1.0 / 0.97, worst_step,
+            monotonic ? "yes" : "no");
+        expect(monotonic && worst_step <= 0.05F * (first - 1.0F / 0.97F) + 1e-5F &&
+            std::fabs(first - target - 0.05F * (first - 1.0F / 0.97F)) <= 0.0005F &&
+            std::fabs(previous * 0.97F - 1.0F) <= 0.002F, text);
+        // A black frame (nothing to measure) keeps the gain.
+        upload_scene(gpu, f, false, {0.9F, 0.9F, 0.9F}, 19U, true);
+        run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+        const float black = read_state(gpu, f.binding.state.Get())[0];
+        std::snprintf(text, sizeof(text), "black frame: gain %.5f kept (was %.5f)", black, previous);
+        expect(black == previous, text);
+        // A cut (NR history reset): the new scene's gain at once, in one frame.
+        upload_scene(gpu, f, false, {0.92F, 0.92F, 0.92F}, 23U);
+        run_match_frame(gpu, f, match_constants(f, false, 1U, 1U));
+        const float cut = read_state(gpu, f.binding.state.Get())[0];
+        run_match_frame(gpu, f, match_constants(f, false, 1U, 0U));
+        const float after = read_state(gpu, f.binding.state.Get())[0];
+        std::snprintf(text, sizeof(text), "cut with an NR reset to output x0.92: gain %.4f in one frame (1/k %.4f), next "
+            "frame %.4f", cut, 1.0 / 0.92, after);
+        expect(std::fabs(cut * 0.92F - 1.0F) <= 0.005F && std::fabs(after - cut) <= 1e-5F, text);
+        // Mode 0 with a valid gain in the state: the decode's own bits.
+        run_match_frame(gpu, f, match_constants(f, false, 0U, 0U), false);
+        const auto off = readback(gpu, f.decoded.Get());
+        record(gpu, f.binding, gpu.decode_before_match.Get(), match_constants(f, false, 0U, 0U), f.region, f.region);
+        gpu.submit_and_wait();
+        const auto before = readback(gpu, f.decoded.Get());
+        expect(std::memcmp(off.data(), before.data(), off.size() * sizeof(float)) == 0,
+            "match off with a valid gain left in the state: the decode before the match, bit for bit");
+    }
+    // 5. Per channel (mode 2): a colour cast is matched per channel; mode 1 keeps the cast, matches only brightness.
+    for (const bool hdr : {false, true}) {
+        const std::array<float, 3> cast{0.95F, 1.0F, 1.03F};
+        auto f = match_frame(gpu, 256U, 256U);
+        upload_scene(gpu, f, hdr, cast, 29U);
+        run_match_frame(gpu, f, match_constants(f, hdr, 2U, 0U));
+        const auto state = read_state(gpu, f.binding.state.Get());
+        const auto decoded = readback(gpu, f.decoded.Get());
+        double worst{};
+        for (int c = 0; c < 3; ++c) worst = std::max(worst, std::fabs(core_ratio(f, decoded, gpu, c) - 1.0));
+        std::snprintf(text, sizeof(text), "%s per channel, cast %.2f/%.2f/%.2f: gains %.4f/%.4f/%.4f, worst channel off by %.4f",
+            hdr ? "HDR" : "SDR", cast[0], cast[1], cast[2], state[0], state[1], state[2], worst);
+        expect(worst <= 0.005 && std::fabs(state[0] * cast[0] - 1.0F) <= 0.005F &&
+            std::fabs(state[1] - 1.0F) <= 0.005F && std::fabs(state[2] * cast[2] - 1.0F) <= 0.005F, text);
+    }
+    // 6. GPU time on the hardware adapter, at the DCS focus size (1764 region, working 1323): the match pass, and the
+    //    decode with the match on against off.
+    if (gpu.hardware) {
+        auto f = match_frame(gpu, 1764U, 1323U);
+        upload_scene(gpu, f, true, {0.95F, 0.95F, 0.95F}, 31U);
+        const auto on = match_constants(f, true, 1U, 0U), off = match_constants(f, true, 0U, 0U);
+        run_match_frame(gpu, f, on);
+        static_cast<void>(time_ms(gpu, f.binding, gpu.match.Get(), on, 1U, 1U));
+        for (int round = 0; round < 3; ++round) {
+            const double match = time_ms(gpu, f.binding, gpu.match.Get(), on, 1U, 1U);
+            const double decode_off = time_ms(gpu, f.binding, gpu.pipelines[0][1].Get(), off, f.region, f.region);
+            const double decode_on = time_ms(gpu, f.binding, gpu.pipelines[0][1].Get(), on, f.region, f.region);
+            std::printf("  GPU time 1764x1764, working 1323x1323, round %d (median of 60): match %.4f ms, decode %.4f ms "
+                "off, %.4f ms on (per view)\n", round, match, decode_off, decode_on);
+        }
+    }
+    return failures;
+}
+
 // The build embeds d3d_shaders.hpp; it must be the current codec source compiled (patch-cheeky.py regenerates it).
 void check_embedded_bytecode() {
     using namespace cheeky::foveated_dlss;
@@ -546,12 +869,18 @@ void check_embedded_bytecode() {
     require(encode->GetBufferSize() == d3d_shaders::nr_encode.size &&
         std::memcmp(encode->GetBufferPointer(), d3d_shaders::nr_encode.data, d3d_shaders::nr_encode.size) == 0,
         "d3d_shaders.hpp nr_encode is not compiled from the current nr_codec_shader.hpp");
+    const auto match = compile(Variant::shipped, "MatchMain");
+    require(match->GetBufferSize() == d3d_shaders::nr_match.size &&
+        std::memcmp(match->GetBufferPointer(), d3d_shaders::nr_match.data, d3d_shaders::nr_match.size) == 0,
+        "d3d_shaders.hpp nr_match is not compiled from the current nr_codec_shader.hpp");
 }
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         const bool sampled = argc > 1 && std::strcmp(argv[1], "--sampled") == 0;
+        // --match: only the brightness match tests (and the bytecode check).
+        const bool match_only = argc > 1 && std::strcmp(argv[1], "--match") == 0;
         check_embedded_bytecode();
         ComPtr<IDXGIFactory4> factory;
         check(CreateDXGIFactory2(0U, IID_PPV_ARGS(&factory)), "DXGI factory");
@@ -560,7 +889,8 @@ int main(int argc, char** argv) {
         check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "WARP adapter");
         {
             auto gpu = make_gpu(warp.Get(), false, sampled);
-            failures += run_adapter(gpu, sampled);
+            if (!match_only) failures += run_adapter(gpu, sampled);
+            failures += run_match_tests(gpu);
         }
         ComPtr<IDXGIAdapter1> adapter;
         for (UINT index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index, adapter.Reset()) {
@@ -569,14 +899,16 @@ int main(int argc, char** argv) {
             if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ||
                 FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr))) continue;
             auto gpu = make_gpu(adapter.Get(), true, sampled);
-            failures += run_adapter(gpu, sampled);
+            if (!match_only) failures += run_adapter(gpu, sampled);
+            failures += run_match_tests(gpu);
             break;
         }
         if (failures) {
-            std::fprintf(stderr, "FAIL: %d codec cases differ from upstream's four-load lerp\n", failures);
+            std::fprintf(stderr, "FAIL: %d codec cases (four-load lerp, decode before the match, brightness match)\n", failures);
             return 1;
         }
-        std::puts("PASS: NR codec bytecode current, encode and decode bit-identical to upstream's four-load lerp");
+        std::puts("PASS: NR codec bytecode current, encode and decode bit-identical to upstream's four-load lerp and, with "
+            "the brightness match off, to the decode before it; brightness match within 0.5 %, bounded, stable");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "DCS NR codec test: %s\n", error.what());

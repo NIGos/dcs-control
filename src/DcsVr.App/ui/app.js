@@ -760,13 +760,14 @@ function buildFields() {
   field(c,'neuralColorStrength','Color strength','Color reconstruction strength.','number',[0,2,.01],nr,'×');
   field(c,'neuralTransferStrength','Transfer strength','Transfer response strength.','number',[0,2,.01],nr,'×');
   field(c,'neuralPaperWhiteScale','Paper white scale','White-level multiplier.','number',[.01,8,.01],nr,'×');
+  field(c,'neuralBrightnessMatch','Match brightness','Keeps the DLSS 5 area as bright as the view around it.','toggle',null,nr);
   c = card('neuralRight','Depth & motion guides','Defaults: follow the game, 1×. Change only to fix a known guide issue.'); c.dataset.dev = '1';
   segmented(field(c,'neuralDepth','Depth convention','Follow the game or force a convention.','select',[['Game','Follow the game · default'],['Normal','Normal depth'],['Reversed','Reversed depth']],nr),{Game:'Game',Normal:'Normal',Reversed:'Reversed'});
   field(c,'neuralMotionScaleX','Motion scale X','Horizontal motion vector multiplier.','number',[-4,4,.01],nr,'×');
   field(c,'neuralMotionScaleY','Motion scale Y','Vertical motion vector multiplier.','number',[-4,4,.01],nr,'×');
   // The static Advanced image controls fold: how many model corrections are away from their defaults.
   { const ones = ['neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralColorStrength','neuralTransferStrength','neuralPaperWhiteScale','neuralMotionScaleX','neuralMotionScaleY'];
-    foldValues.push({box:$('neuralAdvanced'),value:p => { const n = ones.filter(k => Number(p[k]) !== 1).length + ['neuralAutomaticMask','neuralUiCorrection'].filter(k => p[k]).length + (p.neuralDepth !== 'Game' ? 1 : 0);
+    foldValues.push({box:$('neuralAdvanced'),value:p => { const n = ones.filter(k => Number(p[k]) !== 1).length + ['neuralAutomaticMask','neuralUiCorrection','neuralBrightnessMatch'].filter(k => p[k]).length + (p.neuralDepth !== 'Game' ? 1 : 0);
       return n ? `${n} changed` : 'All at defaults'; }}); }
   // Frame generation page. Left: how many frames are generated. Right: the DCS frame limit, how generated frames look,
   // then one fold for troubleshooting.
