@@ -18,6 +18,8 @@ $patterns = [ordered]@{
 
 
     'steam-library'  = '\b[A-Z]:[\\/]+SteamLibrary\b'
+    # Any Steam ID (SteamID64): Steam's API prints the pilot's into DCS's output, which the rig runs capture.
+    'steam-id'       = '(?<!\d)7656119\d{10}(?!\d)'
 }
 $allow = @()
 $allowFile = Join-Path $PSScriptRoot 'personal-data-allow.txt'

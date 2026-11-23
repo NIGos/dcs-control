@@ -520,6 +520,19 @@ Test("Originals: another program's file updated after DCS Control replaced it is
     Require(Directory.GetFiles(store.Directory, "*.original").Length == backups, "The superseded backup is deleted");
     Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade 6.3");
 });
+Test("Originals: a backup that went missing (an antivirus quarantine) never has its name reused for the next backup", () =>
+{
+    var bin = Path.Combine(root, "originals/quarantined/bin"); var dxgi = Make("originals/quarantined/bin/dxgi.dll", "ReShade 6.0");
+    var store = new OriginalsStore(Path.Combine(root, "originals/quarantined/state"));
+    store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader", bin)));
+    // The only (so the highest-numbered) backup disappears, then ReShade's updater puts its newer dxgi.dll back.
+    var lost = Directory.GetFiles(store.Directory, "*.original").Single(); File.Delete(lost);
+    AtomicFile.WriteText(dxgi, "ReShade 6.1");
+    store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader", bin)));
+    // Before: the new backup took the lost one's name, and deleting the superseded entry's backup deleted it.
+    Require(Directory.GetFiles(store.Directory, "*.original") is [var kept] && kept != lost && File.ReadAllText(kept) == "ReShade 6.1", "The newer file's backup is kept under a new name");
+    Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade 6.1", "Back to stock DCS brings back the newer file");
+});
 Test("Originals: another program's library the pilot installs where DCS Control's file was (an empty path before) is backed up, and a newer one survives a profile without it", () =>
 {
     var bin = Path.GetFullPath(Path.Combine(root, "originals/pilot-install/bin")); System.IO.Directory.CreateDirectory(bin); var dxgi = Path.Combine(bin, "dxgi.dll"); var other = Path.Combine(bin, "other.dll");
@@ -938,6 +951,9 @@ Test("Presets are named files: clean names, one active, rename and delete follow
     File.WriteAllText(store.PathOf("Broken"), "not json");
     var details = store.Details();
     Require(details.Count == 3 && details.Single(d => d.Name == "Heavy mission").Summary == "Pimax · Quad Views" && details.Single(d => d.Name == "Broken").Summary is null, "details say what each preset runs; an unreadable file is still listed");
+    // Files copied in by hand under names no preset can have: left out, never a failure of the whole list (the page's state).
+    File.WriteAllText(Path.Combine(store.Root, new string('x', PresetStore.MaxNameLength + 1) + ".json"), "{}"); File.WriteAllText(Path.Combine(store.Root, "Two  spaces.json"), "{}");
+    Require(store.Details().Count == 3 && store.List().Count == 3, "names no preset can have are not listed");
 });
 Test("A DCS that looks stuck is offered to be ended only after it stayed that way (GitHub #21)", () =>
 {
@@ -1002,6 +1018,8 @@ Test("End DCS: a DCS Windows refuses to end (administrator rights, GitHub #21) i
         var start = DcsProcess.ElevatedEndStart(Path.GetDirectoryName(cli));
         Require(start is { Verb: "runas", UseShellExecute: true } && start.ArgumentList.SequenceEqual([DcsProcess.EndCommand]), "elevated end-dcs");
         Require(DcsProcess.ElevatedEndStart(Path.Combine(root, "no-cli")) is null, "no CLI, no elevated try");
+        // Only this Windows session's DCS is read and ended (elevated, another signed-in user's could be ended too).
+        using (var self = Process.GetCurrentProcess()) Require(DcsProcess.InThisSession(self.SessionId) && !DcsProcess.InThisSession(self.SessionId + 1), "another session's DCS is never ended");
         var output = new StringWriter();
         DcsProcess.HealthProvider = () => DcsHealth.Healthy;
         Require(DcsProcess.EndFromCommand(output) == DcsProcess.HealthyCode, "the command leaves a healthy DCS running");
@@ -1847,6 +1865,22 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
         + "\n[RequestReportSn]   token: ECT:[[[AAAABBBBCCCCDDDDEE]]] | SetAccountInfo: userId=12345, isValid=1 | Pimax Crystal Super, serial number: X999TEST000000000001 | Serial:X999TEST000000000001 | map X999TEST000000000001platMap");
     Require(!text.Contains(@"Users\Al") && !text.Contains(@"Users\\Al") && !text.Contains("Users/Al") && !text.Contains("Nicol") && !text.Contains("RIG-01") && text.Contains("Algebra stays"), text);
     Require(!text.Contains("AAAABBBBCC") && !text.Contains("12345") && !text.Contains("X999TEST") && text.Contains("token: <token>") && text.Contains("userId=<id>") && text.Contains("serial number: <serial>"), text);
+    // Steam IDs, as Steam's API prints them into DCS's output; other long numbers stay.
+    // (Built from parts: scripts/check-personal-data.ps1 refuses a Steam ID in the sources.)
+    var steamId = "7656119" + "8000000001";
+    var steam = redact($"SteamInternal_SetMinidumpSteamID:  Caching Steam ID:  {steamId} [API loaded no] | [U:1:39734273] | frame {steamId}2 | 1234567890123456");
+    Require(!steam.Contains(steamId + " ") && !steam.Contains("39734273") && steam.Contains("Steam ID:  <steam id> [API") && steam.Contains("[U:1:<id>]") && steam.Contains(steamId + "2") && steam.Contains("1234567890123456"), steam);
+});
+Test("The Diagnostic report (and the CLI's diagnostic) has the user's folder and name removed, as the package has", () =>
+{
+    var profileFolder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    var service = new ControlService(Path.Combine(root, "report-redaction/distribution"), Path.Combine(root, "report-redaction/state"));
+    var output = Path.Combine(root, "report-redaction/report.json");
+    var inventory = new InventorySnapshot { DcsExecutable = Path.Combine(root, "report-redaction/game/bin/DCS.exe"), OptionsPath = Path.Combine(profileFolder, @"Saved Games\DCS\Config\options.lua") };
+    service.ExportDiagnostic(inventory, new VrProfile(), output);
+    var json = File.ReadAllText(output);
+    Require(json.Contains(@"C:\\Users\\<user>\\Saved Games", StringComparison.Ordinal) && !json.Contains(profileFolder.Replace("\\", "\\\\"), StringComparison.OrdinalIgnoreCase)
+        && (Environment.UserName.Length < 3 || !json.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase)), json);
 });
 Test("Pupil shift takes over DCS's custom IPD (same value, applied by the layer) and leaves it alone otherwise", () =>
 {
@@ -3393,6 +3427,11 @@ Test("Readiness reports elevation and write access", () =>
     Require(report.Checks.Single(c => c.Id == "write-access").State == CheckState.Pass);
     Require(LaunchSafety.CanWrite(Path.Combine(root, "elevation/Config")) && !LaunchSafety.CanWrite(Path.Combine(root, "elevation/missing")));
     Require(Directory.GetFiles(Path.Combine(root, "elevation/Config")).Length == 1);
+    // Fix write access: PowerShell and icacls by full System32 path, never by bare name with administrator rights.
+    var grant = LaunchSafety.GrantWriteAccessStart([@"D:\Games\DCS World's\bin\"], "S-1-5-21-1-2-3-1001");
+    var script = Encoding.Unicode.GetString(Convert.FromBase64String(grant.Arguments[(grant.Arguments.LastIndexOf(' ') + 1)..]));
+    Require(grant is { Verb: "runas", UseShellExecute: true } && grant.FileName == Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"), grant.FileName);
+    Require(script.Contains("& '" + Path.Combine(Environment.SystemDirectory, "icacls.exe") + "' 'D:\\Games\\DCS World''s\\bin' /grant '*S-1-5-21-1-2-3-1001:(OI)(CI)M'", StringComparison.Ordinal), script);
 });
 Test("Junctions above the authorized root are accepted, links below it are rejected", () =>
 {

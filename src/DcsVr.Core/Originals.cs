@@ -125,7 +125,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             var original = Find(baseline, full);
             if (original is null)
             {
-                original = Capture(file, full, own);
+                original = Capture(file, full, own, baseline);
                 baseline.Files.Add(original);
                 if (original.Foreign) replaced.Add(full);
                 Log($"First write of {full}: " + (original.Foreign ? "another program's file, backed up as " + original.BackupFile : original.BackupFile is not null ? "original backed up as " + original.BackupFile : original.Leftover ? "a file identical to a DCS Control component, counted as absent" : "absent before"));
@@ -136,7 +136,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 // update, for example): that file becomes the original Back to stock DCS puts back.
                 var at = baseline.Files.IndexOf(original);
                 superseded.Add(original);
-                original = Capture(file, full, own) with { Since = original.Since };
+                original = Capture(file, full, own, baseline) with { Since = original.Since };
                 baseline.Files[at] = original;
                 if (original.Foreign) replaced.Add(full);
                 Log($"{full} was replaced after DCS Control installed it ({newer}); the new file is backed up as {original.BackupFile}.");
@@ -441,7 +441,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         return written;
     }
 
-    private OriginalFile Capture(FileMutation file, string full, IReadOnlySet<string> own)
+    private OriginalFile Capture(FileMutation file, string full, IReadOnlySet<string> own, OriginalsBaseline baseline)
     {
         var root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root);
         var settings = file.LuaChanges is null ? null : new Dictionary<string, string?>();
@@ -455,7 +455,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         if (settings is null && (file.OwnedLocation || !Leftovers.UpstreamHashes.Contains(hash)
             && (hash == Hashing.BytesSha256(file.Content) || own.Contains(hash) || file.OwnHashes?.Contains(hash) == true)))
             return new() { Path = full, Root = root, Leftover = true };
-        var backup = NextBackupName();
+        var backup = NextBackupName(baseline);
         AtomicFile.Write(System.IO.Path.Combine(Directory, backup), bytes);
         return new() { Path = full, Root = root, OriginalSha256 = hash, BackupFile = backup, Foreign = settings is null, Settings = settings };
     }
@@ -635,7 +635,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                         notes.Add($"  {entry.Path}: the backup is missing or damaged; this path is left out (its file stays as it is).");
                         continue;
                     }
-                    backup = NextBackupName();
+                    backup = NextBackupName(baseline);
                     AtomicFile.Write(System.IO.Path.Combine(Directory, backup), bytes);
                     if (Hashing.FileSha256(System.IO.Path.Combine(Directory, backup)) != previous) throw new IOException("A converted backup could not be verified: " + entry.Path);
                 }
@@ -797,12 +797,19 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    private string NextBackupName()
+    /// <summary>A name no backup file, no entry of the record and no earlier call of this store uses: an entry whose backup
+    /// went missing (quarantined by an antivirus, for example) keeps its name, and a new backup under that name would be
+    /// deleted with that entry, or put back in its place.</summary>
+    private string NextBackupName(OriginalsBaseline baseline)
     {
         System.IO.Directory.CreateDirectory(Directory);
-        var next = System.IO.Directory.EnumerateFiles(Directory, "*.original").Select(p => int.TryParse(System.IO.Path.GetFileNameWithoutExtension(p), out var n) ? n : -1).DefaultIfEmpty(-1).Max() + 1;
+        static int Number(string? name) => int.TryParse(System.IO.Path.GetFileNameWithoutExtension(name), out var n) ? n : -1;
+        var next = System.IO.Directory.EnumerateFiles(Directory, "*.original").Select(Number)
+            .Concat(baseline.Files.Select(f => Number(f.BackupFile))).Append(_lastBackup).Max() + 1;
+        _lastBackup = next;
         return next.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) + ".original";
     }
+    private int _lastBackup = -1;
 
     private void DeleteBackup(OriginalFile original)
     {

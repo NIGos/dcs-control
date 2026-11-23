@@ -394,7 +394,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public string ExportDiagnostic(InventorySnapshot inventory, VrProfile profile, string output)
     {
         var report = new { schemaVersion = 1, version = ProductInfo.Version, inventory, profile, cadence = FramePacing.Describe(profile, inventory), pacingChecks = FramePacing.Checks(profile, inventory), pipeline = profile.UsesQuadFocus ? "DCS quad views -> mapped focus processing -> software stereo composition -> optional OFXR -> selected runtime" : "Standard profile", issues = ProfileValidation.Validate(ResolveNeuralRuntime(profile), inventory), originals = Originals.Status(), packages = PackageCatalog.All };
-        AtomicFile.WriteText(output, JsonData.Serialize(report));
+        Diagnostics.WriteReport(output, JsonData.Serialize(report));
         return Path.GetFullPath(output);
     }
 

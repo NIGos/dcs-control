@@ -216,11 +216,7 @@ public static class LaunchSafety
         if (folders.Count == 0) return true;
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
         var sid = identity.User?.Value ?? throw new InvalidOperationException("The current Windows account could not be identified.");
-        static string Quoted(string s) => "'" + s.Replace("'", "''") + "'";
-        var script = "$code = 0\n" + string.Concat(folders.Select(f =>
-            $"& icacls.exe {Quoted(f.TrimEnd('\\', '/'))} /grant {Quoted("*" + sid + ":(OI)(CI)M")} /C /Q; if ($LASTEXITCODE -ne 0) {{ $code = $LASTEXITCODE }}\n")) + "exit $code\n";
-        var start = new System.Diagnostics.ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)))
-        { UseShellExecute = true, Verb = "runas", WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden };
+        var start = GrantWriteAccessStart(folders, sid);
         try
         {
             using var process = System.Diagnostics.Process.Start(start) ?? throw new InvalidOperationException("Windows did not start the permission change.");
@@ -230,6 +226,19 @@ public static class LaunchSafety
         catch (System.ComponentModel.Win32Exception e) { throw new InvalidOperationException("Windows refused to run the permission change (" + e.Message + "). " + WriteAccessAdvice, e); }
         ForgetWriteProbes();
         return true;
+    }
+
+    /// <summary>The elevated PowerShell of <see cref="GrantWriteAccess"/>. PowerShell and icacls by their full System32
+    /// paths: a bare name started with administrator rights would be looked up through App Paths (which the user's own
+    /// registry can redirect) and the search path.</summary>
+    internal static System.Diagnostics.ProcessStartInfo GrantWriteAccessStart(IReadOnlyList<string> folders, string sid)
+    {
+        static string Quoted(string s) => "'" + s.Replace("'", "''") + "'";
+        var icacls = Quoted(Path.Combine(Environment.SystemDirectory, "icacls.exe"));
+        var script = "$code = 0\n" + string.Concat(folders.Select(f =>
+            $"& {icacls} {Quoted(f.TrimEnd('\\', '/'))} /grant {Quoted("*" + sid + ":(OI)(CI)M")} /C /Q; if ($LASTEXITCODE -ne 0) {{ $code = $LASTEXITCODE }}\n")) + "exit $code\n";
+        return new(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)))
+        { UseShellExecute = true, Verb = "runas", WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden };
     }
 
     /// <summary>Creates and immediately deletes a probe file, which is the only reliable answer under UAC virtualization and ACLs.</summary>
