@@ -55,7 +55,7 @@ public static class Leftovers
         || component.Equals("cheeky-focus/dxgi.dll", StringComparison.OrdinalIgnoreCase) || component.Equals("cheeky-focus/version.dll", StringComparison.OrdinalIgnoreCase);
 
     private static readonly string[] CheekyAnchors = ["CheekyFoveatedDLSSHost.dll", "CheekyFoveatedDLSSRuntime.dll"];
-    private static readonly string[] CheekyCompanions = ["CheekyFoveatedDLSS.ini", "nvngx_dlssnr.dll", "CheekyFoveatedDLSS-Host.log", "CheekyFoveatedDLSS-Standalone.log", OwnerMark];
+    private static readonly string[] CheekyCompanions = ["CheekyFoveatedDLSS.ini", "nvngx_dlssnr.dll", "CheekyFoveatedDLSS-Host.log", "CheekyFoveatedDLSS-Standalone.log", "CheekyFoveatedDLSS-Host.prev.log", "CheekyFoveatedDLSS-Standalone.prev.log", OwnerMark];
     /// <summary>dxgi.dll is the loader DCS Control installs; version.dll was the Foveated SR loader of 0.2-0.3.</summary>
     private static readonly string[] Loaders = ["dxgi.dll", "version.dll"];
     /// <summary>Folders only DCS Control creates: removed when a leftover sweep leaves them empty.</summary>

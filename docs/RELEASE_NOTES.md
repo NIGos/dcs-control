@@ -66,6 +66,20 @@ There was no 0.6.7: what it was going to bring is in this version too, under **A
 - Back to stock DCS also removes the engine module's new 0.7 log files.
 - On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
 - After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because DCS Control has not been checked against that DCS version yet. Before, they stopped without a word.
+- After an update, Launch DCS also installs the new version's frame generation, Quad Views, DLSS 5 and engine module files when your settings are unchanged. Before, the earlier version's files could stay in use until you changed a setting.
+- If DCS Control's record of the files it changed is damaged or deleted, it uses its last good copy. If both are damaged, the Stock DCS page says so instead of the app failing, and Back to stock DCS removes only DCS Control's own files.
+- Back to stock DCS keeps a DCS setting you changed yourself after DCS Control set it (Max FPS, for example), instead of setting it back.
+- Importing a profile or preset no longer turns on Developer options or their file paths unless your current profile already has them; developer files on a network share are refused.
+- Uninstalling the ZIP version puts DCS back to stock first, and stops with a clear message if it can't. The setup's uninstaller also offers Back to stock DCS when DCS Control's files are in DCS without a record.
+- A backup that went missing (an antivirus quarantine, for example) can no longer cost the newer original of another program's file, such as ReShade's dxgi.dll.
+- Diagnostics: the Diagnostic report is now cleaned like the package; Steam IDs, headset serial numbers (also in SteamVR's logs and in files written before the one that names it) and network and MAC addresses are removed.
+- Checks: a new "DCS version" line says when parts made for known DCS builds stayed off at the last DCS start, also for frame generation, Sharp HUD, Depth boost and Far depth with Engine Optimizations off. The HUD after DLSS check names the autoexec.cfg of the Saved Games folder you use (DCS.openbeta too).
+- Without DLSS 5, the colour modes no longer show DCS's own tone map in a view for a frame now and then, and Skip unused effects works on that route too.
+- Skip unused effects could drop the heat haze while something hot was drawn; Skip hidden water could lose some of DCS's uploads in rare frames. Both fixed.
+- Far depth: turning it off while DCS is busy can no longer crash Quad Views (rare).
+- Other hardware: CPU Boost no longer lists headset services as moving on CPUs too small to move them, and Move VR runtime is for the Pimax route only; DLSS 5 says when NVIDIA's original file cannot run on an RTX 20-40 card; Read settings from this PC tells Index, Varjo, Reverb and Meta users to choose Optimizations only.
+- One long preset name copied in by hand no longer breaks the app's pages. End DCS only ever looks at DCS in your own Windows session.
+- DLSS 5's crash and runtime logs are rotated, so a real crash is still logged after a long time; DCS Control's modules load Windows DLLs only from System32.
 
 # 0.6.6 preview
 
