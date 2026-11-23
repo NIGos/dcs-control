@@ -257,10 +257,14 @@ public static partial class Diagnostics
 
     private static string Readme(IReadOnlyList<DiagnosticEntry> entries) =>
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"
-        + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids and the headset's serial number by <token>, <id> and <serial>.\n"
+        + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids, Steam IDs and the headset's serial number by <token>, <id>, <steam id> and <serial>.\n"
         + "Start with summary.txt: the headset software and the in-flight switches of these logs.\n"
         + "Large logs are cut to their last 8 MB (marked below).\n\n"
         + string.Join("\n", entries.Select(e => string.Create(CultureInfo.InvariantCulture, $"{e.Name}  ({e.Bytes:N0} bytes{(e.Truncated ? ", last part" : "")})  from {e.Source}")));
+
+    /// <summary>Writes a report the pilot may attach to an issue (Diagnostic report, the CLI's <c>diagnostic</c>) with the
+    /// same names removed as in the diagnostic package.</summary>
+    public static void WriteReport(string path, string text) => AtomicFile.WriteText(path, Redactor()(text));
 
     /// <summary>Replaces the Windows user name (also in the user's profile folder), the PC name and e-mail addresses.</summary>
     internal static Func<string, string> Redactor() => Redactor(Environment.UserName, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.MachineName);
@@ -291,9 +295,14 @@ public static partial class Diagnostics
             // A serial number seen once (next to its label) is removed wherever else it appears, also in later files.
             foreach (Match m in SerialRegex().Matches(text)) serials.Add(m.Value[(m.Groups["key"].Length + m.Groups["sep"].Length)..]);
             foreach (var serial in serials) text = text.Replace(serial, "<serial>", StringComparison.OrdinalIgnoreCase);
+            // Steam IDs: what Steam's API prints into DCS's output ("Caching Steam ID: 7656119…"), in both spellings.
+            text = SteamId64Regex().Replace(text, "<steam id>");
+            text = SteamId3Regex().Replace(text, "[U:1:<id>]");
             return EmailRegex().Replace(text, "<e-mail>");
         };
     }
+    [GeneratedRegex(@"(?<!\d)7656119\d{10}(?!\d)")] private static partial Regex SteamId64Regex();
+    [GeneratedRegex(@"\[U:1:\d+\]")] private static partial Regex SteamId3Regex();
     [GeneratedRegex(@"[\w.+-]+@[\w-]+(\.[\w-]+)+")] private static partial Regex EmailRegex();
     [GeneratedRegex(@"(?<=Users[\\/]{1,2})[^\\/\s]{1,6}~\d+", RegexOptions.IgnoreCase)] private static partial Regex ShortProfileRegex();
     [GeneratedRegex(@"(?<key>\b(?:access_?token|refresh_?token|token|authorization|bearer)\b)(?<sep>[""']?\s*[:=]\s*[""']?\s*)(?!<token>)[^\s,""'}]+", RegexOptions.IgnoreCase)] private static partial Regex TokenRegex();

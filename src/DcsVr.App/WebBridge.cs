@@ -955,7 +955,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 case "export":
                     EnsureInteractive(); var export = new SaveFileDialog { Filter = "Diagnostic report|*.json", FileName = "dcs-control-report.json" };
                     if (export.ShowDialog(owner) == true) { await Capture(); _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
-                        AtomicFile.WriteText(export.FileName, JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, inventory = CurrentInventory, profile = _profile, readiness = _readiness,
+                        Diagnostics.WriteReport(export.FileName, JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, inventory = CurrentInventory, profile = _profile, readiness = _readiness,
                             packages = PackageCatalog.All, originals = service.Originals.Status(), leftovers = Leftovers() })); _status = "Fresh diagnostic and readiness report exported."; } break;
                 case "importSboys":
                     EnsureInteractive(); var sboysImport = new OpenFileDialog { Title = "Import official Sboys 1.3.0 ZIP", Filter = "Official Sboys archive|*.zip" };

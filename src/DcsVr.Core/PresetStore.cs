@@ -29,9 +29,15 @@ public sealed class PresetStore(string stateRoot)
     public string PathOf(string name) => Path.Combine(Root, Clean(name) + ".json");
     public bool Exists(string name) => File.Exists(PathOf(name));
 
-    /// <summary>The presets by name, as their files are spelled.</summary>
+    /// <summary>The presets by name, as their files are spelled. A file whose name no preset can have (copied in by hand:
+    /// too long, double spaces) is left out: every use of the name would refuse it, the page's state included.</summary>
     public IReadOnlyList<string> List() => !Directory.Exists(Root) ? [] :
-        [.. Directory.EnumerateFiles(Root, "*.json").Select(Path.GetFileNameWithoutExtension).OfType<string>().Order(StringComparer.CurrentCultureIgnoreCase)];
+        [.. Directory.EnumerateFiles(Root, "*.json").Select(Path.GetFileNameWithoutExtension).OfType<string>().Where(IsCleanName).Order(StringComparer.CurrentCultureIgnoreCase)];
+    private static bool IsCleanName(string name)
+    {
+        try { return Clean(name) == name; }
+        catch (InvalidDataException) { return false; }
+    }
 
     /// <summary>The preset edits are saved into, or null: none chosen, or its file is gone.</summary>
     public string? Active

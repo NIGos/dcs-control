@@ -103,12 +103,23 @@ public static class DcsProcess
     public static Func<DcsEndResult> Ender { get; set; } = EndProcesses;
     public static DcsEndResult EndAll() => Ender();
 
+    /// <summary>Whether a process runs in this Windows session. Another signed-in user's DCS (fast user switching) has no
+    /// window here, so it would look stuck, and the elevated End DCS could end it: it is neither read nor ended, as Free
+    /// VRAM never closes another session's programs.</summary>
+    internal static bool InThisSession(int sessionId) => sessionId == CurrentSession.Value;
+    private static readonly Lazy<int> CurrentSession = new(() => { using var self = Process.GetCurrentProcess(); return self.SessionId; });
+    private static bool InThisSession(Process process)
+    {
+        try { return InThisSession(process.SessionId); }
+        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { return false; } // exited meanwhile
+    }
+
     private static DcsEndResult EndProcesses()
     {
         var processes = Process.GetProcessesByName("DCS"); int ended = 0, denied = 0, lingering = 0;
         try
         {
-            foreach (var process in processes)
+            foreach (var process in processes.Where(InThisSession))
                 try { process.Kill(); if (process.WaitForExit(5000)) ended++; else lingering++; }
                 // Access denied (GitHub #21): DCS has administrator rights this app does not have (started elevated, or set
                 // to run as administrator), or it is already ending and hangs there.
@@ -172,10 +183,13 @@ public static class DcsProcess
         var processes = Process.GetProcessesByName("DCS");
         try
         {
+            // Another session's DCS is running, but not this pilot's to judge (it has no window here): healthy, never offered.
+            var mine = processes.Where(InThisSession).ToArray();
             if (processes.Length == 0) return DcsHealth.NotRunning;
+            if (mine.Length == 0) return DcsHealth.Healthy;
             var worst = DcsHealth.NoWindow;
             static int Rank(DcsHealth health) => health switch { DcsHealth.Crashed => 2, DcsHealth.NotResponding => 1, _ => 0 };
-            foreach (var process in processes)
+            foreach (var process in mine)
             {
                 DcsHealth one;
                 try
