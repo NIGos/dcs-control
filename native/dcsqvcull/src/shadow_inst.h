@@ -4139,6 +4139,20 @@ void Observer(void* self, void*) {
 
 constexpr uint32_t kSceneRenderable = 0x44350, kSceneRenderableEnd = 0x443dc;
 constexpr uint64_t kSceneRenderableHash = 0x48801b542c9549beull;
+// [Model] PlainTriangleCounter (alloc_slab.h's tricount) rewrites the LOCK prefix of the counter add at 0x44371,
+// inside this range, from F0 to 3E, and it is applied at the ini load, before the G-buffer part installs: the hash
+// above then never matched in a flight and the selection mirror stayed off (round-2 log sweep: "failed: SceneRenderable
+// code hash" in every flight since the counter went on). The prefix byte is read as the analysed F0 for the check.
+constexpr uint32_t kSceneRenderableTriPrefix = 0x44371;
+inline bool SceneRenderableBytesMatch(uint8_t* buf) {  // buf: kSceneRenderableEnd - kSceneRenderable bytes, changed
+  uint8_t& prefix = buf[kSceneRenderableTriPrefix - kSceneRenderable];
+  if (prefix == 0x3E) prefix = 0xF0;
+  return shadowtex::Fnv(buf, kSceneRenderableEnd - kSceneRenderable) == kSceneRenderableHash;
+}
+inline bool SceneRenderableIs(uint8_t* ng) {
+  uint8_t buf[kSceneRenderableEnd - kSceneRenderable];
+  return allocslab::ReadBytes(ng + kSceneRenderable, buf, sizeof(buf)) && SceneRenderableBytesMatch(buf);
+}
 constexpr uint32_t kModelDraw = 0x16140;  // ModelMaterialMT vt[4]
 constexpr uint32_t kSelCode = 0x15fd1, kSelCodeEnd = 0x16134;  // 0x15e20's selection + its jump table
 constexpr uint64_t kSelCodeHash = 0x1675bab468ed1984ull;
@@ -4668,8 +4682,7 @@ bool InstallGb() {
   auto** matVt = reinterpret_cast<void**>(g_ng + g_at.model);
   uint32_t selFailed = 0;
   if (reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) != g_ng + kModelDraw) selFailed |= kSelSlot;
-  if (!shadowtex::CodeIs(g_ng, kSceneRenderable, kSceneRenderableEnd, kSceneRenderableHash))
-    selFailed |= kSelSceneRenderable;
+  if (!SceneRenderableIs(g_ng)) selFailed |= kSelSceneRenderable;
   if (!shadowtex::CodeIs(g_ng, kSelCode, kSelCodeEnd, kSelCodeHash)) selFailed |= kSelCodeBits;
   if (!shadowtex::CodeIs(g_ng, kDrawDispatch, kDrawDispatchEnd, kDrawDispatchHash)) selFailed |= kSelDrawDispatch;
   if (!shadowtex::CodeIs(g_ng, kDrawTable, kDrawTableEnd, kDrawTableHash)) selFailed |= kSelDrawTable;
