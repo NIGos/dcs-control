@@ -8,6 +8,9 @@ param(
     [switch]$DesktopShortcut,
     [switch]$NoDesktopShortcut,
     [switch]$NoStartMenuShortcut,
+    # files\Uninstall.cmd (a ZIP installation): put DCS back to stock first, as the setup's uninstaller does. The setup
+    # runs that step itself (the pilot can untick it), and the release tests uninstall without it.
+    [switch]$RestoreDcs,
     # Where the shortcuts and the Apps & features entry go; the release tests point them at scratch folders and a scratch key.
     [string]$StartMenuFolder = [Environment]::GetFolderPath('Programs'),
     [string]$DesktopFolder = [Environment]::GetFolderPath('Desktop'),
@@ -75,6 +78,18 @@ if ($Action -eq 'Install' -and $InstallPrerequisites) {
 }
 Write-Output $(if (Get-WebViewVersion) { 'WebView2 Runtime detected.' } else { 'WebView2 Runtime missing. Install the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ before opening the GUI.' })
 if ($needsCpp -and -not $InstallPrerequisites) { Write-Output 'Visual C++ x64 runtime 14.50 or newer is required. Run Install DCS Control.cmd to obtain official prerequisites.' }
+if ($Action -eq 'Uninstall' -and $RestoreDcs) {
+    # Without this, the engine hook in Saved Games\DCS\Scripts\Hooks and the DLSS 5 loader in DCS's bin stay active after
+    # the app is gone. Run from the installation itself: Back to stock DCS needs its components to know its own files.
+    if (Get-Process -Name DCS -ErrorAction SilentlyContinue) { throw 'DCS is running. Close DCS, then uninstall again. Nothing was removed.' }
+    Write-Output 'Putting DCS back to stock...'
+    $restored = & (Join-Path $filesRoot 'DcsVr.Cli.exe') restore | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output $restored.Trim()
+        throw 'DCS could not be put back to stock, so nothing was uninstalled. Open DCS Control and press Back to stock DCS to see why.'
+    }
+    Write-Output 'DCS is back to stock.'
+}
 # Uninstalling from the installation itself: its own program files are open while it runs, so the uninstaller runs
 # from a temporary copy of the program (the files\ root, without components or documents).
 $cliRoot = $filesRoot

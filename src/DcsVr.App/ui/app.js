@@ -1615,7 +1615,7 @@ function updateWorkflow() {
   // Apply without launching has nothing to do while the draft is the applied profile, unless Pimax Play changed.
   $('apply').disabled = blocked || (mode === 'ready' && !state.foveaChanged);
   $('reviewPlan').disabled = $('reviewPlanHere').disabled = busy || hasInvalid || !profile;
-  $('openRecovery').hidden = !state?.originals?.count; $('openRecovery').disabled = busy || mode === 'running';
+  $('openRecovery').hidden = !state?.originals?.count && state?.originals?.state !== 'damaged'; $('openRecovery').disabled = busy || mode === 'running';
   $('saveProfile').disabled = busy || hasInvalid;
   const error = $('statusDot').classList.contains('error');
   // A stuck DCS comes before the rest: nothing can be launched or put back until it is gone, on whichever page this is.
@@ -1950,7 +1950,12 @@ function renderOriginals() {
   const last = o.lastAction ? `<p class="fine">Last action: ${escape(o.lastAction)}${when ? ' · '+escape(when) : ''}</p>` : '';
   const folder = `<button class="link-button" id="openBackups" title="${escape(o.folder || '')}">Backups folder ↗</button>`;
   const rows = o.files.map(f => `<div class="file original-file"><b>${escape(f.path)}</b><p>${escape(ORIGINAL_ACTIONS[f.action] || f.action)}${f.detail ? ' · '+escape(f.detail) : ''}</p></div>`).join('');
-  $('originals').innerHTML = o.count
+  // The record cannot be read: nothing is guessed from it. Back to stock DCS removes only DCS Control's own files.
+  const damaged = o.state === 'damaged';
+  const newer = damaged && /newer version/.test(o.problem || '');
+  $('originals').innerHTML = damaged
+    ? `<div class="card originals-card" id="originalsCard"><div class="originals-head"><div><span class="tag">RECORD DAMAGED</span><h3>The record of original files can't be read</h3><p>${newer ? 'It was written by a newer version of DCS Control. Install that version again to go back to stock DCS.' : `DCS Control can't tell what your files were before it changed them, so Launch DCS writes nothing until you press Back to stock DCS. That removes DCS Control's own files${o.count ? ` (${o.count})` : ''} and starts a new record. DCS settings it changed in options.lua stay as they are: check them in DCS.`}</p><p class="fine">${escape(o.problem || '')}</p></div>${newer ? '' : `<button class="button secondary" id="restoreOriginals" ${running || busy ? 'disabled' : ''} ${running ? 'title="Close DCS before restoring"' : ''}>Back to stock DCS</button>`}</div>${rows ? `<details id="originalFiles"${open ? ' open' : ''}><summary>DCS Control's files found in DCS</summary><div class="file-list">${rows}</div></details>` : ''}<div class="inline-actions">${folder}</div></div>`
+    : o.count
     ? `<div class="card originals-card" id="originalsCard"><div class="originals-head"><div><span class="tag">${state.appliedProfile ? 'APPLIED: '+escape((state.appliedName || state.appliedProfile).toUpperCase()) : 'CHANGED'}</span><h3>Original files · ${o.count} ${o.count === 1 ? 'file' : 'files'} changed by DCS Control</h3><p>Back to stock DCS puts each one back as it was before DCS Control first changed it. In DCS's settings file (options.lua) only the settings DCS Control changed go back; your own changes stay. Engine Optimizations and the other features stay off in DCS until you launch from here again.</p>${last}</div><button class="button secondary" id="restoreOriginals" ${running || busy ? 'disabled' : ''} ${running ? 'title="Close DCS before restoring"' : ''}>Back to stock DCS</button></div><details id="originalFiles"${open ? ' open' : ''}><summary>What Back to stock DCS does, file by file</summary><div class="file-list">${rows}</div></details><div class="inline-actions">${folder}</div></div>`
     : `<div class="card originals-card empty" id="originalsCard"><div class="empty-state"><h2>No changes to put back</h2><p>DCS Control has not changed any file. Launch DCS (or Apply without launching) backs up each original the first time it changes it.</p>${last}</div><div class="inline-actions">${folder}</div></div>`;
   $('restoreOriginals')?.addEventListener('click',() => run('restore').catch(()=>{}));

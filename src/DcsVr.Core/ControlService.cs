@@ -78,8 +78,10 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// them.</summary>
     public IReadOnlyList<LeftoverFile> LeftoverFiles(string? dcsExecutable, string? optionsPath)
     {
-        var baseline = Originals.Read();
-        var applied = baseline.Current is null ? null : ReadAppliedProfile();
+        // A damaged record lists nothing: every DCS Control file found by its bytes counts (Back to stock DCS removes them).
+        OriginalsBaseline? baseline;
+        try { baseline = Originals.Read(); } catch (OriginalsDamagedException) { baseline = null; }
+        var applied = baseline?.Current is null ? null : ReadAppliedProfile();
         static string? Up(string? path, int levels)
         {
             if (string.IsNullOrWhiteSpace(path)) return null;
@@ -90,7 +92,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var bins = new[] { dcsExecutable, applied?.Executable }.Select(e => Up(e, 2)).OfType<string>()
             .SelectMany(root => new[] { Path.Combine(root, "bin"), Path.Combine(root, "bin-mt") });
         var savedGames = new[] { optionsPath, applied?.OptionsPath }.Select(o => Up(o, 2)).OfType<string>();
-        return Leftovers.Find(bins, savedGames, OwnHashes(), baseline.Files.Select(f => f.Path));
+        return Leftovers.Find(bins, savedGames, OwnHashes(), baseline?.Files.Select(f => f.Path) ?? []);
     }
 
     /// <summary>True when DLSS 5 is on and the profile names no runtime file that exists, so the saved copy is used.</summary>
@@ -335,7 +337,11 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public RestoreResult RestoreOriginals(string? dcsExecutable = null, string? optionsPath = null)
     {
         var originals = Originals;
-        EnsureDcsClosed(originals.Read().Files.Select(f => f.Path).Concat(LeftoverFiles(dcsExecutable, optionsPath).Select(f => f.Path)).Append(ManagedRoot), ManagedRoot);
+        OriginalsDamagedException? damaged = null;
+        IEnumerable<string> recorded;
+        try { recorded = originals.Read().Files.Select(f => f.Path); } catch (OriginalsDamagedException e) { damaged = e; recorded = []; }
+        EnsureDcsClosed(recorded.Concat(LeftoverFiles(dcsExecutable, optionsPath).Select(f => f.Path)).Append(ManagedRoot), ManagedRoot);
+        if (damaged is not null) return RestoreWithDamagedRecord(originals, damaged, dcsExecutable, optionsPath);
         var result = originals.RestoreOriginals();
         if (result.Complete && LeftoverFiles(dcsExecutable, optionsPath) is { Count: > 0 } leftovers)
         {
@@ -347,6 +353,22 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         if (result.Complete && !AppliedUsesSavedRuntime())
             try { SavedRuntime.RemoveForgotten(); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         return result;
+    }
+    /// <summary>Back to stock DCS when the record of originals cannot be read: nothing is guessed from it. DCS Control's own
+    /// files (known by their bytes) are removed from the DCS shown and its Saved Games folder, then the damaged record is
+    /// set aside and a new one starts. DCS settings in options.lua and other programs' files it had replaced cannot be put
+    /// back; the result says so. A newer version's record is left alone.</summary>
+    private RestoreResult RestoreWithDamagedRecord(OriginalsStore originals, OriginalsDamagedException damaged, string? dcsExecutable, string? optionsPath)
+    {
+        originals.AppendLog("Back to stock DCS with an unreadable record of originals: " + damaged.Detail);
+        if (damaged.Newer) return new(false, [damaged.Message]);
+        var leftovers = LeftoverFiles(dcsExecutable, optionsPath);
+        var problems = Leftovers.Remove(leftovers, originals.AppendLog);
+        originals.AppendLog($"Removed {leftovers.Count - problems.Count} of {leftovers.Count} DCS Control files found by their contents.");
+        if (problems.Count > 0) return new(false, ["The record of original files is damaged. Some of DCS Control's files could not be removed:", .. problems]);
+        var kept = originals.SetAsideDamaged();
+        return new(true, [$"The record of original files was damaged, so only DCS Control's own files were removed ({(leftovers.Count == 0 ? "none were found in DCS" : leftovers.Count == 1 ? "1 file" : leftovers.Count + " files")}). DCS settings it changed in options.lua and other programs' files it replaced were not put back: check them in DCS.",
+            kept is null ? "The record reads again." : "The damaged record is kept as " + kept + "; a new record starts."]);
     }
     /// <summary>Refuses while a running DCS could use the files involved: anything in that DCS's install, in the
     /// Saved Games DCS folders (the known folder, which may be redirected, and the default location), or in the
@@ -996,14 +1018,16 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         return start;
     }
     public void SaveProfile(VrProfile profile, string path) => AtomicFile.WriteText(path, JsonData.Serialize(profile));
-    public VrProfile LoadProfile(string path)
+    /// <param name="keepDeveloper">False for a file the interface opens while the current profile has no Developer
+    /// options: they and the developer paths are left out (<see cref="VrProfile.ForImport"/>). The CLI keeps them.</param>
+    public VrProfile LoadProfile(string path, bool keepDeveloper = true)
     {
         // Settled exactly like the interface's feature checklist, so a combination it fixes by itself is not an error here.
         VrProfile loaded;
         try { loaded = JsonData.Deserialize<VrProfile>(File.ReadAllText(path)); }
         // A report, another app's JSON or a profile from a newer version: say so instead of a serializer message.
         catch (System.Text.Json.JsonException e) { throw new InvalidDataException($"This is not a DCS Control profile, or it was saved by a newer version of DCS Control. ({e.Message})", e); }
-        var p = ProfileValidation.ResolveFeatures(loaded);
+        var p = ProfileValidation.ResolveFeatures(loaded.ForImport(keepDeveloper));
         var errors = ProfileValidation.Validate(p).Where(i => i.Severity == IssueSeverity.Error && i.Code != "neural-runtime").ToArray();
         if (errors.Length > 0) throw new InvalidDataException(string.Join("\n", errors.Select(e => e.Message)));
         return p;

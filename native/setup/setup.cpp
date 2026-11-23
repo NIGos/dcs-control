@@ -532,18 +532,31 @@ void Install(const Options& options, Progress& progress) {
     progress.ok = true;
 }
 
-// How many DCS files DCS Control has changed (the CLI's status), or -1 when that could not be read.
-int AppliedFiles(const std::wstring& root) {
+// What DCS Control left in DCS (the CLI's status --leftovers): the files its record lists (-1 when the status could not
+// be read), its own files found in DCS without a record (a lost record), and whether the record cannot be read.
+struct DcsChanges {
+    int applied = -1;
+    int leftovers = 0;
+    bool damaged = false;
+    // Back to stock DCS has something to do.
+    bool Any() const { return applied > 0 || leftovers > 0 || damaged; }
+};
+DcsChanges AppliedFiles(const std::wstring& root) {
+    DcsChanges changes;
     const std::wstring cli = root + L"\\files\\DcsVr.Cli.exe";
-    if (!Exists(cli)) return -1;
+    if (!Exists(cli)) return changes;
     const std::wstring output = TempFolder() + L"\\DcsControl-Uninstall-status-" + std::to_wstring(GetCurrentProcessId()) + L".json";
     DeleteFileW(output.c_str());
-    const int code = RunHidden(cli, Quote(cli) + L" status", output);
+    const int code = RunHidden(cli, Quote(cli) + L" status --leftovers", output);
     const std::wstring text = Decode(ReadBytes(output, 1 << 20));
     DeleteFileW(output.c_str());
     const size_t at = text.find(L"\"count\":");
-    if (code != 0 || at == std::wstring::npos) return -1;
-    return static_cast<int>(wcstol(text.c_str() + at + 8, nullptr, 10));
+    if (code != 0 || at == std::wstring::npos) return changes;
+    changes.applied = static_cast<int>(wcstol(text.c_str() + at + 8, nullptr, 10));
+    const size_t left = text.find(L"\"leftovers\":");
+    if (left != std::wstring::npos) changes.leftovers = static_cast<int>(wcstol(text.c_str() + left + 12, nullptr, 10));
+    changes.damaged = text.find(L"\"state\": \"damaged\"") != std::wstring::npos || text.find(L"\"state\":\"damaged\"") != std::wstring::npos;
+    return changes;
 }
 
 // The whole removal; runs on the worker thread (or directly with --quiet).
@@ -615,7 +628,7 @@ struct Ui {
     bool upgrade = false;
     std::wstring existingVersion;
     uint64_t needed = 0;
-    int applied = -1;  // uninstall: DCS files DCS Control changed (-1: unknown)
+    DcsChanges dcs;  // uninstall: what DCS Control left in DCS
     std::vector<std::wstring> state;
     std::wstring title, subtitle;
     Progress progress;
@@ -705,9 +718,9 @@ void ShowPage(Page page) {
     const bool choose = page == Page::Choose, work = page == Page::Work, result = page == Page::Result;
     Show(kText, choose || result);
     for (int id : {kFolderLabel, kFolder, kBrowse, kSpace, kDesktop, kStartMenu}) Show(id, choose && !uninstall);
-    Show(kRestore, choose && uninstall && g_ui.applied > 0);
+    Show(kRestore, choose && uninstall && g_ui.dcs.Any());
     // Deleting the settings is offered only when DCS Control knows what DCS still needs from them (its backups).
-    Show(kDelete, choose && uninstall && !g_ui.state.empty() && g_ui.applied >= 0);
+    Show(kDelete, choose && uninstall && !g_ui.state.empty() && g_ui.dcs.applied >= 0);
     Show(kWarning, false);
     for (int id : {kBar, kStage, kDetail}) Show(id, work);
     Show(kLaunch, result && !uninstall && g_ui.progress.ok && !g_ui.options.noLaunch);
@@ -859,7 +872,7 @@ void Finish() {
             text = L"DCS Control's program files, its shortcuts and its entry in Settings \u2192 Apps are gone.";
             const std::vector<std::wstring> state = StateFolders();
             if (!state.empty()) text += L"\n\nYour profiles, settings and DCS backups are kept in " + state.front() + L"; installing DCS Control again picks them up.";
-            if (g_ui.applied > 0 && !g_ui.restoring) text += L"\n\nDCS still has DCS Control's changes; installing DCS Control again and pressing Back to stock DCS undoes them.";
+            if (g_ui.dcs.Any() && !g_ui.restoring) text += L"\n\nDCS still has DCS Control's changes; installing DCS Control again and pressing Back to stock DCS undoes them.";
             if (!progress.note.empty()) text += L"\n\n" + progress.note;
         }
     } else {
@@ -1013,8 +1026,10 @@ int RunWindow(bool startWorking) {
     if (g_ui.options.uninstall) {
         Header(L"Uninstall DCS Control", g_ui.options.destination);
         std::wstring about = L"This removes DCS Control from " + g_ui.options.destination + L": its program files, its Start menu and desktop shortcuts and its entry in Settings \u2192 Apps.";
-        if (g_ui.applied > 0) about += L"\n\nDCS Control's changes are still applied to DCS (" + std::to_wstring(g_ui.applied) + L" files). Putting DCS back to stock restores DCS's own files and settings.";
-        else if (g_ui.applied == 0) about += L"\n\nDCS has no changes from DCS Control.";
+        if (g_ui.dcs.applied > 0) about += L"\n\nDCS Control's changes are still applied to DCS (" + std::to_wstring(g_ui.dcs.applied) + L" files). Putting DCS back to stock restores DCS's own files and settings.";
+        else if (g_ui.dcs.damaged) about += L"\n\nDCS Control's record of its changes to DCS is damaged. Putting DCS back to stock removes DCS Control's own files from DCS; check DCS's settings afterwards.";
+        else if (g_ui.dcs.leftovers > 0) about += L"\n\nDCS Control's files are still in DCS (" + std::to_wstring(g_ui.dcs.leftovers) + L" files) without a record of what was there before. Putting DCS back to stock removes them.";
+        else if (g_ui.dcs.applied == 0) about += L"\n\nDCS has no changes from DCS Control.";
         else about += L"\n\nIf a DCS Control profile is applied to DCS, open DCS Control and press Back to stock DCS first; otherwise DCS keeps its files.";
         SetText(kText, about);
         if (!g_ui.state.empty()) SetText(kDelete, L"Also delete my DCS Control profiles, settings and logs (" + g_ui.state.front() + L")");
@@ -1173,10 +1188,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     Options& chosen = g_ui.options;
     int result = 0;
     if (chosen.uninstall) {
-        g_ui.applied = AppliedFiles(chosen.destination);
+        g_ui.dcs = AppliedFiles(chosen.destination);
         g_ui.state = StateFolders();
         if (chosen.quiet) {
-            Uninstall(chosen, g_ui.progress, false, false);
+            // Without a window DCS goes back to stock as the window's default does, but only for the pilot's own
+            // installation (its real Settings > Apps entry): a test one with a scratch entry never touches the pilot's DCS.
+            Uninstall(chosen, g_ui.progress, chosen.uninstallKey.empty() && g_ui.dcs.Any(), false);
             result = g_ui.progress.ok ? 0 : 1;
         } else {
             result = RunWindow(false);

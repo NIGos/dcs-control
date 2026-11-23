@@ -71,6 +71,11 @@ public sealed record VrProfile
         BoostPrefetch = BoostPrefetch == PrefetchFix.Observe ? PrefetchFix.Off : BoostPrefetch,
         EngineDevMode = false, EngineDiagnosticHooks = false, EngineTimerRefreshUs = 1000,
     };
+    /// <summary>A profile or preset file opened in the interface: unless the pilot's current profile already has Developer
+    /// options, it comes without them and without the developer paths (a shared file could otherwise make DCS load any
+    /// library). The CLI's --profile keeps them: rigs and developers set the file by hand.</summary>
+    public VrProfile ForImport(bool keepDeveloper) => keepDeveloper || !DeveloperOptions && EngineDevPayloadPath is null && EngineDevIniPath is null ? this
+        : (this with { DeveloperOptions = false, EngineDevPayloadPath = null, EngineDevIniPath = null }).ForPilots();
     public string Id { get; init; } = "pimax-baseline";
     public string Name { get; init; } = "Pimax · original configuration";
     public RuntimeKind Runtime { get; init; } = RuntimeKind.Pimax;

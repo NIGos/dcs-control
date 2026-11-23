@@ -92,7 +92,20 @@ try
             break;
         }
         // The original files DCS Control changed and the applied profile ("current").
-        case "status": Console.WriteLine(JsonData.Serialize(service.Originals.Status())); break;
+        case "status":
+        {
+            var status = service.Originals.Status();
+            if (!args.Contains("--leftovers")) { Console.WriteLine(JsonData.Serialize(status)); break; }
+            // --leftovers (the setup's uninstaller): also how many DCS Control files are in DCS without a record (a lost
+            // or damaged record), searched like restore searches them, so Back to stock DCS is offered for them too.
+            string? dcs = Option("--dcs"), options = Option("--options");
+            if (dcs is null && options is null && Option("--state") is null)
+                try { var found = new WindowsInventory().Capture(); (dcs, options) = (found.DcsExecutable, found.OptionsPath); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
+            var node = System.Text.Json.JsonSerializer.SerializeToNode(status, JsonData.Options)!.AsObject();
+            node["leftovers"] = service.LeftoverFiles(dcs, options).Count;
+            Console.WriteLine(node.ToJsonString(JsonData.Options)); break;
+        }
         case "restore":
         {
             // The uninstaller's Back to stock DCS also removes DCS Control's files the record does not list: in the DCS
@@ -141,7 +154,7 @@ try
         default:
             // An unknown command is an error (a typo must not look like success to a script); "help" is not.
             if (command != "help") Console.Error.WriteLine("Unknown command: " + command);
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, end-dcs, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, end-dcs, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile (with --leftovers also the count of DCS Control files in DCS the record does not list). restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
     }
     return 0;
 }
