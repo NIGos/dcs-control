@@ -80,7 +80,7 @@ public static class LiveSettings
         // 6.8 s. Resolution and bidirectional flow cost a single frame of about 0.5 s.
         F("nvidiaFlowScale"), F("bidirectionalFlow"),
         N("neuralIntensity"), N("neuralLocalTone"), N("neuralLocalStructure"), N("neuralSkinStructure"), N("neuralStyle"), N("neuralAutomaticMask"),
-        N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralDepth"),
+        N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralBrightnessMatch"), N("neuralDepth"),
         N("neuralMotionScaleX"), N("neuralMotionScaleY"),
     ];
 
@@ -190,10 +190,11 @@ public static class LiveSettings
         "ofxr.nvidia_input_scale", "ofxr.nvidia_bidirectional", "ofxr.nvidia_occlusion_aware",
     };
     // CheekyFoveatedDLSS.ini keys Cheeky applies while it runs (patches/cheeky/dcs_live_reload.hpp, dcs_live_keys). The first
-    // eight without a hitch; the rest recreate the DLSS-NR feature (a short hitch).
+    // nine without a hitch; the rest recreate the DLSS-NR feature (a short hitch).
     private static readonly HashSet<string> NeuralKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "CheekyFoveatedDLSS.NrPaperWhiteScale", "CheekyFoveatedDLSS.NrHdrTransferStrength", "CheekyFoveatedDLSS.NrColorStrength",
+        "CheekyFoveatedDLSS.NrBrightnessMatch",
         "CheekyFoveatedDLSS.NrRoundness", "CheekyFoveatedDLSS.NrTransitionWidth", "CheekyFoveatedDLSS.NrMotionScaleXMultiplier",
         "CheekyFoveatedDLSS.NrMotionScaleYMultiplier", "CheekyFoveatedDLSS.NrDepthConvention",
         "CheekyFoveatedDLSS.NrIntensity", "CheekyFoveatedDLSS.NrLocalToneStrength", "CheekyFoveatedDLSS.NrLocalStructureStrength",

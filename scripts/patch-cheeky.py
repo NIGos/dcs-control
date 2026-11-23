@@ -1956,6 +1956,320 @@ endforeach()
 add_test(NAME CheekyBootstrap-chromium-child COMMAND CheekyBootstrapTests chromium-child
     $<TARGET_FILE:CheekyStandaloneProxy> $<TARGET_FILE:CheekyOptiScaler> $<TARGET_FILE:CheekyBootstrapFakeHost> --type=gpu-process)''')
 
+# DLSS 5 brightness match (DCS Control 0.7, NrBrightnessMatch, default 0). DLSS 5 runs on the Quad Views focus views
+# only, and its model output is a little darker than its input (the decode keeps the model's luminance: UpgradeToneMap
+# with transfer and colour strength 1), so the focus showed as a disc ~5 % darker than the periphery around it.
+# With the key on, a one-group pass (MatchMain, 32x32 samples of the NR region, weighted by the decode's edge fade)
+# runs between DLSS-NR and the decode: it recomputes what the decode would write, takes the weighted mean log ratio
+# input / output (luminance, or per channel with 2), clamps it to 0.9..1.1 and smooths it per evaluation (rate 0.05;
+# snapped on the first frame of a codec, on an NR history reset and after a frame with nothing to measure is skipped).
+# The gain lives in a 16-byte buffer per codec (u2, descriptor 8); the decode multiplies its processed colour by it
+# before the edge fade. Off, the decode reads no gain and writes the same bits as before; DLSS 5 off runs none of it.
+nr_codec = 'src/nr_codec_shader.hpp'
+replace(nr_codec, '''RWTexture2D<float4> Output1 : register(u1);
+''', '''RWTexture2D<float4> Output1 : register(u1);
+// DCS Control: brightness match state (MatchMain writes it, DecodeMain reads it): words 0-2 the gain per channel,
+// word 3 = 1 once valid. A new buffer is zero (not valid).
+RWByteAddressBuffer MatchState : register(u2);
+''')
+replace(nr_codec, '''    uint2 MaskPadding;
+''', '''    uint MatchMode;   // DCS Control: 0 off, 1 brightness, 2 brightness per colour channel
+    uint MatchFlags;  // DCS Control: bit 0 = NR history reset this frame (the match snaps)
+''')
+replace(nr_codec, '''[numthreads(16, 16, 1)]
+void EncodeMain(''', '''// DCS Control: the decode's processed colour of one pixel before its edge fade (shared with MatchMain, so the match
+// measures exactly what the decode writes).
+float3 DcsCodecProcessed(float3 original_rgb, float3 proxy_rgb, float3 neural_rgb) {
+    if (HdrMode == 0) return lerp(original_rgb, neural_rgb, TransferStrength * ColorStrength);
+    const float3 original = max(original_rgb / max(PaperWhiteScale, 0.0001), 0.0);
+    const float3 upgraded = UpgradeToneMap(original, SrgbDecode(proxy_rgb), SrgbDecode(neural_rgb));
+    return max(lerp(original, upgraded, ColorStrength) * PaperWhiteScale, 0.0);
+}
+
+float3 DcsMatchGain() {
+    if (MatchMode == 0U) return float3(1.0, 1.0, 1.0);
+    const uint4 state = MatchState.Load4(0);
+    return state.w == 1U ? asfloat(state.xyz) : float3(1.0, 1.0, 1.0);
+}
+
+// The decode's edge-fade weight (0 outside the region).
+float DcsFoveationWeight(float2 pixel) {
+    if (any(pixel < float2(RegionBase)) || any(pixel >= float2(RegionBase + RegionSize))) return 0.0;
+    const float distance_from_center = FoveationShapeDistance(pixel);
+    const float normalized_feather = FoveationFeather /
+        max(0.0001, min(FoveationWidth, FoveationHeight));
+    return FoveationFeather <= 0.0
+        ? (distance_from_center <= 1.0 ? 1.0 : 0.0)
+        : 1.0 - smoothstep(max(0.0, 1.0 - normalized_feather), 1.0, distance_from_center);
+}
+
+static const uint DcsMatchGrid = 32U;    // samples per axis over the region, 4 per thread
+static const float DcsMatchRate = 0.05;  // per evaluation: ~1 s to 90 % at 45 fps
+static const float DcsMatchLimit = 0.1;  // the gain stays within 0.9..1.1
+groupshared float4 DcsMatchSum[256];
+groupshared float DcsMatchLevel[256];
+
+// One group of 16x16 threads. Bound as the decode: t0 original, t1 proxy, t2 neural, u2 the state.
+[numthreads(16, 16, 1)]
+void MatchMain(uint3 thread_id : SV_GroupThreadID) {
+    const float epsilon = 0.002 * (HdrMode != 0 ? max(PaperWhiteScale, 0.0001) : 1.0);
+    float4 sum = float4(0.0, 0.0, 0.0, 0.0);  // xyz: weighted log(input / output), w: weight
+    float level = 0.0;                         // weighted input luminance
+    [loop] for (uint j = 0U; j < DcsMatchGrid / 16U; ++j) {
+        [loop] for (uint i = 0U; i < DcsMatchGrid / 16U; ++i) {
+            const uint2 cell = thread_id.xy + uint2(i, j) * 16U;
+            const uint2 pixel = min(uint2((float2(cell) + 0.5) * float2(Size) / float(DcsMatchGrid)),
+                max(Size, uint2(1U, 1U)) - 1U);
+            const float weight = DcsFoveationWeight(float2(pixel));
+            if (weight <= 0.0) continue;
+            const float4 original_sample = Source0.Load(int3(pixel, 0));
+            const float2 proxy_position =
+                (float2(pixel - RegionBase) + 0.5) * float2(ProxySize) / float2(RegionSize) - 0.5;
+            const float3 output = max(DcsCodecProcessed(original_sample.rgb,
+                LoadSource1Bilinear(proxy_position, ProxySize).rgb,
+                LoadSource2Bilinear(proxy_position, ProxySize).rgb), 0.0);
+            const float3 original = max(original_sample.rgb, 0.0);
+            const float3 ratio = MatchMode == 2U
+                ? log((original + epsilon) / (output + epsilon))
+                : log((Luminance(original) + epsilon) / (Luminance(output) + epsilon)).xxx;
+            sum += float4(weight * ratio, weight);
+            level += weight * Luminance(original);
+        }
+    }
+    const uint index = thread_id.y * 16U + thread_id.x;
+    DcsMatchSum[index] = sum;
+    DcsMatchLevel[index] = level;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint stride = 128U; stride > 0U; stride >>= 1U) {
+        if (index < stride) {
+            DcsMatchSum[index] += DcsMatchSum[index + stride];
+            DcsMatchLevel[index] += DcsMatchLevel[index + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (index != 0U) return;
+    const float4 total = DcsMatchSum[0];
+    const uint4 state = MatchState.Load4(0);
+    const bool valid = state.w == 1U;
+    // Nothing to measure (no weighted sample, a black frame): keep the gain; a first measurement snaps.
+    if (total.w < 1.0 || DcsMatchLevel[0] < epsilon * total.w) return;
+    const float3 target = clamp(exp(total.xyz / total.w), 1.0 - DcsMatchLimit, 1.0 + DcsMatchLimit);
+    const float3 gain = !valid || (MatchFlags & 1U) != 0U
+        ? target : lerp(asfloat(state.xyz), target, DcsMatchRate);
+    MatchState.Store4(0, uint4(asuint(gain), 1U));
+}
+
+[numthreads(16, 16, 1)]
+void EncodeMain(''')
+replace(nr_codec, '''    if (HdrMode == 0) {
+        const float4 processed = float4(lerp(original_sample.rgb, neural_sample.rgb,
+            TransferStrength * ColorStrength), original_sample.a);
+        Output0[SourceBase + dispatch_id.xy] = lerp(original_sample, processed, foveation_weight);
+        return;
+    }
+    const float3 original = max(
+        original_sample.rgb / max(PaperWhiteScale, 0.0001),
+        0.0
+    );
+    const float3 proxy = SrgbDecode(proxy_sample.rgb);
+    const float3 neural = SrgbDecode(neural_sample.rgb);
+    const float3 upgraded = UpgradeToneMap(original, proxy, neural);
+    const float3 decoded = lerp(original, upgraded, ColorStrength) * PaperWhiteScale;
+    const float4 processed = float4(max(decoded, 0.0), original_sample.a);
+    Output0[SourceBase + dispatch_id.xy] = lerp(original_sample, processed, foveation_weight);
+}''', '''    // DCS Control: the same arithmetic as before (DcsCodecProcessed), times the brightness match gain (1 when off).
+    const float4 processed = float4(DcsCodecProcessed(original_sample.rgb, proxy_sample.rgb, neural_sample.rgb) *
+        DcsMatchGain(), original_sample.a);
+    Output0[SourceBase + dispatch_id.xy] = lerp(original_sample, processed, foveation_weight);
+}''')
+replace('scripts/build-d3d-shaders.py', '''    ("nr_border", "src/nr_codec_shader.hpp", "nr_codec_shader", "BorderMain", "cs_5_0", 1),
+''', '''    ("nr_border", "src/nr_codec_shader.hpp", "nr_codec_shader", "BorderMain", "cs_5_0", 1),
+    ("nr_match", "src/nr_codec_shader.hpp", "nr_codec_shader", "MatchMain", "cs_5_1", 3),
+''')
+# Settings: NrBrightnessMatch 0/1/2, read per evaluation (a live key, never part of the NR feature or its signature).
+replace('src/settings.hpp', '''    // DCS VR Control (transient, never persisted): the D3D11 transport runs SR only and skips the NR pass.
+''', '''    // DCS Control: DLSS 5 brightness match (0 off, 1 brightness, 2 brightness per colour channel).
+    std::uint32_t nr_brightness_match{};
+    // DCS VR Control (transient, never persisted): the D3D11 transport runs SR only and skips the NR pass.
+''')
+replace('src/settings.cpp', '''std::atomic<std::uint32_t> nr_depth_convention{};
+''', '''std::atomic<std::uint32_t> nr_depth_convention{};
+std::atomic<std::uint32_t> nr_brightness_match{};  // DCS Control
+''')
+replace('src/settings.cpp', '''    settings.nr_depth_convention =
+        nr_depth_convention.load(std::memory_order_acquire);
+''', '''    settings.nr_depth_convention =
+        nr_depth_convention.load(std::memory_order_acquire);
+    settings.nr_brightness_match = nr_brightness_match.load(std::memory_order_acquire);
+''')
+replace('src/settings.cpp', '''    nr_depth_convention.store(
+        (std::min)(settings.nr_depth_convention, 2U),
+        std::memory_order_release
+    );
+''', '''    nr_depth_convention.store(
+        (std::min)(settings.nr_depth_convention, 2U),
+        std::memory_order_release
+    );
+    nr_brightness_match.store((std::min)(settings.nr_brightness_match, 2U), std::memory_order_release);
+''')
+replace('uevr/settings_fields.inc', '''CHEEKY_SETTING("NrDepthConvention", nr_depth_convention)
+''', '''CHEEKY_SETTING("NrDepthConvention", nr_depth_convention)
+CHEEKY_SETTING("NrBrightnessMatch", nr_brightness_match)
+''')
+replace('src/addon.cpp', '''    static_cast<void>(reshade::get_config_value(
+        nullptr, config_section, "NrDepthConvention",
+        settings.nr_depth_convention
+    ));
+''', '''    static_cast<void>(reshade::get_config_value(
+        nullptr, config_section, "NrDepthConvention",
+        settings.nr_depth_convention
+    ));
+    static_cast<void>(reshade::get_config_value(
+        nullptr, config_section, "NrBrightnessMatch",
+        settings.nr_brightness_match
+    ));
+''')
+replace('src/addon.cpp', '''    reshade::set_config_value(
+        nullptr, config_section, "NrDepthConvention",
+        settings.nr_depth_convention
+    );
+''', '''    reshade::set_config_value(
+        nullptr, config_section, "NrDepthConvention",
+        settings.nr_depth_convention
+    );
+    reshade::set_config_value(
+        nullptr, config_section, "NrBrightnessMatch",
+        settings.nr_brightness_match
+    );
+''')
+replace('src/support_report.cpp', '''    out << "nr_depth_convention=" << s.nr_depth_convention << '\\n';
+''', '''    out << "nr_depth_convention=" << s.nr_depth_convention << '\\n';
+    out << "nr_brightness_match=" << s.nr_brightness_match << '\\n';
+''')
+# The codec: a 16-byte state buffer (UAV descriptor 8, so the decode's UAV table 6..8 is u0-u2), the match pipeline,
+# its one-group dispatch before the decode, and a log line with the gain about every 10 s per view (a 16-byte copy to
+# a mapped readback buffer, read 10 evaluations later).
+replace(nr, '''    ID3D12PipelineState* border_pipeline{};
+''', '''    ID3D12PipelineState* border_pipeline{};
+    ID3D12PipelineState* dcs_match_pipeline{};  // DCS Control: brightness match
+    ID3D12Resource* dcs_match_state{};
+    ID3D12Resource* dcs_match_readback{};
+    const float* dcs_match_mapped{};
+    std::uint64_t dcs_match_evaluations{};
+    std::uint32_t dcs_match_mode{};
+''')
+replace(nr, '''    release(gpu.border_pipeline);
+''', '''    release(gpu.border_pipeline);
+    release(gpu.dcs_match_pipeline);
+    if (gpu.dcs_match_readback && gpu.dcs_match_mapped) gpu.dcs_match_readback->Unmap(0U, nullptr);
+    release(gpu.dcs_match_readback);
+    release(gpu.dcs_match_state);
+''')
+replace(nr, 'descriptor_heap.NumDescriptors = 8U;', 'descriptor_heap.NumDescriptors = 9U; // DCS Control: 8 = brightness match state')
+replace(nr, '''    device->CreateUnorderedAccessView(game_output, nullptr, &game_uav, cpu);
+
+    if (shared && shared->root_signature''', '''    device->CreateUnorderedAccessView(game_output, nullptr, &game_uav, cpu);
+    {
+        // DCS Control: the brightness match state (u2 of the decode's UAV table), zero (not valid) when created, and
+        // its readback copy for the log.
+        D3D12_RESOURCE_DESC state_desc{};
+        state_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        state_desc.Width = 16U;
+        state_desc.Height = 1U;
+        state_desc.DepthOrArraySize = 1U;
+        state_desc.MipLevels = 1U;
+        state_desc.SampleDesc.Count = 1U;
+        state_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        state_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        result = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &state_desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&gpu.dcs_match_state));
+        if (FAILED(result)) return fail("CreateCommittedResource(brightness match)", result);
+        D3D12_HEAP_PROPERTIES readback_heap{};
+        readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+        state_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        if (SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &state_desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gpu.dcs_match_readback)))) {
+            void* mapped{};
+            if (SUCCEEDED(gpu.dcs_match_readback->Map(0U, nullptr, &mapped))) gpu.dcs_match_mapped = static_cast<const float*>(mapped);
+        }
+        cpu.ptr += gpu.descriptor_size;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC state_uav{};
+        state_uav.Format = DXGI_FORMAT_R32_TYPELESS;
+        state_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        state_uav.Buffer.NumElements = 4U;
+        state_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device->CreateUnorderedAccessView(gpu.dcs_match_state, nullptr, &state_uav, cpu);
+    }
+
+    if (shared && shared->root_signature''')
+replace(nr, '''            gpu.decode_pipeline = shared->decode_pipeline; gpu.decode_pipeline->AddRef();
+''', '''            gpu.decode_pipeline = shared->decode_pipeline; gpu.decode_pipeline->AddRef();
+            if (shared->dcs_match_pipeline) { gpu.dcs_match_pipeline = shared->dcs_match_pipeline; gpu.dcs_match_pipeline->AddRef(); }
+''')
+replace(nr, 'ranges[1].NumDescriptors = 2U;', 'ranges[1].NumDescriptors = 3U; // DCS Control: u2 = brightness match state')
+replace(nr, '''        if (FAILED(result)) return fail("CreateComputePipelineState(decode)", result);
+''', '''        if (FAILED(result)) return fail("CreateComputePipelineState(decode)", result);
+        pipeline.CS = {d3d_shaders::nr_match.data, d3d_shaders::nr_match.size};
+        result = device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&gpu.dcs_match_pipeline));
+        if (FAILED(result)) return fail("CreateComputePipelineState(brightness match)", result);
+''')
+replace(nr, '''    const Settings& settings,
+    const NrRegion& region
+) noexcept {
+    ID3D12DescriptorHeap* heaps[]{gpu.descriptors};''', '''    const Settings& settings,
+    const NrRegion& region,
+    const std::uint32_t dcs_match_flags = 0U,  // DCS Control: brightness match flags (bit 0: NR history reset)
+    const bool dcs_one_group = false           // DCS Control: the brightness match runs one group
+) noexcept {
+    ID3D12DescriptorHeap* heaps[]{gpu.descriptors};''')
+replace(nr, '''    std::memcpy(constants.mask_bounds, region.mask.bounds, sizeof(constants.mask_bounds));
+''', '''    std::memcpy(constants.mask_bounds, region.mask.bounds, sizeof(constants.mask_bounds));
+    constants.padding[0] = (std::min)(settings.nr_brightness_match, 2U);  // DCS Control: MatchMode
+    constants.padding[1] = dcs_match_flags;                               // DCS Control: MatchFlags
+''')
+replace(nr, '''    frame.command_list->Dispatch(
+        (dispatch_width + 15U) / 16U,''', '''    if (dcs_one_group) {
+        frame.command_list->Dispatch(1U, 1U, 1U);
+        return;
+    }
+    frame.command_list->Dispatch(
+        (dispatch_width + 15U) / 16U,''')
+replace(nr, '''    dispatch_codec(
+        frame,
+        *gpu,
+        gpu->decode_pipeline,''', '''    // DCS Control: brightness match, measured on this frame's codec inputs, used by the decode below.
+    if (settings.nr_brightness_match != 0U && gpu->dcs_match_pipeline && gpu->dcs_match_state) {
+        if (gpu->dcs_match_mode != settings.nr_brightness_match) {
+            trace_event("DLSS-NR brightness match on (mode %u) view=%llu", settings.nr_brightness_match,
+                static_cast<unsigned long long>(frame.view_id));
+            gpu->dcs_match_mode = settings.nr_brightness_match;
+        }
+        dispatch_codec(frame, *gpu, gpu->dcs_match_pipeline, 1U, 6U, settings, codec_region, reset ? 1U : 0U, true);
+        uav_barrier(frame.command_list, gpu->dcs_match_state);
+        const auto phase = gpu->dcs_match_evaluations++ % 450U;
+        if (phase == 440U && gpu->dcs_match_readback) {
+            transition(frame.command_list, gpu->dcs_match_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE);
+            frame.command_list->CopyBufferRegion(gpu->dcs_match_readback, 0U, gpu->dcs_match_state, 0U, 16U);
+            transition(frame.command_list, gpu->dcs_match_state, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        } else if (phase == 0U && gpu->dcs_match_evaluations > 1U && gpu->dcs_match_mapped) {
+            std::uint32_t valid{};
+            std::memcpy(&valid, gpu->dcs_match_mapped + 3, sizeof(valid));
+            trace_event("DLSS-NR brightness match view=%llu gain=%.4f,%.4f,%.4f valid=%u (10 evaluations ago)",
+                static_cast<unsigned long long>(frame.view_id), gpu->dcs_match_mapped[0], gpu->dcs_match_mapped[1],
+                gpu->dcs_match_mapped[2], valid);
+        }
+    } else if (gpu->dcs_match_mode != 0U) {
+        trace_event("DLSS-NR brightness match off view=%llu", static_cast<unsigned long long>(frame.view_id));
+        gpu->dcs_match_mode = 0U;
+    }
+    dispatch_codec(
+        frame,
+        *gpu,
+        gpu->decode_pipeline,''')
+# Fixture: the brightness match on WARP and the hardware GPU (dcs_nr_codec_tests.cpp, run_match_tests).
+
 # The D3D shaders are embedded as bytecode (src/d3d_shaders.hpp, generated by Cheeky's scripts/build-d3d-shaders.py
 # with the Windows SDK fxc); the build never compiles HLSL. Regenerate it whenever the patched shader sources no
 # longer match it, so the shader patches above reach the GPU. (Until 2026-10-18 nothing did this: the 2026-10-07
