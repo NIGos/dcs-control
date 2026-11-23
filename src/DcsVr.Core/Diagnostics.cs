@@ -124,7 +124,7 @@ public static partial class Diagnostics
                 using (var output = entry.Open()) output.Write(bytes);
                 entries.Add(new(name, redactor(source), bytes.Length, truncated));
             }
-            void File_(string name, string? path)
+            void File_(string name, string? path, long head = HeadLimit, long tail = TextLimit)
             {
                 if (path is null || !File.Exists(path)) return;
                 if (learning ? !scanned.Add(name) : entries.Any(e => e.Name == name)) return;
@@ -133,7 +133,7 @@ public static partial class Diagnostics
                 try
                 {
                     var length = new FileInfo(path).Length;
-                    Text(name, path, HeadAndTail(path, HeadLimit, TextLimit), length > HeadLimit + TextLimit);
+                    Text(name, path, HeadAndTail(path, head, tail), length > head + tail);
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Text(name + ".unreadable.txt", path, e.Message); }
             }
@@ -205,6 +205,11 @@ public static partial class Diagnostics
                 File_("dcs/bin/CheekyFoveatedDLSS-Loader.log", Path.Combine(bin, "CheekyFoveatedDLSS-Loader.log"));
                 Text("dcs/bin/modules.txt", bin, learning ? "" : BinaryVersions(bin));
             }
+            // Cheeky's crash log in DCS's %TEMP% (faults it contained, open item 7) and the copy it rolls over at 1 MiB:
+            // a fault storm repeats one line thousands of times, so only its start and last 1 MB.
+            var tempDir = sources.LocalAppData is { } fixedLocal ? Path.Combine(fixedLocal, "Temp") : Path.GetTempPath();
+            foreach (var name in new[] { "CheekyFoveatedDLSS_crash.log", "CheekyFoveatedDLSS_crash.prev.log" })
+                File_("temp/" + name, Path.Combine(tempDir, name), 64 * 1024, 1024 * 1024);
 
             // Headset software.
             if (sources.Runtime == RuntimeKind.SboysSteamVr)
@@ -308,8 +313,14 @@ public static partial class Diagnostics
             text = TokenRegex().Replace(text, "${key}${sep}<token>");
             text = AccountRegex().Replace(text, "${key}${sep}<id>");
             // A serial number seen once (next to its label) is removed wherever else it appears, also in later files.
+            // Next to its label always; elsewhere only where it starts and ends a token (never inside a longer number or
+            // word: a digit edge must not touch another digit, a letter edge another letter; Pimax writes a serial glued
+            // to a word, "<serial>platMap").
             LearnSerials(text, serials);
-            foreach (var serial in serials.OrderByDescending(s => s.Length)) text = text.Replace(serial, "<serial>", StringComparison.OrdinalIgnoreCase);
+            text = SerialRegex().Replace(text, "${key}${sep}<serial>");
+            text = SteamVrSerialRegex().Replace(text, m => m.Value[..(m.Groups["serial"].Index - m.Index)] + "<serial>");
+            foreach (var serial in serials.OrderByDescending(s => s.Length))
+                text = Regex.Replace(text, SerialEdge(serial[0], before: true) + Regex.Escape(serial) + SerialEdge(serial[^1], before: false), "<serial>", RegexOptions.IgnoreCase);
             // Steam IDs: what Steam's API prints into DCS's output ("Caching Steam ID: 7656119…"), in both spellings.
             text = SteamId64Regex().Replace(text, "<steam id>");
             text = SteamId3Regex().Replace(text, "[U:1:<id>]");
@@ -323,13 +334,22 @@ public static partial class Diagnostics
 
     /// <summary>Adds the headset serial numbers <paramref name="text"/> names to <paramref name="serials"/>: next to a
     /// serial label (Pimax), as SteamVR's active HMD ("Active HMD set to lighthouse.LHR-…") and as its
-    /// Prop_SerialNumber_String property. Only values with a digit, so a word ("Null Serial Number") is never learnt.</summary>
+    /// Prop_SerialNumber_String property. Only values with a digit, so a word ("Null Serial Number") is never learnt, and
+    /// only ones that look like a serial (8 characters or more, not one repeated character): a placeholder such as
+    /// "000000" would otherwise be removed from every number in every file. Shorter ones are still removed at their label.</summary>
     internal static void LearnSerials(string text, ISet<string> serials)
     {
         if (string.IsNullOrEmpty(text)) return;
-        foreach (Match m in SerialRegex().Matches(text)) serials.Add(m.Groups["serial"].Value);
-        foreach (Match m in SteamVrSerialRegex().Matches(text)) serials.Add(m.Groups["serial"].Value);
+        foreach (Match m in SerialRegex().Matches(text)) if (LooksLikeSerial(m.Groups["serial"].Value)) serials.Add(m.Groups["serial"].Value);
+        foreach (Match m in SteamVrSerialRegex().Matches(text)) if (LooksLikeSerial(m.Groups["serial"].Value)) serials.Add(m.Groups["serial"].Value);
     }
+    private static string SerialEdge(char edge, bool before)
+    {
+        var cls = char.IsAsciiDigit(edge) ? "[0-9]" : char.IsAsciiLetter(edge) ? "[A-Za-z]" : null;
+        return cls is null ? "" : before ? $"(?<!{cls})" : $"(?!{cls})";
+    }
+    private static bool LooksLikeSerial(string value) =>
+        value.Length >= 8 && value.Where(char.IsAsciiLetterOrDigit).Select(char.ToUpperInvariant).Distinct().Count() > 1;
 
     /// <summary>Whether a dotted quad is a network address rather than a file or DCS version ("3.7.10.0" in
     /// modules.txt, "2.9.31.12345"): one with a port, one after an address word ("ip", "host", "connect to"…), or one in

@@ -104,6 +104,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             foreach (var path in new[] { BaselinePath, PreviousPath })
             {
                 if (!File.Exists(path)) continue;
+                if (path == PreviousPath && File.Exists(BaselinePath) && PreviousIsStale()) return null;
                 if (Parse(File.ReadAllBytes(path), out _, out var newer) is { } baseline) return baseline is { State: "applied", Current: { } current } ? current : null;
                 if (newer) return null;
             }
@@ -638,6 +639,8 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             if (newer) throw new OriginalsDamagedException(NewerMessage, problem, newer: true);
         }
         if (!File.Exists(PreviousPath)) throw new OriginalsDamagedException(DamagedMessage, problem + "; no previous copy", newer: false);
+        if (hasMain && PreviousIsStale())
+            throw new OriginalsDamagedException(DamagedMessage, problem + "; baseline.json.prev is older than the record (saved by a version that does not keep it)", newer: false);
         var bytes = File.ReadAllBytes(PreviousPath);
         if (Parse(bytes, out var previousProblem, out _) is not { } previous)
             throw new OriginalsDamagedException(DamagedMessage, problem + "; baseline.json.prev: " + previousProblem, newer: false);
@@ -646,10 +649,20 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             string? kept = null;
             if (hasMain) File.Move(BaselinePath, kept = DamagedName(), overwrite: true);
             AtomicFile.Write(BaselinePath, bytes);
+            AtomicFile.Write(PreviousPath, bytes);  // written after the record again, as Save does (PreviousIsStale)
             Log($"The record of originals could not be read ({problem}); its previous copy was put back" + (kept is null ? "." : $", the damaged file is kept as {kept}."));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"The record of originals could not be read ({problem}); its previous copy is used ({e.Message})."); }
         return previous;
+    }
+
+    /// <summary>Save writes baseline.json.prev right after baseline.json, so the copy is never older than the record.
+    /// One that is (by more than the file system's time step) is from before saves of a version that never writes it
+    /// (0.6.6 and earlier, after a round trip): adopting it would bring back an outdated record of originals.</summary>
+    private bool PreviousIsStale()
+    {
+        try { return File.GetLastWriteTimeUtc(PreviousPath) < File.GetLastWriteTimeUtc(BaselinePath) - TimeSpan.FromSeconds(2); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     private string DamagedName() => BaselinePath + ".damaged-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);

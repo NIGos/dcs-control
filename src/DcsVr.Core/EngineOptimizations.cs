@@ -127,11 +127,18 @@ public static class EngineOptimizations
         // "the driver lacks command lists" line).
         if (lines.LastOrDefault(l => l.Contains("the driver lacks command lists", StringComparison.Ordinal) || l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal)) is { } missing)
             warnings.Add(NoCommandListsAdvice(missing));
-        // The newer optimizations check the DCS build first and stay off when it is not the one they were made for.
+        // The newer optimizations check the DCS build first and stay off when it is not the one they were made for. Only
+        // a build-match line (the code they patch does not look as on the analysed build) is a DCS version problem for
+        // the Checks page; a safety check that latched, a contained exception or a failed allocation is said on the
+        // Engine page only.
         foreach (var (prefix, name) in new[] { ("model allocator:", "model data allocator"), ("triangle counter:", "statistics counter"),
                      ("constant buffer skip:", "effect constant-buffer skip"), ("texture binds:", "texture streaming dedupe"), ("partition weights:", "culling partition by real cost"), ("frame heap:", "frame memory per thread"), ("task-queue clock:", "task queue clock cache"), ("shadow batching:", "shadow caster instancing"), ("shadow inst:", "shadow caster instancing"), ("big model pages:", "shadow caster instancing"), ("split filter", "redundant state filter"), ("shadow recorder", "multi-threaded shadow recorder"), ("gbuffer recorder", "multi-threaded G-buffer") })
-            if (lines.Any(l => l.Contains(prefix, StringComparison.Ordinal) && !l.Contains("not recordable", StringComparison.Ordinal) && !l.Contains("texture classes the table refused", StringComparison.Ordinal) && !l.Contains("the driver lacks command lists", StringComparison.Ordinal) && !l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal) && !l.Contains("quad-view filter", StringComparison.Ordinal) && !l.Contains("execution identity", StringComparison.Ordinal) && (l.Contains("does not match", StringComparison.Ordinal) || l.Contains("unexpected bytes", StringComparison.Ordinal) || l.Contains("unknown patch", StringComparison.Ordinal) || l.Contains("could not", StringComparison.Ordinal) || l.Contains("FAILED", StringComparison.Ordinal) || l.Contains("disabled for this session", StringComparison.Ordinal) || l.Contains("off for this session", StringComparison.Ordinal) || l.Contains("NOT SAFE", StringComparison.Ordinal) || l.Contains("latched", StringComparison.Ordinal) || (l.Contains("exception", StringComparison.OrdinalIgnoreCase) && l.Contains("contained", StringComparison.Ordinal)) || l.Contains("DISABLED", StringComparison.Ordinal) || l.EndsWith("; unavailable", StringComparison.Ordinal) || l.Contains("; jobs start at RenderGraph::render entry", StringComparison.Ordinal) || l.EndsWith("; off", StringComparison.Ordinal) || l.EndsWith("; skipped", StringComparison.Ordinal) || l.Contains("not installed", StringComparison.Ordinal) && !l.Contains("counters not installed", StringComparison.Ordinal))))
-                Version($"{char.ToUpperInvariant(name[0])}{name[1..]} turned itself off: it does not recognise this DCS version, or one of its safety checks failed. The other optimizations still run.");
+        {
+            var off = lines.Where(l => l.Contains(prefix, StringComparison.Ordinal) && !l.Contains("not recordable", StringComparison.Ordinal) && !l.Contains("texture classes the table refused", StringComparison.Ordinal) && !l.Contains("the driver lacks command lists", StringComparison.Ordinal) && !l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal) && !l.Contains("quad-view filter", StringComparison.Ordinal) && !l.Contains("execution identity", StringComparison.Ordinal) && (BuildMismatch(l) || l.Contains("unknown patch", StringComparison.Ordinal) || l.Contains("could not", StringComparison.Ordinal) || l.Contains("FAILED", StringComparison.Ordinal) || l.Contains("disabled for this session", StringComparison.Ordinal) || l.Contains("off for this session", StringComparison.Ordinal) || l.Contains("NOT SAFE", StringComparison.Ordinal) || l.Contains("latched", StringComparison.Ordinal) || (l.Contains("exception", StringComparison.OrdinalIgnoreCase) && l.Contains("contained", StringComparison.Ordinal)) || l.Contains("DISABLED", StringComparison.Ordinal) || l.EndsWith("; unavailable", StringComparison.Ordinal) || l.Contains("; jobs start at RenderGraph::render entry", StringComparison.Ordinal) || l.EndsWith("; off", StringComparison.Ordinal) || l.EndsWith("; skipped", StringComparison.Ordinal) || l.Contains("not installed", StringComparison.Ordinal) && !l.Contains("counters not installed", StringComparison.Ordinal))).ToList();
+            var title = $"{char.ToUpperInvariant(name[0])}{name[1..]}";
+            if (off.Any(BuildMismatch)) Version($"{title} turned itself off: it does not recognise this DCS version. The other optimizations still run.");
+            else if (off.Count > 0) warnings.Add($"{title} turned itself off: one of its safety checks failed. The other optimizations still run.");
+        }
         // Depth boost's dual camera finds the pilot's own aircraft through a table in NGModel.dll; a DCS build that moved it
         // leaves that matching off (the dual camera itself keeps running).
         if (Has("cockpit ipd: ownship matching off"))
@@ -161,6 +168,13 @@ public static class EngineOptimizations
         parts.Add(scene ? "culling hook on" : "culling hook not seen yet");
         return new("loaded", string.Join(" · ", parts) + ".", warnings, timerAvailable, timerActive, scene, running, module, log, report, reportAt, lastStats, noLists, version);
     }
+
+    /// <summary>A module line that says the code a part patches does not look as on the DCS build it was analysed on (as
+    /// opposed to a safety check that latched in flight): the Checks page's "DCS version" line.</summary>
+    internal static bool BuildMismatch(string line) =>
+        line.Contains("does not match", StringComparison.Ordinal) || line.Contains("unexpected bytes", StringComparison.Ordinal)
+        || line.Contains("is not an analysed build", StringComparison.Ordinal) || line.Contains("build mismatch", StringComparison.Ordinal)
+        || line.Contains("NOT hooked", StringComparison.Ordinal) || line.Contains("exports not found", StringComparison.Ordinal);
 
     /// <summary>Starts the in-game test suite: DcsQvCull checks for run_suite.flag next to its DLL every second.</summary>
     public static string StartSuite(string optionsPath, bool dcsRunning)

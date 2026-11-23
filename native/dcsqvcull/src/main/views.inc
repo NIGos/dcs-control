@@ -10,6 +10,8 @@
 #include "shadow_pass.h"
 // Quad-view frames (UpdateGazeAndCheckHold below), declared ahead of pass_timing.h: its top-level frame id.
 std::atomic<uint64_t> g_quadFrame{0};
+// The thread of the last quad-view frame (DCS's render thread; prefetch_fix.h PickNoSleepTid). 0 = none yet.
+std::atomic<DWORD> g_quadTid{0};
 #include "pass_timing.h"
 #include "thread_tuning.h"
 #include <condition_variable>
@@ -224,6 +226,7 @@ std::atomic<uint64_t> g_saccades{0};
 
 bool UpdateGazeAndCheckHold(const std::vector<ViewInfo>& views) {
   uint64_t frame = ++g_quadFrame;
+  g_quadTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
   double threshold = std::sin(g_cfg.saccadeDeg * 0.017453292519943295);
   bool saccade = false;
   {

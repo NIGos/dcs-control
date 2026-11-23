@@ -185,6 +185,38 @@ inline bool CapSkip(uint64_t now, uint32_t cap) {
   return slept;
 }
 
+// The thread the cap never sleeps, from the payload worker once per second. quadTid: the thread of the last
+// quad-view collect (main views.inc, HookCollect: DCS's render thread in every flight frame, whatever else is
+// installed); topTid: pass timing's top-level thread (ptiming::g_topTid: only when pass timing installed, e.g. not
+// when the shadow recorder fails on a driver without D3D11 command lists, and a loading thread can hold it for a
+// while). The collect thread wins; 0 = unknown (nobody sleeps). Pure.
+inline DWORD PickNoSleepTid(DWORD quadTid, DWORD topTid) { return quadTid ? quadTid : topTid; }
+// "prefetch: spin cap inactive: render thread unknown", once per session: after kUnknownLogSec seconds with the cap
+// armed (SpinCap > 0, mode skip), the render thread unknown and DCS calling the hook (terrain streaming).
+constexpr uint32_t kUnknownLogSec = 60;
+uint32_t g_unknownSec = 0;
+bool g_unknownLogged = false;
+uint64_t g_unknownCalls0 = 0;
+uint64_t SumCalls();
+// True when it logged.
+bool UpdateNoSleepTid(DWORD quadTid, DWORD topTid) {
+  const DWORD rt = PickNoSleepTid(quadTid, topTid);
+  g_noSleepTid.store(rt, std::memory_order_relaxed);
+  const uint64_t calls = SumCalls();
+  const bool streaming = calls != g_unknownCalls0;
+  g_unknownCalls0 = calls;
+  const bool armed = g_spinCap.load(std::memory_order_relaxed) != 0 && g_mode.load(std::memory_order_relaxed) == kSkip;
+  if (g_unknownLogged) return false;
+  if (!armed || rt) {
+    g_unknownSec = 0;
+    return false;
+  }
+  if (!streaming || ++g_unknownSec < kUnknownLogSec) return false;
+  g_unknownLogged = true;
+  Log("prefetch: spin cap inactive: render thread unknown");
+  return true;
+}
+
 inline bool SeenRecently(ULONG_PTR address, ULONG_PTR count, ULONG_PTR bytes, uint64_t now, uint32_t window) {
   uint64_t h = address * 0x9E3779B97F4A7C15ull ^ count * 0xC2B2AE3D27D4EB4Full ^ bytes * 0x165667B19E3779F9ull;
   h ^= h >> 31;
