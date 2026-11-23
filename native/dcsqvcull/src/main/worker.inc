@@ -12,6 +12,80 @@ void ChainFastAtStart() {
   eshd::AtStart(g_cfg.suiteEarlyShaderCensus);
 }
 
+// The worker's once-a-second engine applies (kill switch, retries until DCS's modules are there; not in PerceptionOnly).
+// A function of its own so the offline invariant tests (test/invariants_test.h) can run it with the kill switch on.
+void TickEngineParts() {
+  if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
+      !g_benchRunningFlag.load())
+    ApplyShadowTexSkip();
+  if (g_cfg.bigPages && !g_engineOff.load() && bigpages::g_state.load() == 0 && allocslab::g_state.load() >= 1 &&
+      !g_benchRunningFlag.load())
+    ApplyBigPages(true);
+  else if ((!g_cfg.bigPages || g_engineOff.load()) && bigpages::g_state.load() == 0 &&
+           !bigpages::g_undoDone.load() && !g_benchRunningFlag.load())
+    bigpages::UndoLeftover();  // R63: retried until NGModel / the reset hook is there
+  if (g_cfg.shadowInst && !g_engineOff.load() && shadowinst::g_state.load() == 0) ApplyShadowInst();
+  if (g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load() && shadowbatch::g_state.load() == 0 &&
+      !g_benchRunningFlag.load())
+    ApplyShadowBatch();
+  if (g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load() && gbbatch::g_state.load() == 0 &&
+      !g_benchRunningFlag.load())
+    ApplyGBufferBatch();
+  if (g_cfg.shadowRecorder && !g_engineOff.load() && shrec::g_state.load() == 0 && !g_benchRunningFlag.load())
+    ApplyShadowRecorder();
+  if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
+    ApplyGBufferRecorder();
+  if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
+  if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
+  if (!g_benchRunningFlag.load() && (g_cfg.cascadeCache || cascache::g_on.load())) ApplyCascadeCache();
+  if (!g_benchRunningFlag.load() && (g_cfg.chainFast || chainfast::g_mask.load()))
+    chainfast::Apply(g_engineOff.load() ? 0 : g_cfg.chainFast);  // R34 (default 7; off at 0)
+  if (!g_benchRunningFlag.load() && (g_cfg.shaderFast || sfast::g_mask.load()))
+    sfast::Apply(g_engineOff.load() ? 0 : g_cfg.shaderFast);  // R36 (default 3; off at 0)
+  if (!g_benchRunningFlag.load()) ApplyWaterSkip(g_engineOff.load());  // W1 (default 0: nothing installed)
+  {  // W1: the "water skip:" line every 10 s while its intercept is in (only when counters moved)
+    static ULONGLONG lastW1 = 0;
+    if (ptiming::g_intercept.load() && GetTickCount64() - lastW1 >= 10000) {
+      lastW1 = GetTickCount64();
+      w1::LogCounters();
+    }
+  }
+  // Audit A2/B4 census (measure only, default 0: nothing installed); needs chain fast's CSSetShader hook.
+  if (g_cfg.suiteChainDeriveCensus || chainderive::g_state.load())
+    chainderive::Tick(g_cfg.suiteChainDeriveCensus, g_cfg.suiteChainDeriveCensusMB);
+  // Audit B6 periphery instance census (measure only, default 0: nothing installed).
+  if (g_cfg.suitePeriphCensus || pcensus::g_installed.load())
+    pcensus::Tick(g_cfg.suitePeriphCensus, g_benchRunningFlag.load());
+  // 0.7 early shaders (default 0: nothing installed): SSAO water skip, hot-air idle skip (kill switch: off), census.
+  // While a benchmark / suite runs the mask is held as it was (like every other feature's Apply above), so a
+  // suite measures with the configured features instead of silently without them.
+  if (g_cfg.earlyShaders || g_cfg.suiteEarlyShaderCensus || eshd::g_installed.load()) {
+    static uint32_t esMask = 0;
+    if (!g_benchRunningFlag.load() || g_engineOff.load()) esMask = g_engineOff.load() ? 0 : g_cfg.earlyShaders;
+    eshd::Tick(esMask, g_benchRunningFlag.load() ? 0 : g_cfg.suiteEarlyShaderCensus, g_dir);
+  }
+  // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
+  // through; the features DCS creates at the next mission load get DCS's own hint again.
+  dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
+              g_cfg.dlssIgnoreDriverPreset, g_engineOff.load(), g_cfg.dlssInstrument,  // R130: + Instrument
+              g_cfg.dlssReleaseIdleSets, g_cfg.dlssReleaseAfterEvals);  // R132: + ReleaseIdleSets
+  // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
+  if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
+    ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;
+    ftwin::g_tapBaseline = g_cfg.suiteFocusTwinTapBaseline;
+    ftwin::g_earlyStop = g_cfg.suiteFocusTwinEarlyStop;
+    ftwin::g_auditEvery = g_cfg.suiteFocusTwinAuditEvery;
+    ftwin::g_trustNeeded = g_cfg.suiteFocusTwinTrust;
+    ftwin::g_island = g_cfg.suiteFocusTwinIsland;
+    ftwin::g_chunk = g_cfg.suiteFocusTwinChunk;
+    ftwin::g_predTol = g_cfg.suiteFocusTwinPredTol;
+    ftwin::g_verifyEvery = g_cfg.suiteFocusTwinVerify;
+    ftwin::g_instKey = g_cfg.focusTwinInstancer;    // R125
+    ftwin::g_patchesKey = g_cfg.suiteFocusTwinPatches;
+    ftwin::Tick(g_cfg.focusTwin, g_engineOff.load(), g_benchRunningFlag.load(), g_quadFrame.load());
+  }
+}
+
 DWORD WINAPI WorkerThread(void*) {
   reloc::g_log = [](const char* line) { Log("%s", line); };
   reloc::g_slotRead = [](void** slot) { return SlotOriginal(slot); };
@@ -239,77 +313,7 @@ DWORD WINAPI WorkerThread(void*) {
         PerceptionGlobalsTick();
       }
       // NGModel.dll may load after the payload: retry until the hook installs.
-      if (!po) {
-        if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
-            !g_benchRunningFlag.load())
-          ApplyShadowTexSkip();
-        if (g_cfg.bigPages && !g_engineOff.load() && bigpages::g_state.load() == 0 && allocslab::g_state.load() >= 1 &&
-            !g_benchRunningFlag.load())
-          ApplyBigPages(true);
-        else if ((!g_cfg.bigPages || g_engineOff.load()) && bigpages::g_state.load() == 0 &&
-                 !bigpages::g_undoDone.load() && !g_benchRunningFlag.load())
-          bigpages::UndoLeftover();  // R63: retried until NGModel / the reset hook is there
-        if (g_cfg.shadowInst && !g_engineOff.load() && shadowinst::g_state.load() == 0) ApplyShadowInst();
-        if (g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load() && shadowbatch::g_state.load() == 0 &&
-            !g_benchRunningFlag.load())
-          ApplyShadowBatch();
-        if (g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load() && gbbatch::g_state.load() == 0 &&
-            !g_benchRunningFlag.load())
-          ApplyGBufferBatch();
-        if (g_cfg.shadowRecorder && !g_engineOff.load() && shrec::g_state.load() == 0 && !g_benchRunningFlag.load())
-          ApplyShadowRecorder();
-        if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
-          ApplyGBufferRecorder();
-        if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
-        if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
-        if (!g_benchRunningFlag.load() && (g_cfg.cascadeCache || cascache::g_on.load())) ApplyCascadeCache();
-        if (!g_benchRunningFlag.load() && (g_cfg.chainFast || chainfast::g_mask.load()))
-          chainfast::Apply(g_engineOff.load() ? 0 : g_cfg.chainFast);  // R34 (default 7; off at 0)
-        if (!g_benchRunningFlag.load() && (g_cfg.shaderFast || sfast::g_mask.load()))
-          sfast::Apply(g_engineOff.load() ? 0 : g_cfg.shaderFast);  // R36 (default 3; off at 0)
-        if (!g_benchRunningFlag.load()) ApplyWaterSkip(g_engineOff.load());  // W1 (default 0: nothing installed)
-        {  // W1: the "water skip:" line every 10 s while its intercept is in (only when counters moved)
-          static ULONGLONG lastW1 = 0;
-          if (ptiming::g_intercept.load() && GetTickCount64() - lastW1 >= 10000) {
-            lastW1 = GetTickCount64();
-            w1::LogCounters();
-          }
-        }
-        // Audit A2/B4 census (measure only, default 0: nothing installed); needs chain fast's CSSetShader hook.
-        if (g_cfg.suiteChainDeriveCensus || chainderive::g_state.load())
-          chainderive::Tick(g_cfg.suiteChainDeriveCensus, g_cfg.suiteChainDeriveCensusMB);
-        // Audit B6 periphery instance census (measure only, default 0: nothing installed).
-        if (g_cfg.suitePeriphCensus || pcensus::g_installed.load())
-          pcensus::Tick(g_cfg.suitePeriphCensus, g_benchRunningFlag.load());
-        // 0.7 early shaders (default 0: nothing installed): SSAO water skip, hot-air idle skip (kill switch: off), census.
-        // While a benchmark / suite runs the mask is held as it was (like every other feature's Apply above), so a
-        // suite measures with the configured features instead of silently without them.
-        if (g_cfg.earlyShaders || g_cfg.suiteEarlyShaderCensus || eshd::g_installed.load()) {
-          static uint32_t esMask = 0;
-          if (!g_benchRunningFlag.load() || g_engineOff.load()) esMask = g_engineOff.load() ? 0 : g_cfg.earlyShaders;
-          eshd::Tick(esMask, g_benchRunningFlag.load() ? 0 : g_cfg.suiteEarlyShaderCensus, g_dir);
-        }
-        // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
-        // through; the features DCS creates at the next mission load get DCS's own hint again.
-        dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
-                    g_cfg.dlssIgnoreDriverPreset, g_engineOff.load(), g_cfg.dlssInstrument,  // R130: + Instrument
-                    g_cfg.dlssReleaseIdleSets, g_cfg.dlssReleaseAfterEvals);  // R132: + ReleaseIdleSets
-        // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
-        if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
-          ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;
-          ftwin::g_tapBaseline = g_cfg.suiteFocusTwinTapBaseline;
-          ftwin::g_earlyStop = g_cfg.suiteFocusTwinEarlyStop;
-          ftwin::g_auditEvery = g_cfg.suiteFocusTwinAuditEvery;
-          ftwin::g_trustNeeded = g_cfg.suiteFocusTwinTrust;
-          ftwin::g_island = g_cfg.suiteFocusTwinIsland;
-          ftwin::g_chunk = g_cfg.suiteFocusTwinChunk;
-          ftwin::g_predTol = g_cfg.suiteFocusTwinPredTol;
-          ftwin::g_verifyEvery = g_cfg.suiteFocusTwinVerify;
-          ftwin::g_instKey = g_cfg.focusTwinInstancer;    // R125
-          ftwin::g_patchesKey = g_cfg.suiteFocusTwinPatches;
-          ftwin::Tick(g_cfg.focusTwin, g_engineOff.load(), g_benchRunningFlag.load(), g_quadFrame.load());
-        }
-      }
+      if (!po) TickEngineParts();
       // R139 VRS probe ([Suite] VrsProbe, default 0): only its start gate here (steady frames); the probe itself is
       // a suite phase.
       if (vrsp::g_keyBlock.load(std::memory_order_relaxed) > 0) vrsp::NoteFrames(g_quadFrame.load());

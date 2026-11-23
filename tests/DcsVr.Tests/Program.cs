@@ -5139,6 +5139,8 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
     {
         new VrProfile(), vr, vr with { Gaze = GazeMode.Fixed }, vr with { QuadViews = QuadProvider.None }, vr with { FrameGen = FrameGeneration.FidelityFx },
         vr with { EngineOptimizations = false }, vr with { PupilShift = false, DepthBoost = false, GazeDof = false, GVisionUseGaze = false }, vr with { Runtime = RuntimeKind.SboysSteamVr },
+        // The keys written only for a non-default value that is not a switch (all switches on leaves them out).
+        vr with { EngineDevMode = false, PanelGamut = 1, PeripheryDlssPreset = PeripheryDlssPreset.K, EngineShaderCachePrewarm = false, EngineShaderCompileWorkers = 2, EngineFastShaderPaths = false },
     };
     var keys = new SortedSet<string>(StringComparer.Ordinal);
     void Add(string writer, string ini)
@@ -5173,6 +5175,39 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
         Require(process.ExitCode == 0, output + error.Result);
     }
     catch (System.ComponentModel.Win32Exception) { Skip("PowerShell 7 (pwsh) is not on PATH"); }
+});
+Test("The engine module's invariant fixtures are what the app writes for every Engine option off and on (native/dcsqvcull/test/app_ini)", () =>
+{
+    // The DcsQvCull.ini the app writes with Engine Optimizations on and every Engine-page option off (GitHub #28: that
+    // must be stock DCS), and with every option on. The engine module's offline tests (test/invariants_test.h) load both
+    // through its own LoadConfig: all off = no engine part configured; all on = every value read as written; kill
+    // switch = nothing requested. DCSVR_UPDATE_WRITTEN_KEYS=1 rewrites them, like scripts/written-keys.txt.
+    // Off: every Engine-page switch off, nothing else. On: every switch of the profile on (the perception, colour and
+    // VrFx keys too) and the non-switch options that add keys. Developer mode (a payload and ini built elsewhere, every
+    // constant written) and the parked Three views are not options.
+    static VrProfile Engine(bool on)
+    {
+        object o = on ? new VrProfile { EngineOptimizations = true, BoostPrefetch = PrefetchFix.Skip, FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated,
+                Gaze = GazeMode.EyeTracked, Runtime = RuntimeKind.Pimax, ColorMode = ColorMode.Enhanced, PanelGamut = 1, PeripheryDlssPreset = PeripheryDlssPreset.K, FocusDlssPreset = 11, EngineShaderCompileWorkers = 2 }
+            : new VrProfile { EngineOptimizations = true, BoostPrefetch = PrefetchFix.Off };
+        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => x.PropertyType == typeof(bool) && x.SetMethod is { IsPublic: true } && (on || x.Name.StartsWith("Engine", StringComparison.Ordinal))
+            && x.Name is not (nameof(VrProfile.EngineOptimizations) or nameof(VrProfile.EngineDevMode) or nameof(VrProfile.EngineThreeViews) or nameof(VrProfile.Desktop))))
+            prop.SetValue(o, on);
+        return (VrProfile)o;
+    }
+    // [Model] ShadowRecorderHelpers follows this PC's processor count: the fixture holds the value for more than 8.
+    static string Fixture(VrProfile p) => System.Text.RegularExpressions.Regex.Replace(ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n"), @"(?m)^ShadowRecorderHelpers=\d+$", "ShadowRecorderHelpers=3");
+    var folder = Path.Combine(workspace, "native/dcsqvcull/test/app_ini");
+    var stale = new List<string>();
+    foreach (var (name, profile) in new[] { ("engine_all_off.ini", Engine(false)), ("engine_all_on.ini", Engine(true)) })
+    {
+        var text = Fixture(profile); var path = Path.Combine(folder, name);
+        if (Environment.GetEnvironmentVariable("DCSVR_UPDATE_WRITTEN_KEYS") == "1") { Directory.CreateDirectory(folder); File.WriteAllText(path, text); }
+        if (!File.Exists(path) || File.ReadAllText(path).ReplaceLineEndings("\n") != text) stale.Add(name);
+    }
+    Require(stale.Count == 0, "native/dcsqvcull/test/app_ini is not what the writer emits (run the tests with DCSVR_UPDATE_WRITTEN_KEYS=1): " + string.Join(", ", stale));
+    var off = Fixture(Engine(false));
+    Require(off.Contains("\nChainFast=0\n") && off.Contains("\nShaderFast=0") && off.Contains("PerceptionOnly=0") && !off.Contains("EarlyShaders") && !off.Contains("SkipHiddenWater"), "all off writes the #28 keys 0 and no 0.7 opt-in key:\n" + off);
 });
 Test("The OpenXR runtime of another headset is named (Varjo, Meta, Virtual Desktop, WMR); Pimax's and SteamVR's are not 'other'", () =>
 {
