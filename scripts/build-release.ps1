@@ -33,12 +33,38 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
 $env:NUGET_PACKAGES=Join-Path $workspaceRoot '.cache/nuget'
-# A release never trusts the native test cache (scripts/test-cache.ps1): DCSC_FORCE_TESTS=1 for the native builds'
-# own runs only; the caller's session keeps its value.
-function Invoke-WithFreshTests([scriptblock]$Build) {
+# DcsQvCull and pupil shift are built and tested by every release, side by side, each in a PowerShell process of its own
+# (they set and read environment variables, so not two threads of this one), while the app is published here. Their
+# outputs, build folders and checks are separate; each one's whole output goes to artifacts/native/<name>-release.log and
+# is printed below once both have ended, one after the other. Either failing fails the release.
+# A release to publish (-Sign) never trusts the native test cache (scripts/test-cache.ps1): DCSC_FORCE_TESTS=1 for those
+# two builds' own runs only, the caller's session keeps its value. A build without -Sign skips a suite whose programs,
+# sources and environment are exactly those of its last full pass, as a developer build does.
+function Start-NativeBuild([string]$Name, [string]$Script) {
+    $log = Join-Path $workspaceRoot "artifacts/native/$Name-release.log"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $log) -Force | Out-Null
     $previous = $env:DCSC_FORCE_TESTS
-    $env:DCSC_FORCE_TESTS = '1'
-    try { & $Build } finally { $env:DCSC_FORCE_TESTS = $previous }
+    if ($Sign) { $env:DCSC_FORCE_TESTS = '1' }
+    try {
+        $job = Start-Job -Name $Name -ArgumentList (Join-Path $PSScriptRoot $Script), $log -ScriptBlock {
+            param([string]$Script, [string]$Log)
+            $ErrorActionPreference = 'Stop'
+            try { & $Script *>&1 | ForEach-Object { "$_" } | Out-File -LiteralPath $Log -Encoding utf8 }
+            catch { "FAILED: $($_.Exception.Message)" | Out-File -LiteralPath $Log -Append -Encoding utf8; throw }
+        }
+    } finally { $env:DCSC_FORCE_TESTS = $previous }
+    [pscustomobject]@{ Name = $Name; Job = $job; Log = $log }
+}
+function Wait-NativeBuilds([object[]]$Builds) {
+    $null = $Builds.Job | Wait-Job
+    $failed = @()
+    foreach ($build in $Builds) {
+        Write-Host "----- $($build.Name) ($($build.Log)) -----"
+        if (Test-Path -LiteralPath $build.Log) { Get-Content -LiteralPath $build.Log | ForEach-Object { Write-Host $_ } }
+        if ($build.Job.State -ne 'Completed') { $failed += $build.Name }
+        Remove-Job -Job $build.Job -Force
+    }
+    if ($failed.Count) { throw "Native build failed: $($failed -join ', ') (full output in artifacts/native/<name>-release.log)." }
 }
 # A file's SHA-256 next to it as <file>.sha256 (lower case, one line): the components' own hashes, the ZIP's and the setup's.
 function Write-Sha256Sidecar([string]$Path) {
@@ -71,6 +97,13 @@ if (Test-Path -LiteralPath $releaseRoot) {
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 $payloadRoot = Join-Path $releaseRoot 'files'
 New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
+# DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
+# them (the terrain prefetch fix included), and the pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in
+# the profile folder when the profile enables it. Built on every release so a stale DLL can never ship; collected below.
+if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
+$nativeBuilds = @((Start-NativeBuild 'dcsqvcull' 'build-dcsqvcull.ps1'), (Start-NativeBuild 'pupil-shift' 'build-pupil-shift.ps1'))
+# A release that stops before collecting them stops them too.
+trap { if ($nativeBuilds) { $nativeBuilds.Job | Where-Object State -eq 'Running' | Stop-Job -ErrorAction SilentlyContinue }; break }
 # The launcher at the top of the release folder (starts files\DcsControl.exe); the interface render below uses it too.
 $launcher = & (Join-Path $PSScriptRoot 'build-launcher.ps1') | Select-Object -Last 1
 Copy-Item -LiteralPath $launcher -Destination (Join-Path $releaseRoot 'DcsControl.exe') -Force
@@ -84,7 +117,6 @@ foreach ($dir in @('packages','components/quadviews','components/cheeky-focus/Ch
 # Quad Views, OFXR and Cheeky are copied as built: each must have been built from the sources and patches here now
 # (the source package carries those, so they must match what ships).
 . (Join-Path $PSScriptRoot 'build-stamp.ps1')
-if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
 foreach ($component in @('quadviews','ofxr','cheeky')) { Assert-BuildStampCurrent $component -AllowLocalOnly:$LocalOnly }
 foreach ($filename in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll')) {
     $target = Join-Path $payloadRoot "components/cheeky-focus/$filename"
@@ -117,17 +149,14 @@ New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/ofxr') -F
 $deferredOfxr = Join-Path $payloadRoot 'components/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll') -Destination $deferredOfxr -Force
 Write-Sha256Sidecar $deferredOfxr
-# DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
-# them (the terrain prefetch fix included). Rebuilt and tested on every release so a stale DLL can never ship.
-Invoke-WithFreshTests { & (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1') }
+# DcsQvCull and pupil shift, started at the top.
+Wait-NativeBuilds $nativeBuilds
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/dcsqvcull') -Force | Out-Null
 foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/native/dcsqvcull/DcsQvCullPayload.dll','native/dcsqvcull/lua/DcsQvCull.lua')) {
     $target = Join-Path $payloadRoot ('components/dcsqvcull/' + (Split-Path -Leaf $source))
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
     Write-Sha256Sidecar $target
 }
-# Pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in the profile folder when the profile enables it.
-Invoke-WithFreshTests { & (Join-Path $PSScriptRoot 'build-pupil-shift.ps1') }
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/pupilshift') -Force | Out-Null
 $pupilShift = Join-Path $payloadRoot 'components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/pupil-shift/XR_APILAYER_DCSVR_pupil_shift.dll') -Destination $pupilShift -Force

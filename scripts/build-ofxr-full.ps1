@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-jobs.ps1')  # Get-BuildJobs: the compile jobs at once
 $sdkRoot = Join-Path $workspaceRoot 'external/ofxr/external/FidelityFX-SDK-v1.1.4'
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
 if (-not (Test-Path -LiteralPath $sdkRoot)) {
@@ -41,7 +42,7 @@ $compileText = $compileText.Replace('set(${PERMUTATION_OUTPUTS} ${PERMUTATION_OU
 [IO.File]::WriteAllText($compilePath, $compileText)
 & $wrapper cmake -S "$sdkRoot/sdk" -B $sdkBuild -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFX_ALL=OFF -DFFX_OF=ON -DFFX_API_BACKEND=DX12_X64 -DFFX_BUILD_AS_DLL=OFF
 if ($LASTEXITCODE -ne 0) { throw 'FidelityFX configuration failed.' }
-& $wrapper cmake --build $sdkBuild --parallel 4
+& $wrapper cmake --build $sdkBuild --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'FidelityFX build failed.' }
 $ofxrBuild = Join-Path $workspaceRoot 'artifacts/native/ofxr-full'
 # Deferred private swapchains for layers that composite their own views (Quad Views). Idempotent.
@@ -53,7 +54,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 & $wrapper cmake -S "$workspaceRoot/external/ofxr" -B $ofxrBuild -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'OFXR configuration failed.' }
-& $wrapper cmake --build $ofxrBuild --parallel 4
+& $wrapper cmake --build $ofxrBuild --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'OFXR build failed.' }
 # Tray lifecycle tests create a notification icon. Exclude them from offline verification.
 & $wrapper ctest --test-dir $ofxrBuild --output-on-failure --parallel 2 -E tray_lifecycle

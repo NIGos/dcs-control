@@ -8,14 +8,17 @@
 #   Ofxr       ofxr_bridge.ini   external/ofxr-djules75/src + patches/ofxr-djules75, patches/ofxr: the pair, else L"<key>"
 #   QuadViews  settings.cfg      external/quadviews/openxr-api-layer + patches/quadviews + native/quadviews: "<key>"
 #   Cheeky     Cheeky's ini      external/cheeky/src and the sources in patches/cheeky: "<key>"
-# A component whose sources are not here (an external tree not checked out) is reported and skipped.
+# A component whose sources are not here (Ofxr, QuadViews, Cheeky: its external checkout missing) is reported and skipped.
 # Test sources (test, harness, fake) do not count. Exit 0 = every key is read; 1 = a problem (listed).
 param([string]$Root = (Split-Path -Parent $PSScriptRoot))
 $ErrorActionPreference = 'Stop'
 $list = Join-Path $Root 'scripts/written-keys.txt'
 if (-not (Test-Path -LiteralPath $list)) { Write-Host "PROBLEM: $list is missing"; exit 1 }
 $extensions = @('.h', '.hpp', '.inc', '.cpp', '.c')
-function Sources([string[]]$folders, [string[]]$patchFolders) {
+# $checkout: the external checkout the component is built from. Without it the component is skipped, whatever else is
+# here (its patches and own sources alone are not what it reads).
+function Sources([string[]]$folders, [string[]]$patchFolders, [string]$checkout) {
+  if ($checkout -and -not (Test-Path -LiteralPath (Join-Path $Root $checkout))) { return $null }
   $text = [Text.StringBuilder]::new(); $found = $false
   foreach ($f in $folders) {
     $dir = Join-Path $Root $f
@@ -39,9 +42,9 @@ function Sources([string[]]$folders, [string[]]$patchFolders) {
 $readers = [ordered]@{
   DcsQvCull  = @{ Text = Sources @('native/dcsqvcull/src') @(); Pair = $true }
   PupilShift = @{ Text = Sources @('native/pupil_shift') @(); Pair = $false }
-  Ofxr       = @{ Text = Sources @('external/ofxr-djules75/src') @('patches/ofxr-djules75', 'patches/ofxr'); Pair = $true }
-  QuadViews  = @{ Text = Sources @('external/quadviews/openxr-api-layer', 'native/quadviews') @('patches/quadviews'); Pair = $false }
-  Cheeky     = @{ Text = Sources @('external/cheeky/src', 'patches/cheeky') @(); Pair = $false }
+  Ofxr       = @{ Text = Sources @('external/ofxr-djules75/src') @('patches/ofxr-djules75', 'patches/ofxr') 'external/ofxr-djules75'; Pair = $true }
+  QuadViews  = @{ Text = Sources @('external/quadviews/openxr-api-layer', 'native/quadviews') @('patches/quadviews') 'external/quadviews'; Pair = $false }
+  Cheeky     = @{ Text = Sources @('external/cheeky/src', 'patches/cheeky') @() 'external/cheeky'; Pair = $false }
 }
 $problems = [Collections.Generic.List[string]]::new(); $counts = [ordered]@{}; $skipped = [Collections.Generic.HashSet[string]]::new()
 foreach ($line in [IO.File]::ReadAllLines($list)) {
@@ -57,7 +60,7 @@ foreach ($line in [IO.File]::ReadAllLines($list)) {
   $read = if ($reader.Pair -and $section) { $reader.Text -match ('L"' + [regex]::Escape($section) + '",\s*L"' + $k + '"') -or $reader.Text -match ('L"' + $k + '"') } else { $reader.Text -match ('"' + $k + '"') }
   if (-not $read) { $problems.Add("$writer [$section] $key is written by ConfigurationWriters.cs but never read by the component") }
 }
-Write-Host ("written keys checked: " + (($counts.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ', ') + $(if ($skipped.Count) { "; sources not here, skipped: $($skipped -join ', ')" } else { '' }))
+Write-Host ("written keys checked: " + (($counts.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ', ') + $(if ($skipped.Count) { "; sources not here (external checkout missing), skipped: $($skipped -join ', ')" } else { '' }))
 if ($problems.Count) { $problems | ForEach-Object { Write-Host "PROBLEM: $_" }; exit 1 }
 Write-Host 'written keys: every one is read'
 exit 0

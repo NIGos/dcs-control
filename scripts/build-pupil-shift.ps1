@@ -6,6 +6,7 @@
 param([string]$OpenXrInclude)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-jobs.ps1')  # Get-BuildJobs: the compile jobs at once
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
 # Every key the app writes for this component must be read by it (scripts/written-keys.txt).
 & (Join-Path $PSScriptRoot 'check-written-keys.ps1')
@@ -18,7 +19,7 @@ $configure = @('-S', (Join-Path $workspaceRoot 'native/pupil_shift'), '-B', $bui
 if ($OpenXrInclude) { $configure += "-DOPENXR_INCLUDE=$($OpenXrInclude -replace '\\', '/')" }
 & $wrapper cmake @configure
 if ($LASTEXITCODE -ne 0) { throw 'Pupil shift configuration failed.' }
-& $wrapper cmake --build $build --parallel 4
+& $wrapper cmake --build $build --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'Pupil shift build failed.' }
 . (Join-Path $PSScriptRoot 'test-cache.ps1')
 $testSources = @((Join-Path $workspaceRoot 'native/pupil_shift'))  # its CMakeLists.txt included

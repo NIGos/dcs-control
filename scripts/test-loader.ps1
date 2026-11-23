@@ -1,15 +1,16 @@
 $ErrorActionPreference='Stop'
 $workspaceRoot=Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-jobs.ps1')  # Get-BuildJobs: the compile jobs at once
 $wrapper=Join-Path $PSScriptRoot 'msvc.cmd'
 $loaderRoot=Join-Path $workspaceRoot 'artifacts/native/openxr-loader'
 & $wrapper cmake -S "$workspaceRoot/external/quadviews/external/OpenXR-SDK" -B $loaderRoot -G Ninja -DCMAKE_BUILD_TYPE=Release '-DCMAKE_POLICY_VERSION_MINIMUM=3.5.0' -DBUILD_TESTS=OFF -DBUILD_API_LAYERS=OFF
 if($LASTEXITCODE -ne 0){throw 'Loader configuration failed.'}
-& $wrapper cmake --build $loaderRoot --parallel 4
+& $wrapper cmake --build $loaderRoot --parallel (Get-BuildJobs)
 if($LASTEXITCODE -ne 0){throw 'Loader build failed.'}
 $smokeRoot=Join-Path $workspaceRoot 'artifacts/native/loader-smoke'
 & $wrapper cmake -S "$workspaceRoot/tests/native" -B $smokeRoot -G Ninja -DCMAKE_BUILD_TYPE=Release
 if($LASTEXITCODE -ne 0){throw 'Smoke configuration failed.'}
-& $wrapper cmake --build $smokeRoot --parallel 4
+& $wrapper cmake --build $smokeRoot --parallel (Get-BuildJobs)
 if($LASTEXITCODE -ne 0){throw 'Smoke build failed.'}
 $fixtureRoot=Join-Path $smokeRoot 'fixture'
 New-Item -ItemType Directory -Path "$fixtureRoot/layers","$fixtureRoot/appdata" -Force | Out-Null

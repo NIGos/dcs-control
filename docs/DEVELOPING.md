@@ -56,6 +56,35 @@ Pacing tests and fps measurements need a quiet machine. Instead of fixed hours t
 A machine has one lock, whatever the number of checkouts: in a second checkout or worktree set `DCSC_QUIET_LOCK` to
 the first one's file. The rig's scripts read it (`tools\rig`).
 
+## Build speed
+
+- Native builds run as many compile jobs as the PC has logical processors less two (`scripts/build-jobs.ps1`);
+  `DCSC_BUILD_JOBS=<n>` sets the number. Start builds that share the PC with someone at BelowNormal priority (lower
+  your shell first: `(Get-Process -Id $PID).PriorityClass = 'BelowNormal'`): compilers and tests inherit it and yield
+  to the user's programs however many jobs there are. The job count never changes what is built.
+- Quad Views is reset and patched again only when its patches or its own sources (`native/quadviews`) changed, or the
+  checkout is no longer exactly as the last apply left it (a record in its `.git` folder). It is built again only
+  when those inputs, the folder, the compiler or the MSBuild options changed, or its outputs are not the ones the last
+  build left (a record in `obj`); that build is always a full one (`obj` and `bin\x64\Release` deleted first). An
+  incremental MSBuild run would relink every time (the project's pre-build step rewrites `version.h`) and a relink
+  does not give the same bytes as a full link.
+- Every native test suite is skipped when nothing it reads changed since it last passed (`scripts/test-cache.ps1`:
+  the built programs and libraries, the tests' sources, the scripts, the environment the tests read, DCS's files).
+  The DcsQvCull tests read the Quad Views DLL, so a new Quad Views build runs them again.
+  OFXR also keeps the outcome of its last run: with `-LocalOnly`, a run that failed (the known environmental
+  `xrfg_layer_two_layers_deep_hold_arming_single`) is reused and stamped local-only again; without it the tests run.
+  `DCSC_FORCE_TESTS=1` runs every suite.
+- `build-release.ps1` builds and tests DcsQvCull and pupil shift side by side, in two processes of their own, while
+  it publishes the app. Their output goes to `artifacts\native\dcsqvcull-release.log` and `pupil-shift-release.log`
+  and is printed when both have ended. With `-Sign` they always run their tests (`DCSC_FORCE_TESTS=1`); without it a
+  suite whose inputs are unchanged is skipped as above.
+- Run the component builds (Cheeky, OFXR, Quad Views) one after another, not side by side: OFXR's second test phase
+  needs the machine to itself, Cheeky's build resets `external\cheeky`, whose OpenXR headers the pupil shift build
+  reads, and the Cheeky and Quad Views tests both use the GPU.
+- ctest parallelism stays as it was: DcsQvCull and pupil shift are one long test each (about 4 minutes, the pupil shift
+  harness in real time), OFXR's labelled `alone` / `pacing` tests run one at a time, its other tests and Cheeky's two
+  at a time (GPU and WARP tests, never checked with more neighbours).
+
 ## Releases
 
 - A release to publish is built with `scripts/build-release.ps1 -Sign` from a clean tree, at the commit that is then

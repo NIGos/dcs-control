@@ -2,6 +2,7 @@
 # Builds the DCS engine optimizations (native/dcsqvcull: loader and payload DLLs) and runs their offline tests.
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-jobs.ps1')  # Get-BuildJobs: the compile jobs at once
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
 # The shared-memory contract headers this module shares with the pupil shift layer must match (the OFXR copies are
 # checked by the OFXR build).
@@ -15,7 +16,7 @@ if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never read
 $build = Join-Path $workspaceRoot 'artifacts/native/dcsqvcull'
 & $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull configuration failed.' }
-& $wrapper cmake --build $build --parallel 4
+& $wrapper cmake --build $build --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull build failed.' }
 # The tests write reports and bench files into their working folder and read back the newest: they start from an
 # empty one, so a report left by an earlier run is never read instead of this run's.

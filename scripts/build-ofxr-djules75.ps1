@@ -8,6 +8,7 @@
 param([string]$LocalOnly, [switch]$BuildOnly)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-jobs.ps1')  # Get-BuildJobs: the compile jobs at once
 $sdkRoot = Join-Path $workspaceRoot 'external/ofxr/external/FidelityFX-SDK-v1.1.4'
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
 # Every key the app writes for this component must be read by it (scripts/written-keys.txt).
@@ -99,7 +100,7 @@ Reset-BuildFolderWithoutRepro $sdkBuild
 & $wrapper cmake -S "$sdkRoot/sdk" -B $sdkBuild -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFX_ALL=OFF -DFFX_OF=ON -DFFX_API_BACKEND=DX12_X64 -DFFX_BUILD_AS_DLL=OFF @reproFlags
 if ($LASTEXITCODE -ne 0) { throw 'FidelityFX configuration failed.' }
 if (-not (Test-ReproCache $sdkBuild)) { throw "FidelityFX is not configured with /Brepro (see CMakeCache.txt in $sdkBuild)." }
-& $wrapper cmake --build $sdkBuild --parallel 4
+& $wrapper cmake --build $sdkBuild --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'FidelityFX build failed.' }
 # --- djules75 fork of OFXR Bridge (DCS-capable since 0.2.6), pinned to tag 0.2.9.1 ---
 $forkRoot = Join-Path $workspaceRoot 'external/ofxr-djules75'
@@ -184,12 +185,39 @@ Reset-BuildFolderWithoutRepro $forkBuild
 & $wrapper cmake -S $forkRoot -B $forkBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DXRFG_FIDELITYFX_SDK_ROOT=$sdkRoot/sdk" @reproFlags
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork configuration failed.' }
 if (-not (Test-ReproCache $forkBuild)) { throw "The OFXR fork is not configured with /Brepro (see CMakeCache.txt in $forkBuild)." }
-& $wrapper cmake --build $forkBuild --parallel 4
+& $wrapper cmake --build $forkBuild --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork build failed.' }
 # -BuildOnly: the DLL without its tests and without a stamp (a second build to compare hashes with, for example).
 if ($BuildOnly) {
     Write-Host 'OFXR fork built (-BuildOnly): no test was run and no build stamp written.'
     return
+}
+# Both test phases are skipped when nothing they read changed since their last complete run (scripts/test-cache.ps1):
+# every program and library of the build (Ninja relinks nothing when no source changed), the fork's tests and scripts
+# folders, the test list ctest made, this script. The record also keeps that run's outcome: a full pass, or the tests that
+# failed (a local-only stamp). A recorded failure is reused only by a -LocalOnly build, which stamps it local-only again;
+# a build without -LocalOnly runs the tests. DCSC_FORCE_TESTS=1 always runs them; DCSC_SKIP_TIMING_TESTS=1 reuses no record.
+. (Join-Path $PSScriptRoot 'test-cache.ps1')
+$testFingerprint = Get-NativeTestFingerprint $forkBuild @((Join-Path $forkRoot 'tests'), (Join-Path $forkRoot 'scripts'), (Join-Path $forkBuild 'CTestTestfile.cmake'))
+$outcomeRecord = Join-Path $forkBuild 'tests-outcome.txt'
+$recordedOutcome = if (Test-Path -LiteralPath $outcomeRecord) { @(Get-Content -LiteralPath $outcomeRecord) } else { @() }
+function Save-OfxrTestOutcome([string]$Outcome) { Set-Content -LiteralPath $outcomeRecord -Value @($testFingerprint, $Outcome) -Encoding ascii }
+Remove-Item -LiteralPath $outcomeRecord -Force -ErrorAction SilentlyContinue
+if ($env:DCSC_FORCE_TESTS -ne '1' -and $env:DCSC_SKIP_TIMING_TESTS -ne '1' -and $recordedOutcome.Count -eq 2 -and $recordedOutcome[0] -eq $testFingerprint) {
+    . (Join-Path $PSScriptRoot 'build-stamp.ps1')
+    if ($recordedOutcome[1] -eq 'passed') {
+        Write-Host "OFXR fork tests unchanged since they all passed; skipped (DCSC_FORCE_TESTS=1 runs them)."
+        Save-OfxrTestOutcome 'passed'
+        Save-BuildStamp 'ofxr'
+        return
+    }
+    if ($LocalOnly -and $recordedOutcome[1] -like 'failed: *') {
+        $failedBefore = $recordedOutcome[1].Substring(8)
+        Write-Host "OFXR fork tests unchanged since their last run, which failed $failedBefore; skipped (DCSC_FORCE_TESTS=1 runs them)."
+        Save-OfxrTestOutcome $recordedOutcome[1]
+        Save-BuildStamp 'ofxr' -LocalOnly "$LocalOnly (failed: $failedBefore; tests unchanged since that run, not run again)"
+        return
+    }
 }
 # Which tests run where is said by two ctest labels the patch set gives them (0091, the end of the fork's
 # CMakeLists.txt), not by names in this script:
@@ -314,6 +342,7 @@ if ($LASTEXITCODE -ne 0) {
         Add-Content -LiteralPath $retryLog -Encoding utf8 -Value ('{0} local-only stamp written by the build script: {1} (failed: {2}); not for publishing' -f
             (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $LocalOnly, $brokenNames)
         Save-BuildStamp 'ofxr' -LocalOnly "$LocalOnly (failed: $brokenNames)"
+        Save-OfxrTestOutcome "failed: $brokenNames"
         return
     }
 } else {
@@ -321,3 +350,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 # Built and tested: build-release.ps1 ships this DLL only while its sources and patches match this stamp.
 Save-BuildStamp 'ofxr'
+Save-OfxrTestOutcome 'passed'

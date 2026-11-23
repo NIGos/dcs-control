@@ -5,10 +5,12 @@
 #   . (Join-Path $PSScriptRoot 'test-cache.ps1')
 #   $fingerprint = Get-NativeTestFingerprint $build @($testSource)   # before the run: an edit made during it runs them again
 #   if (-not (Test-NativeTestsCurrent $build $fingerprint)) { ...ctest...; Save-NativeTestsPassed $build $fingerprint }
-function Get-NativeTestFingerprint([string]$Build, [string[]]$Sources) {
+# -Exclude: a regular expression of paths below $Build whose programs and libraries a test run leaves there itself
+# (copies in per-process folders), not built ones: they would change the fingerprint on every run.
+function Get-NativeTestFingerprint([string]$Build, [string[]]$Sources, [string]$Exclude) {
     $sha = [Security.Cryptography.SHA256]::Create()
     $files = @(Get-ChildItem -LiteralPath $Build -Recurse -File -Include '*.exe', '*.dll' -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\(test-run|harness_out)\\' })
+        Where-Object { $_.FullName -notmatch '\\(test-run|harness_out)\\' -and -not ($Exclude -and $_.FullName.Substring($Build.Length) -match $Exclude) })
     foreach ($source in $Sources) { if (Test-Path -LiteralPath $source) { $files += @(Get-ChildItem -LiteralPath $source -Recurse -File) } }
     # This script and the build script that called it: a change to how the tests are run runs them again.
     $caller = Get-PSCallStack | Where-Object { $_.ScriptName -and $_.ScriptName -ne $PSCommandPath } | Select-Object -First 1

@@ -6,6 +6,7 @@ param([ValidateSet('ofxr-core','cheeky')][string]$Component = 'ofxr-core', [swit
 if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never reads (check-written-keys.ps1).' }
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'build-jobs.ps1')  # Get-BuildJobs: the compile jobs at once
 $nativeWrapper = Join-Path $PSScriptRoot 'msvc.cmd'
 $nativeSource = Join-Path $workspaceRoot ('external/' + $(if ($Component -eq 'ofxr-core') {'ofxr'} else {'cheeky'}))
 $nativeBuild = Join-Path $workspaceRoot ('artifacts/native/' + $Component)
@@ -20,7 +21,7 @@ if ($Component -eq 'cheeky') {
 if ($Component -eq 'ofxr-core') { $nativeOptions += @('-DXRFG_BUILD_LAYER=OFF','-DXRFG_BUILD_STANDALONE=OFF') }
 & $nativeWrapper cmake -S $nativeSource -B $nativeBuild -G Ninja @nativeOptions
 if ($LASTEXITCODE -ne 0) { throw 'Native CMake configuration failed.' }
-& $nativeWrapper cmake --build $nativeBuild --parallel 4
+& $nativeWrapper cmake --build $nativeBuild --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'Native build failed.' }
 $testOptions = @('--test-dir',$nativeBuild,'--output-on-failure','--parallel','2')
 # These upstream tests show windows and exercise input capture. The user has
@@ -45,6 +46,18 @@ if ($Component -eq 'cheeky') {
     }
     Get-ChildItem -LiteralPath $testBin -Directory -Filter 'core-discovery-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 }
+# The tests are skipped when nothing they read changed since they last all passed (scripts/test-cache.ps1): every
+# program and library of the build (Ninja relinks nothing when no source changed; the test data folders above are empty
+# by now), the checkout's tests and test assets, the test list ctest runs, this script. DCSC_FORCE_TESTS=1 runs them.
+. (Join-Path $PSScriptRoot 'test-cache.ps1')
+# Cheeky's tests leave copies of DLLs in per-process folders (<name>-<pid>-<ticks>) and in their data folders: not built,
+# so not part of the fingerprint.
+$testOutput = '(?i)\\(uevr-test-data|standalone-host-tests|runtime-host-test-data|core-discovery-[^\\]*|[^\\]*-\d+-\d+)\\'
+$testFingerprint = Get-NativeTestFingerprint $nativeBuild @((Join-Path $nativeSource 'tests'), (Join-Path $nativeSource 'assets'), (Join-Path $nativeBuild 'CTestTestfile.cmake')) $testOutput
+if (Test-NativeTestsCurrent $nativeBuild $testFingerprint) {
+    if ($Component -eq 'cheeky') { . (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'cheeky' }
+    return
+}
 # ctest runs directly, not through msvc.cmd: cmd would split the exclusion pattern at its '|'.
 $ctest = (& $nativeWrapper where ctest | Select-Object -First 1)
 if (-not $ctest) { throw 'ctest not found.' }
@@ -54,5 +67,6 @@ if ($Component -eq 'cheeky') {
     & $nativeWrapper ctest --test-dir $nativeBuild --output-on-failure --parallel 1 -R MixedCalibration
     if ($LASTEXITCODE -ne 0) { throw 'Mixed calibration tests failed.' }
 }
+Save-NativeTestsPassed $nativeBuild $testFingerprint
 # Built and tested: build-release.ps1 ships the Cheeky DLLs only while their sources and patches match this stamp.
 if ($Component -eq 'cheeky') { . (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'cheeky' }
