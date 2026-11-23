@@ -893,18 +893,21 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Split('\n').Any(l => l.Trim() == "dcsvr_edge_match=0") && ConfigurationWriters.QuadViews(new VrProfile { QuadEdgeMatch = true }).Contains("dcsvr_edge_match=0.6"), "edge match off by default, 0.6 when on");
     // Quad Views 0035-0037 (focus edge when the eyes jump): off by default, written as set, live.
     static bool QLine(string text, string line) => text.Split('\n').Any(l => l.Trim() == line);
-    var jumpOff = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked });
+    var jumpOff = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked, QuadHideFocusEdge = false, QuadBandMatchColor = true });
     Require(QLine(jumpOff, "dcsvr_temporal_saccade_reset=1") && QLine(jumpOff, "dcsvr_gaze_glide_ms=0") && QLine(jumpOff, "dcsvr_focus_fade_in=0")
-        && QLine(jumpOff, "dcsvr_band_match=0") && QLine(jumpOff, "dcsvr_band_match_color=0"), "eye-jump options off by default: Quad Views as before");
+        && QLine(jumpOff, "dcsvr_band_match=0") && QLine(jumpOff, "dcsvr_band_match_color=0"), "Hide the focus edge off: Quad Views as before, whatever the parts say");
+    var jumpDefault = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked });
+    Require(new VrProfile().QuadHideFocusEdge && QLine(jumpDefault, "dcsvr_temporal_saccade_reset=0") && QLine(jumpDefault, "dcsvr_gaze_glide_ms=40") && QLine(jumpDefault, "dcsvr_focus_fade_in=2")
+        && QLine(jumpDefault, "dcsvr_band_match=1") && QLine(jumpDefault, "dcsvr_band_match_color=0"), "Hide the focus edge on by default with the flown values (glide 40 ms, fade-in 2, history kept, band match 1)");
     var jumpOn = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked, QuadGazeGlideMs = 40, QuadFocusFadeIn = 2, QuadKeepHistoryOnSaccade = true, QuadBandMatch = .5, QuadBandMatchColor = true });
     Require(QLine(jumpOn, "dcsvr_temporal_saccade_reset=0") && QLine(jumpOn, "dcsvr_gaze_glide_ms=40") && QLine(jumpOn, "dcsvr_focus_fade_in=2")
         && QLine(jumpOn, "dcsvr_band_match=0.5") && QLine(jumpOn, "dcsvr_band_match_color=1"), "eye-jump options written as set");
     Require(QLine(ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.Fixed, QuadGazeGlideMs = 40 }), "dcsvr_gaze_glide_ms=0")
-        && QLine(ConfigurationWriters.QuadViews(new VrProfile { QuadBandMatchColor = true }), "dcsvr_band_match_color=0"), "no glide with a fixed focus; colour only with band match");
+        && QLine(ConfigurationWriters.QuadViews(new VrProfile { QuadBandMatchColor = true, QuadBandMatch = 0 }), "dcsvr_band_match_color=0"), "no glide with a fixed focus; colour only with band match");
     Require(new[] { "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms", "dcsvr_focus_fade_in", "dcsvr_band_match", "dcsvr_band_match_color" }
         .All(k => LiveSettings.IsLiveKey("settings.cfg", "exe:DCS." + k, "1", null)) && !LiveSettings.IsLiveKey("settings.cfg", "exe:DCS.dcsvr_band_match", "1", null, current07: false),
         "eye-jump keys apply live with a 0.7 Quad Views");
-    Require(new[] { "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor" }.All(n => LiveSettings.Find(n) is not null && LiveSettings.Live07.Contains(n)),
+    Require(new[] { "quadHideFocusEdge", "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor" }.All(n => LiveSettings.Find(n) is not null && LiveSettings.Live07.Contains(n)),
         "eye-jump settings are live fields (0.7 components)");
     Require(ProfileValidation.Validate(new VrProfile { QuadGazeGlideMs = 500 }).Any(e => e.Code == "quad-gaze-glide") && ProfileValidation.Validate(new VrProfile { QuadBandMatch = 2 }).Any(e => e.Code == "quad-band-match"), "eye-jump ranges validated");
     {
@@ -6855,7 +6858,7 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     // 0.7: the eye-tracking refinements, Far depth's strength and key, the headset panel (whenever OFXR runs, FidelityFX
     // too); none of them for an install by an older app, whose Quad Views and OFXR read them at start.
     string[] live07 = ["quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey", "showOverlay", "headsetPanelPosition", "diagnosticVram",
-        "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor"];
+        "quadHideFocusEdge", "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor"];
     Require(LiveSettings.Live07.SetEquals(live07) && live07.All(tags.Contains), string.Join(", ", tags));
     var ffxTags = LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all));
     Require(ffxTags.Contains("showOverlay") && ffxTags.Contains("diagnosticVram") && ffxTags.Contains("headsetPanelPosition"), "FidelityFX: the panel is live");

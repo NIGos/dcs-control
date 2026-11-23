@@ -6,7 +6,7 @@ window.runWebSmoke = async function() {
   // Smoothness buffer and stays in the profile file only.
   const PROFILE_FIELDS = [
     'quadViews','gaze','quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
-    'quadEdgeBlend','quadEdgeMatch','quadRoundFocus','quadGazeGlideMs','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
+    'quadEdgeBlend','quadEdgeMatch','quadRoundFocus','quadHideFocusEdge','quadGazeGlideMs','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',

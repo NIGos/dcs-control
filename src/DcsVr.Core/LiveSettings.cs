@@ -73,7 +73,7 @@ public static class LiveSettings
         // key's name on OFXR's panel (DCSVR_FARDEPTH_HOTKEY, read at launch) keeps the old key until the next launch.
         Q("quadSaccadeLead"), Q("quadSaccadeTail"), Q("quadGazeStabilize"), Q("quadLostGazeEase"), Q("farDepthPreset"), Q("farDepthToggleKey"),
         // 0.7 (Quad Views 0035-0037): how the focus area follows a jump of the eyes and meets the periphery.
-        Q("quadGazeGlideMs"), Q("quadFocusFadeIn"), Q("quadKeepHistoryOnSaccade"), Q("quadBandMatch"), Q("quadBandMatchColor"),
+        Q("quadHideFocusEdge"), Q("quadGazeGlideMs"), Q("quadFocusFadeIn"), Q("quadKeepHistoryOnSaccade"), Q("quadBandMatch"), Q("quadBandMatchColor"),
         // 0.7: OFXR's headset panel. The FPS counter and the panel's corner are re-read with the panel (every 250 ms), the
         // VRAM counter by the live ini watcher (OFXR 0095). Not the panel's key (an environment variable read at launch)
         // or the smooth cursor (its pipelines and images are made before the first generated frame).
@@ -93,7 +93,7 @@ public static class LiveSettings
     public static IReadOnlySet<string> Live07 { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey",
-        "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor",
+        "quadHideFocusEdge", "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor",
         "showOverlay", "headsetPanelPosition", "diagnosticVram",
     };
 
