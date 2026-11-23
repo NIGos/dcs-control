@@ -22,6 +22,7 @@ static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 groupshared float4 gFocus[256];      // weighted ln(focus + e): rgb, luminance
 groupshared float4 gPeriphery[256];  // weighted ln(periphery + e): rgb, luminance
 groupshared float2 gWeight[256];     // x weight, y weighted periphery luminance level
+groupshared float gSquare[256];      // weighted ln(periphery Y / focus Y)^2, for the local mismatch
 
 // The focus colour at the periphery's resolution: the edge match's [1 2 1] tent of bilinear taps at its full width.
 float3 FocusAtPeripheryResolution(float2 uv, float2 size) {
@@ -45,6 +46,7 @@ void main(uint3 thread : SV_GroupThreadID) {
     Focus.GetDimensions(size.x, size.y);
     float4 f = 0, p = 0;
     float2 w = 0;
+    float square = 0;
     [loop] for (uint j = 0; j < (uint)kDcsvrBandGrid / 16; ++j) {
         [loop] for (uint i = 0; i < (uint)kDcsvrBandGrid / 16; ++i) {
             const float2 uv = (float2(thread.xy + uint2(i, j) * 16) + 0.5) / kDcsvrBandGrid;
@@ -56,21 +58,25 @@ void main(uint3 thread : SV_GroupThreadID) {
             const float3 focus = max(FocusAtPeripheryResolution(uv, size), 0);
             const float3 periphery = max(Periphery.SampleLevel(LinearClamp, uv * band.xy + band.zw, 0).rgb, 0);
             const float yf = dot(focus, kLuma), yp = dot(periphery, kLuma);
-            f += weight * log(float4(focus, yf) + kDcsvrBandEpsilon);
-            p += weight * log(float4(periphery, yp) + kDcsvrBandEpsilon);
+            const float4 lf = log(float4(focus, yf) + kDcsvrBandEpsilon), lp = log(float4(periphery, yp) + kDcsvrBandEpsilon);
+            f += weight * lf;
+            p += weight * lp;
             w += float2(weight, weight * yp);
+            square += weight * (lp.w - lf.w) * (lp.w - lf.w);
         }
     }
     const uint index = thread.y * 16 + thread.x;
     gFocus[index] = f;
     gPeriphery[index] = p;
     gWeight[index] = w;
+    gSquare[index] = square;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint stride = 128; stride > 0; stride >>= 1) {
         if (index < stride) {
             gFocus[index] += gFocus[index + stride];
             gPeriphery[index] += gPeriphery[index + stride];
             gWeight[index] += gWeight[index + stride];
+            gSquare[index] += gSquare[index + stride];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -99,4 +105,5 @@ void main(uint3 thread : SV_GroupThreadID) {
     State.Store4(at, uint4(asuint(gain), 1));
     State.Store4(at + 16, asuint(ratio));
     State.Store3(at + 32, uint3(asuint(total), asuint(exp(gPeriphery[0].w / total)), State.Load(at + 40) + 1));
+    State.Store(at + 48, asuint(sqrt(max(gSquare[0] / total - meanLogRatio.w * meanLogRatio.w, 0))));
 }

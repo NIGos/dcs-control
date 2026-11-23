@@ -10,7 +10,8 @@ mean log ratio is the target gain (luminance, or per colour channel with dcsvr_b
 approached at 0.05 per frame, snapped on the first measurement, after a scene cut and when the mode changes. The focus
 pass multiplies the focus colour by gain^dcsvr_band_match (0..1; 0, the default, changes nothing: the pass is the one
 before). dcsvr_band_stats=1 measures without the gain. Both write a log line every 30 s ("DCSVR band match ..."), per
-eye the measured ratio periphery/focus, its spread and the gain. All three keys are live. The gain sits in t4 and
+eye the measured ratio periphery/focus, its spread over time, the local mismatch (the spread of the ratio over the band:
+what one gain cannot remove) and the gain. All three keys are live. The gain sits in t4 and
 dcsvrDebug.zw of the focus pass (the constant buffer keeps its size).
 diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
 index c9bebbf..d5c55a0 100644

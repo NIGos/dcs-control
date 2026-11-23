@@ -79,7 +79,9 @@ DCSVR_FN float DcsvrBandApplied(float gain, float strength) {
 //  16 the last measured ratio periphery / focus r, g, b and of the luminance (exp of the weighted mean log ratio)
 //  32 the last measured weight sum, mean periphery luminance (exp of the weighted mean log), measured frames (uint),
 //     skipped frames (uint: too little band or too dark)
-inline constexpr uint32_t kBandStateStride = 48u;
+//  48 the last measured local mismatch: the weighted standard deviation of ln(periphery Y / focus Y) over the band's
+//     samples (what one gain cannot remove: local tone, texture, a different reconstruction); 52-63 unused
+inline constexpr uint32_t kBandStateStride = 64u;
 
 struct BandState {
     float gain[3]{1.f, 1.f, 1.f};
@@ -90,6 +92,8 @@ struct BandState {
     float level{0.f};
     uint32_t measured{0};
     uint32_t skipped{0};
+    float spreadY{0.f};
+    float unused[3]{};
 };
 static_assert(sizeof(BandState) == kBandStateStride, "BandState must match dcsvr_bandmatch_cs.hlsl's layout");
 
@@ -107,7 +111,8 @@ static_assert(sizeof(BandMatchConstants) == 64, "BandMatchConstants must match d
 struct BandStats {
     double logRatioY{0.0};   // sum of ln(ratio Y) over measured read-backs
     double logRatio[3]{};    // per channel
-    double logRatioYSq{0.0}; // for the spread
+    double logRatioYSq{0.0}; // for the spread over time
+    double localSpread{0.0}; // sum of the shader's local mismatch
     uint64_t samples{0};     // read-backs with a new measurement
     uint32_t lastMeasured{0};
     uint32_t lastSkipped{0};
@@ -128,6 +133,7 @@ struct BandStats {
         const double y = std::log((double)s.ratioY);
         logRatioY += y;
         logRatioYSq += y * y;
+        localSpread += s.spreadY;
         for (int c = 0; c < 3; c++) logRatio[c] += std::log(std::max((double)s.ratio[c], 1e-6));
         ++samples;
     }
@@ -139,10 +145,11 @@ struct BandStats {
     }
 };
 
-// "L: band periphery/focus Y 0.982 (+-0.6 %) R 0.990 G 0.981 B 0.968, gain 1.000/1.000/1.000, 312 measured, 4 skipped"
+// "L: band periphery/focus Y 0.982 (+-0.6 % over time) R 0.990 G 0.981 B 0.968, local mismatch 4.1 %, gain
+// 1.000/1.000/1.000, 312 measured, 4 skipped"
 // for one eye; no '%' formats from outside (the layer's Log takes it as a format: written as "%%").
 inline std::string BandStatsText(const char* eye, const BandStats& s) {
-    char text[256];
+    char text[320];
     if (s.samples == 0) {
         std::snprintf(text, sizeof(text), "%s: no band measured (%llu frames skipped: too little band or too dark)", eye,
                       (unsigned long long)s.skippedFrames);
@@ -152,10 +159,10 @@ inline std::string BandStatsText(const char* eye, const BandStats& s) {
     const double mean = s.logRatioY / n;
     const double spread = std::sqrt(std::max(0.0, s.logRatioYSq / n - mean * mean));
     std::snprintf(text, sizeof(text),
-                  "%s: band periphery/focus Y %.3f (+-%.1f %%%%) R %.3f G %.3f B %.3f, gain %.3f/%.3f/%.3f, %llu measured, "
-                  "%llu skipped",
+                  "%s: band periphery/focus Y %.3f (+-%.1f %%%% over time) R %.3f G %.3f B %.3f, local mismatch %.1f %%%%, "
+                  "gain %.3f/%.3f/%.3f, %llu measured, %llu skipped",
                   eye, std::exp(mean), spread * 100.0, std::exp(s.logRatio[0] / n), std::exp(s.logRatio[1] / n),
-                  std::exp(s.logRatio[2] / n), s.gain[0], s.gain[1], s.gain[2], (unsigned long long)s.samples,
+                  std::exp(s.logRatio[2] / n), s.localSpread / n * 100.0, s.gain[0], s.gain[1], s.gain[2], (unsigned long long)s.samples,
                   (unsigned long long)s.skippedFrames);
     return text;
 }

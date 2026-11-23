@@ -1302,27 +1302,27 @@ int main(int argc, char** argv) {
                     const auto focus_base = image(kFocus, base);
                     // The state: both eyes, a raw UAV for the measurement, a raw SRV for the focus pass, a staging copy.
                     D3D11_BUFFER_DESC state_desc{};
-                    state_desc.ByteWidth = 96;
+                    state_desc.ByteWidth = 128;
                     state_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
                     state_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
                     ComPtr<ID3D11Buffer> state, state_staging;
                     check(device->CreateBuffer(&state_desc, nullptr, &state), "band state");
                     D3D11_BUFFER_DESC staging_desc{};
-                    staging_desc.ByteWidth = 96;
+                    staging_desc.ByteWidth = 128;
                     staging_desc.Usage = D3D11_USAGE_STAGING;
                     staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                     check(device->CreateBuffer(&staging_desc, nullptr, &state_staging), "band staging");
                     D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc{};
                     uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
                     uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-                    uav_desc.Buffer.NumElements = 24;
+                    uav_desc.Buffer.NumElements = 32;
                     uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
                     ComPtr<ID3D11UnorderedAccessView> state_uav;
                     check(device->CreateUnorderedAccessView(state.Get(), &uav_desc, &state_uav), "band uav");
                     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc{};
                     srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
                     srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
-                    srv_desc.BufferEx.NumElements = 24;
+                    srv_desc.BufferEx.NumElements = 32;
                     srv_desc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
                     ComPtr<ID3D11ShaderResourceView> state_srv;
                     check(device->CreateShaderResourceView(state.Get(), &srv_desc, &state_srv), "band srv");
@@ -1333,8 +1333,8 @@ int main(int argc, char** argv) {
                     ComPtr<ID3D11SamplerState> clamp_sampler;
                     check(device->CreateSamplerState(&clamp_desc, &clamp_sampler), "band sampler");
                     const auto band_constants = buffer(64);
-                    struct BandState { float gain[3]; std::uint32_t valid; float ratio[4]; float weight, level; std::uint32_t measured, skipped; };
-                    static_assert(sizeof(BandState) == 48);
+                    struct BandState { float gain[3]; std::uint32_t valid; float ratio[4]; float weight, level; std::uint32_t measured, skipped; float spread, unused[3]; };
+                    static_assert(sizeof(BandState) == 64);
                     const auto reset_state = [&] {
                         const std::uint32_t zero[4]{};
                         context->ClearUnorderedAccessViewUint(state_uav.Get(), zero);
@@ -1370,7 +1370,7 @@ int main(int argc, char** argv) {
                         BandState s[2];
                         std::memcpy(s, mapped.pData, sizeof(s));
                         context->Unmap(state_staging.Get(), 0);
-                        return s[slot / 48];
+                        return s[slot / 64];
                     };
                     const auto near3 = [](const float* g, float r, float gg, float b, float tolerance) {
                         return std::fabs(g[0] - r) <= tolerance && std::fabs(g[1] - gg) <= tolerance && std::fabs(g[2] - b) <= tolerance;
@@ -1412,19 +1412,30 @@ int main(int argc, char** argv) {
                     const bool dark_ok = near3(dark.gain, 0.9f, 0.9f, 0.9f, 1e-5f) && dark.skipped == limited.skipped + 1 &&
                                          dark.measured == limited.measured;
                     // 7. The second eye's slot leaves the first eye's state alone.
-                    const BandState second = measure(focus_base.Get(), darker.Get(), false, true, 2.f, 0.2f, 48);
+                    const BandState second = measure(focus_base.Get(), darker.Get(), false, true, 2.f, 0.2f, 64);
                     const BandState first_kept = measure(focus_base.Get(), black.Get(), false, false);
                     const bool slot_ok = near3(second.gain, 0.95f, 0.95f, 0.95f, 2e-3f) && near3(first_kept.gain, 0.9f, 0.9f, 0.9f, 1e-5f);
-                    std::printf("band match: gain %.4f (ratio %.4f, weight %.0f), step %.4f, tint per channel %.4f/%.4f/%.4f luminance %.4f, "
-                                "band only %.4f, limit %.4f, dark kept %.4f (skipped %u), second eye %.4f%s",
-                        first.gain[0], first.ratio[3], first.weight, stepped.gain[0], per_channel.gain[0], per_channel.gain[1],
-                        per_channel.gain[2], luminance.gain[0], odd.gain[0], limited.gain[0], dark.gain[0], dark.skipped,
-                        second.gain[0], "\n");
+                    // 9. The local mismatch: 0 for one gain over the band; a periphery +-10 % in slow waves (mean ratio 1)
+                    // gives about 0.1 / sqrt(2) and leaves the gain at 1.
+                    const auto waves = image(kPeriphery, [&](float u, float v) {
+                        const float s = 1.f + 0.1f * std::sin(6.2831853f * 3.f * (u + 0.37f * v));
+                        const auto c = base(u, v);
+                        return std::array<float, 3>{c[0] * s, c[1] * s, c[2] * s};
+                    });
+                    const BandState wavy = measure(focus_base.Get(), waves.Get(), false, true);
+                    const bool spread_ok = first.spread < 0.003f && wavy.spread > 0.05f && wavy.spread < 0.09f &&
+                                           std::fabs(wavy.gain[0] - 1.f) < 0.02f;
+                    std::printf("band match: gain %.4f (ratio %.4f, weight %.0f, local %.4f), step %.4f, tint per channel %.4f/%.4f/%.4f "
+                                "luminance %.4f, band only %.4f, limit %.4f, dark kept %.4f (skipped %u), second eye %.4f, waves local %.4f "
+                                "gain %.4f%s",
+                        first.gain[0], first.ratio[3], first.weight, first.spread, stepped.gain[0], per_channel.gain[0],
+                        per_channel.gain[1], per_channel.gain[2], luminance.gain[0], odd.gain[0], limited.gain[0], dark.gain[0],
+                        dark.skipped, second.gain[0], wavy.spread, wavy.gain[0], "\n");
                     // 8. The focus pass: a grey focus, mode 0 (no opaque focus), the state holding gain 0.81 for eye 0.
                     const auto grey = image(kFocus, [](float, float) { return std::array<float, 3>{0.5f, 0.5f, 0.5f}; });
                     const auto draw = [&](float strength, bool valid) {
                         const float gain = 0.81f;
-                        std::uint32_t words[24]{};
+                        std::uint32_t words[32]{};
                         std::memcpy(&words[0], &gain, 4);
                         std::memcpy(&words[1], &gain, 4);
                         std::memcpy(&words[2], &gain, 4);
@@ -1468,7 +1479,7 @@ int main(int argc, char** argv) {
                                           invalid == plain;
                     std::printf("band match in the focus pass: strength 0 -> %d, 0.5 -> %d, 1 -> %d, not valid -> %d%s", plain, half_strength,
                         full, invalid, "\n");
-                    band_ok = gain_ok && step_ok && tint_ok && region_ok && limit_ok && dark_ok && slot_ok && apply_ok;
+                    band_ok = gain_ok && step_ok && tint_ok && region_ok && limit_ok && dark_ok && slot_ok && spread_ok && apply_ok;
                 }
             }
             std::printf(band_ok ? "Quad Views band match: measures the band only, steps and clamps the gain, applies it only when on%s"
