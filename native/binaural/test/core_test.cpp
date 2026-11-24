@@ -417,9 +417,10 @@ static double BandRatioDb(const Vec& out, const Vec& in, double fs, double lo, d
     return Db(dsp::BandEnergy(ma, n, fs, lo, hi)) - Db(dsp::BandEnergy(mb, n, fs, lo, hi));
 }
 // `measured`: a measured set (A14), whose two ears differ at the front (the KU100's right ear is 1 dB louder there and
-// its spectra differ): the converter normalises their mean, so that is held to +-0.5 dB, each ear to +-1 dB, and the
-// rendered difference between the ears to the set's own front IRs' (+-0.2 dB). A synthetic set is symmetric: each ear
-// +-0.5 dB and identical ears.
+// its spectra differ): the converter normalises their mean over 200 Hz-8 kHz (HrtfConverter.FrontBandLowHz/HighHz), so
+// that is measured in the same band and held to +-0.5 dB, each ear to +-1 dB, and the rendered difference between the
+// ears to the set's own front IRs' (+-0.2 dB). A synthetic set is symmetric: each ear +-0.5 dB over 100 Hz-16 kHz and
+// identical ears.
 static void TestFrontEnergy(const std::vector<std::uint32_t>& file, std::uint32_t rate, const char* label, bool measured = false) {
     Rig rig(file, rate);
     CHECK(rig.ok);
@@ -427,15 +428,16 @@ static void TestFrontEnergy(const std::vector<std::uint32_t>& file, std::uint32_
     const Vec noise = Noise(8192 + 1024, 3);
     const Vec out = RenderStatic(rig.r, 0, FromAzEl(0, 0), 3.0f, noise, 480);
     const Vec L = Channel(out, 0), R = Channel(out, 1);
-    const double gl = BandRatioDb(L, noise, rate, 100, 16000, 512), gr = BandRatioDb(R, noise, rate, 100, 16000, 512);
+    const double lo = measured ? 200 : 100, hi = measured ? 8000 : 16000;
+    const double gl = BandRatioDb(L, noise, rate, lo, hi, 512), gr = BandRatioDb(R, noise, rate, lo, hi, 512);
     if (measured) {
         const double mean = Db(0.5 * (std::pow(10.0, gl / 10.0) + std::pow(10.0, gr / 10.0)));
         const HrtfSet& s = *rig.set;
         std::uint32_t f = 0;
         for (std::uint32_t i = 0; i < s.directions; ++i) if (s.dir[i * 3] > s.dir[f * 3]) f = i;
         const std::size_t N = 1024;
-        const double setIld = Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, 1), s.taps, N), N, rate, 100, 16000)) -
-                              Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, 0), s.taps, N), N, rate, 100, 16000));
+        const double setIld = Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, 1), s.taps, N), N, rate, lo, hi)) -
+                              Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, 0), s.taps, N), N, rate, lo, hi));
         std::printf("A5 front energy %s @%u Hz: left %+.3f dB, right %+.3f dB, mean %+.3f dB (limits +-1, +-1, +-0.5); right - left %+.3f dB, the set's front IRs %+.3f dB (+-0.2)\n",
                     label, rate, gl, gr, mean, gr - gl, setIld);
         CHECKM(std::fabs(gl) <= 1.0 && std::fabs(gr) <= 1.0 && std::fabs(mean) <= 0.5, "left %.3f right %.3f mean %.3f", gl, gr, mean);
@@ -1229,10 +1231,11 @@ static void TestDefaultData() {
                 v.header->taps, v.header->sampleRate, v.header->datasetHeadRadiusM, v.header->name);
     // 8,802 measurements, 99 of them repeats of a direction already measured (merged by the converter).
     CHECK(v.header->directionCount == 8703);
-    // The Woodworth fit of the KU100's onset delays (largest ITD about 0.89 ms): 0.119 m, above the head's geometric
-    // radius as every fit of measured onsets is. Head size scales it relative to itself (PilotItdRadiusM), unclamped
-    // over the whole 48-66 cm range.
-    CHECK(v.header->datasetHeadRadiusM >= 0.10f && v.header->datasetHeadRadiusM <= 0.13f);
+    // The Woodworth fit of the KU100's onset delays (largest ITD about 0.70 ms): 0.0943 m. The onsets are each ear's
+    // excess-phase slope over 200-1500 Hz (docs/BINAURAL_AUDIO.md 4.1); the earlier full-band cross-correlation onsets
+    // fitted 0.119 m, inflated by the high-frequency lobes of the shadowed ear. Head size scales the fit relative to
+    // itself (PilotItdRadiusM), unclamped over the whole 48-66 cm range.
+    CHECK(v.header->datasetHeadRadiusM >= 0.085f && v.header->datasetHeadRadiusM <= 0.105f);
     CHECK(binaural_config::PilotItdRadiusM(v.header->datasetHeadRadiusM, 66.0f) <= kMaxItdRadiusM &&
           std::fabs(binaural_config::PilotItdRadiusM(v.header->datasetHeadRadiusM, 66.0f) / v.header->datasetHeadRadiusM - 66.0 / 57.0) < 1e-5);
     TestFrontEnergy(file, 48000, "(default set)", true);

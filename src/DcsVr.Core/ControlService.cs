@@ -592,10 +592,11 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var audio = LiveSettings.AudioInstalled(journal); var hrtfSets = LiveSettings.InstalledHrtfSets(journal);
         // 3D audio turned on in flight starts at once only when nothing else it needs is read at launch: in VR with
         // Follow the head the head pose (PupilShift.ini [HeadPose], read when DCS starts VR), and DCS's speaker layout
-        // when options.lua has one that is not Stereo yet. Otherwise Binaural=1 waits with them for the next launch.
+        // unless options.lua already has Stereo (none is Auto: Launch DCS writes Stereo into DCS's sound settings, which
+        // DCS reads at start). Otherwise Binaural=1 waits with them for the next launch.
         var launchDraft = draft.ForLaunch();
         var audioOnLive = (launchDraft.Desktop || !launchDraft.BinauralLateHeadTracking)
-            && (!inventory.DcsSettings.TryGetValue("sound.main_layout", out var audioLayout) || Binaural.LayoutValue(audioLayout).Equals(Binaural.StereoLayout, StringComparison.OrdinalIgnoreCase));
+            && inventory.DcsSettings.TryGetValue("sound.main_layout", out var audioLayout) && Binaural.LayoutValue(audioLayout).Equals(Binaural.StereoLayout, StringComparison.OrdinalIgnoreCase);
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
@@ -987,6 +988,9 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var current = Originals.Read() is { State: "applied", Current: { } applied } ? applied : null;
         EnsureDcsClosed(current?.Entries.Select(e => e.Path), ManagedRoot);
         if (current is null) throw new InvalidOperationException("No profile is applied. Launch DCS from DCS Control to apply one.");
+        // DCS is closed: a 3D audio kill-switch flag the module never took would start this session switched off.
+        foreach (var module in current.Entries.Where(e => Path.GetFileName(e.Path).Equals("DcsQvCull.dll", StringComparison.OrdinalIgnoreCase)))
+            if (Path.GetDirectoryName(module.Path) is { } folder && Binaural.RemoveStaleKillFlag(folder)) Originals.AppendLog("Removed a 3D audio switch flag left from the last DCS session.");
         var launch = VerifyInstalled(current);
         if (!File.Exists(launch.Executable)) throw new IOException("DCS executable is missing: " + launch.Executable);
         if (LaunchSafety.LauncherRestartBlocked && KeepsLauncher(current)) throw new InvalidOperationException(LaunchSafety.LauncherBlockedMessage);

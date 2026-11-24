@@ -109,7 +109,11 @@ public static partial class Diagnostics
         // Serial numbers are learnt from every file first, then removed everywhere: a serial is labelled in one log
         // (Pimax's, written last) and bare in others.
         var serials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var redactor = Redactor(Environment.UserName, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.MachineName, serials);
+        var pilot = Redactor(Environment.UserName, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.MachineName, serials);
+        // The pilot's own HRTF sets are named by the pilot (often after a person): every name becomes "personal set N".
+        var savedGamesForNames = sources.OptionsPath is { } namesOptions ? Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(namesOptions))) : null;
+        var hrtfNames = sources.StateRoot is { } namesState ? HrtfNameRedactor(namesState, savedGamesForNames) : (text => text);
+        Func<string, string> redactor = text => hrtfNames(pilot(text));
         var temp = zipPath + ".tmp";
         var learning = true;
         var scanned = new HashSet<string>(StringComparer.Ordinal);
@@ -278,14 +282,18 @@ public static partial class Diagnostics
         + "In-flight switches (DcsQvCull.prev.log is the DCS session before DcsQvCull.log):\n"
         + (toggles.Count == 0 ? "  none in these logs\n" : string.Concat(toggles.Select(t => "  " + t + "\n")));
 
-    /// <summary>The package's audio.txt: the HRTF library and the "audio:" lines of the module's newest log.</summary>
+    /// <summary>The package's audio.txt: the HRTF library (each set as "personal set N", never its name) and the "audio:"
+    /// lines of the module's newest log.</summary>
     internal static string AudioSummary(string stateRoot, string? savedGamesRoot)
     {
-        var text = new StringBuilder("3D headphone audio\n\nHRTF sets in the library (the generic KU100 set is inside the engine module):\n");
         var sets = new HrtfLibrary(stateRoot).List();
+        var text = new StringBuilder($"3D headphone audio\n\nHRTF sets in the library: {sets.Count} of the pilot's own (named \"personal set 1\" and so on here; the generic KU100 set is inside the engine module):\n");
         if (sets.Count == 0) text.Append("  none\n");
-        foreach (var s in sets)
-            text.Append(System.Globalization.CultureInfo.InvariantCulture, $"  {s.Name}: \"{s.Title}\", {s.Directions} directions, {s.SampleRate} Hz, {s.Taps} taps, head radius {s.HeadRadiusMm:0.0} mm, {s.Bytes} bytes{(s.Imported is { } at ? ", imported " + at.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) : "")}{(s.Warnings.Count > 0 ? "; " + string.Join(" ", s.Warnings) : "")}\n");
+        for (var i = 0; i < sets.Count; i++)
+        {
+            var s = sets[i];
+            text.Append(CultureInfo.InvariantCulture, $"  personal set {i + 1}: {s.Directions} directions, {s.SampleRate} Hz, {s.Taps} taps, head radius {s.HeadRadiusMm:0.0} mm, {s.Bytes} bytes{(s.Imported is { } at ? ", imported " + at.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "")}{(s.Warnings.Count > 0 ? "; " + string.Join(" ", s.Warnings) : "")}\n");
+        }
         text.Append("\naudio: lines of the module's newest log (DcsQvCull.log):\n");
         if (savedGamesRoot is not null)
         {
@@ -300,12 +308,59 @@ public static partial class Diagnostics
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { text.Append("  unreadable: ").Append(e.Message).Append('\n'); }
         }
-        return text.ToString();
+        return HrtfNameRedactor(stateRoot, savedGamesRoot)(text.ToString());
     }
+
+    /// <summary>Replaces the names of the pilot's HRTF sets (the library's file names and the titles inside them, and the
+    /// sets deployed next to the module) with "personal set N" (N: the set's place in the library, by name), and any other
+    /// set name where the module's log, DcsQvCull.ini or a profile names one ("HRTF x: ...", "Hrtf=x", "binauralHrtf": "x",
+    /// HRTF set "x") with "personal set". "default" (the generic set) stays.</summary>
+    internal static Func<string, string> HrtfNameRedactor(string stateRoot, string? savedGamesRoot)
+    {
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var sets = new HrtfLibrary(stateRoot).List();
+        for (var i = 0; i < sets.Count; i++)
+            foreach (var name in new[] { sets[i].Name, sets[i].Title }) if (name.Trim().Length > 0) labels.TryAdd(name.Trim(), "personal set " + (i + 1));
+        if (savedGamesRoot is not null)
+        {
+            try
+            {
+                var deployed = Path.Combine(savedGamesRoot, "Scripts", EngineOptimizations.ModuleFolder, "hrtf");
+                if (Directory.Exists(deployed))
+                    foreach (var file in Directory.EnumerateFiles(deployed, "*" + Binaural.HrtfExtension)) labels.TryAdd(Path.GetFileNameWithoutExtension(file), "personal set");
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+        labels.Remove(Binaural.DefaultHrtf);
+        // Already a label (the free-text pass runs first, so a name that is also a word of the label is not replaced in it).
+        string Label(string name) => name.Trim().Length == 0 || name.Trim().Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) || name.StartsWith("personal set", StringComparison.Ordinal)
+            ? name : labels.TryGetValue(name.Trim(), out var l) ? l : "personal set";
+        // Free text: whole words only, and only names of three characters or more (a shorter one is still replaced where
+        // a pattern below names it as a set).
+        var words = labels.Where(p => p.Key.Length >= 3).OrderByDescending(p => p.Key.Length)
+            .Select(p => (Regex: new Regex(@"(?<![\w])" + Regex.Escape(p.Key) + @"(?![\w])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant), Label: p.Value)).ToArray();
+        return text =>
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            foreach (var (regex, label) in words) text = regex.Replace(text, label);
+            text = HrtfLogNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value));
+            text = HrtfIniNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + m.Groups[3].Value);
+            text = HrtfJsonNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + "\"");
+            return HrtfQuotedNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + m.Groups[3].Value);
+        };
+    }
+    // "HRTF My ears: 2562 directions", "HRTF My ears (crossfading)", "HRTF My ears not usable (" (the module's log).
+    [GeneratedRegex(@"(\bHRTF )([\w .-]+?)(?=: \d+ directions| \(crossfading\)| not usable \()")] private static partial Regex HrtfLogNameRegex();
+    // DcsQvCull.ini "Hrtf=My ears".
+    [GeneratedRegex(@"(?m)^(\s*Hrtf\s*=\s*)([^\r\n;]*?)(\s*\r?)$")] private static partial Regex HrtfIniNameRegex();
+    // A profile's JSON: "binauralHrtf": "My ears".
+    [GeneratedRegex(@"(""binauralHrtf""\s*:\s*"")((?:[^""\\]|\\.)*)""")] private static partial Regex HrtfJsonNameRegex();
+    // Checks and messages: HRTF set "My ears" (also JSON-escaped: HRTF set \"My ears\").
+    [GeneratedRegex(@"(\bHRTF (?:set )?(?:\\)?"")([^""\\]*)((?:\\)?"")")] private static partial Regex HrtfQuotedNameRegex();
 
     private static string Readme(IReadOnlyList<DiagnosticEntry> entries) =>
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"
-        + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids, Steam IDs and the headset's serial number by <token>, <id>, <steam id> and <serial>; network and MAC addresses by <ip> and <mac>.\n"
+        + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids, Steam IDs and the headset's serial number by <token>, <id>, <steam id> and <serial>; network and MAC addresses by <ip> and <mac>; the names of your own HRTF sets by \"personal set 1\" and so on.\n"
         + "Start with summary.txt: the headset software and the in-flight switches of these logs.\n"
         + "Large logs are cut to their last 8 MB (marked below).\n\n"
         + string.Join("\n", entries.Select(e => string.Create(CultureInfo.InvariantCulture, $"{e.Name}  ({e.Bytes:N0} bytes{(e.Truncated ? ", last part" : "")})  from {e.Source}")));

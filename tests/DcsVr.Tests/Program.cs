@@ -6845,6 +6845,13 @@ Test("3D audio: SOFA import converts once into the library; a taken name, a refu
     // A set edited or damaged on disk is no longer offered or deployed.
     var second = library.Import(sofa, "ears 2", converter); var bytes = File.ReadAllBytes(Path.Combine(library.Folder, "ears 2.dcshrtf")); bytes[300] ^= 1; File.WriteAllBytes(Path.Combine(library.Folder, "ears 2.dcshrtf"), bytes);
     Require(second.Name == "ears 2" && library.List().Select(s => s.Name).SequenceEqual(["ears"]) && library.ForDeployment().Single().Name == "ears" && !library.Contains("ears 2"), "damaged: left out");
+    Require(CliHrtfConverter.MidSentence("This is not a SOFA file.") == "this is not a SOFA file." && CliHrtfConverter.MidSentence("SOFA convention unknown") == "SOFA convention unknown"
+        && CliHrtfConverter.MidSentence("Data.Delay is not finite.") == "Data.Delay is not finite." && CliHrtfConverter.MidSentence("only 50 directions") == "only 50 directions", "the converter's reason continues the sentence");
+    // A set read once is not read again while its file and sidecar stay the same (the page lists the library with every state reply).
+    var cachedSet = library.List();
+    Require(ReferenceEquals(cachedSet.Single(), library.List().Single()) && ReferenceEquals(cachedSet.Single(), new HrtfLibrary(Path.GetDirectoryName(library.Folder)!).Read(cachedSet.Single().Name)), "cached by size and time");
+    File.SetLastWriteTimeUtc(Path.Combine(library.Folder, cachedSet.Single().Name + ".json"), DateTime.UtcNow.AddMinutes(1));
+    Require(!ReferenceEquals(cachedSet.Single(), library.List().Single()), "read again when the sidecar changes");
     library.Delete("ears 2"); library.Delete("ears");
     Require(library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, "deleted");
     Throws<InvalidDataException>(() => library.Delete("default"));
@@ -6856,7 +6863,7 @@ Test("3D audio: SOFA import converts once into the library; a taken name, a refu
     Require(missing.Message.Contains("not found"), missing.Message);
     if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found"); return; }
     var real = Throws2<HrtfConversionException>(() => library.Import(sofa, "real", new CliHrtfConverter(Path.GetDirectoryName(cli))));
-    Require(real.Message.StartsWith("The SOFA file was not converted: This is not a SOFA file", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
+    Require(real.Message.StartsWith("The SOFA file was not converted: this is not a SOFA file", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
 });
 Test("3D audio: the app's .dcshrtf check and the converter's agree (the converter's fixture passes the app's check, the app's test set passes the converter's)", () =>
 {
@@ -6888,6 +6895,24 @@ Test("3D audio: the module's log gives the Audio page's status, Last flight and 
     Require(Binaural.ParseStatus([On("default"), "audio: kill switch (toggle_audio.flag): binaural OFF (DCS's own panning)", "audio: kill switch (toggle_audio.flag): binaural ON"], true, true).State == "running", "on again");
     Require(Binaural.ParseStatus([], true, false).State == "waiting" && Binaural.ParseStatus(null, false, false).State == "not-installed", "waiting / not installed");
     Require(LastFlight.ParseAudio(["perf: fps=1"]) is null && LastFlight.ParseAudio(["audio: off (pan law mismatch)"]) is { State: "off", Reason: "pan law mismatch" }, "Last flight");
+    // Turned off in the settings (live): the module following them, not a failure. Switched off, said how, no reason.
+    var settingsOff = Binaural.ParseStatus([On("default"), Stats(5, "0.1", "on"), "audio: off (binaural is off in the settings)"], true, true);
+    Require(settingsOff is { State: "switched-off", SwitchedOff: true, SwitchedOffBy: "settings", Reason: null } && settingsOff.Summary.StartsWith("Switched off in the settings", StringComparison.Ordinal), settingsOff.Summary);
+    Require(LastFlight.ParseAudio([On("default"), "audio: off (binaural is off in the settings)"]) is { State: "switched-off", SwitchedOffBy: "settings" }, "Last flight: switched off in the settings");
+    Require(key.SwitchedOffBy == "key", "switched off with the key");
+    // The module installed for other features with 3D audio off in its settings: off in this profile, not "starts with DCS".
+    Require(Binaural.ParseStatus([], true, false, enabled: false) is { State: "disabled" } disabled && disabled.Summary.StartsWith("Off in this profile", StringComparison.Ordinal)
+        && Binaural.ParseStatus([], true, false, enabled: true).State == "waiting", "disabled / waiting");
+    var statusOptions = Make("audio-status/Saved Games/DCS/Config/options.lua", "options = {}");
+    var statusModule = EngineOptimizations.ModuleDirectory(statusOptions);
+    Make("audio-status/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.dll", "MZ");
+    Make("audio-status/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.ini", "[General]\nPerceptionOnly=1\n");
+    Require(Binaural.ReadStatus(statusOptions, false).State == "disabled", "no [Audio]: off in this profile");
+    File.WriteAllText(Path.Combine(statusModule, "DcsQvCull.ini"), "[General]\nPerceptionOnly=1\n\n[Audio]\nBinaural=1\nHrtf=default\n");
+    Require(Binaural.ReadStatus(statusOptions, false).State == "waiting", "[Audio] Binaural=1: starts with DCS");
+    // A kill-switch flag the module never took (DCS closed right after the button) is removed at Launch DCS.
+    File.WriteAllBytes(Path.Combine(statusModule, Binaural.KillFlag), []);
+    Require(Binaural.RemoveStaleKillFlag(statusModule) && !File.Exists(Path.Combine(statusModule, Binaural.KillFlag)) && !Binaural.RemoveStaleKillFlag(statusModule), "stale flag removed");
     // Off in the settings, then back on in flight: the module's "on (re-enabled ...)" line, or a later "running," line
     // (written only while sounds are rendered in 3D), is running again.
     var back = Binaural.ParseStatus([On("default"), "audio: off (binaural is off in the settings)", "audio: on (re-enabled in the settings, HRTF default: 2562 directions)", Stats(12, "0.2", "on")], true, true);
@@ -6953,7 +6978,9 @@ Test("3D audio Live: every setting is written at once to a module with the audio
     var payload = Path.Combine(f.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
     Require(Binaural.PayloadHasAudio(payload) && Binaural.PayloadHasDefaultHrtf(payload), "the fixture payload has the audio part and the generic set");
     var monitor = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-audio-live", Name = "Audio live", Desktop = true, EngineOptimizations = true, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false });
-    var inventory = E2eInventory(f);
+    // DCS's speaker layout already Stereo (with none, Auto, Launch DCS writes Stereo first: checked below).
+    var stereoBase = E2eInventory(f);
+    var inventory = stereoBase with { DcsSettings = new Dictionary<string, string>(stereoBase.DcsSettings) { ["sound.main_layout"] = "\"stereo\"" } };
     Require(f.Service.SyncApplied(monitor, inventory).Kind == LaunchSyncKind.Applied);
     var journal = f.Service.Originals.ReadCurrent()!;
     var available = LiveSettings.AvailableFields(f.Service.ReadAppliedProfile()!.Profile, journal);
@@ -6989,6 +7016,9 @@ Test("3D audio Live: every setting is written at once to a module with the audio
     Require(h.Service.SyncApplied(monitor, layoutInventory).Kind == LaunchSyncKind.Applied);
     var layoutOn = WhileDcsRuns(h, () => h.Service.ApplyLive(monitor with { BinauralAudio = true }, layoutInventory));
     Require(layoutOn.Waiting.Contains("binauralAudio") && layoutOn.Written.Count == 0, "7.1: waits: " + layoutOn.Message);
+    // No speaker layout in options.lua (Auto): Launch DCS writes Stereo, so turning it on waits as well.
+    var autoOn = WhileDcsRuns(h, () => h.Service.ApplyLive(monitor with { BinauralAudio = true }, E2eInventory(h)));
+    Require(autoOn.Waiting.Contains("binauralAudio") && autoOn.Written.Count == 0, "Auto: waits: " + autoOn.Message);
 });
 Test("3D audio: without any HRTF set (no generic one in the build, none of the pilot's own) nothing of it is deployed, and Checks says why", () =>
 {
@@ -7021,13 +7051,28 @@ Test("3D audio: the diagnostic package lists the HRTF sets and the module's audi
 {
     var state = Path.Combine(root, "audio-diag", "state"); var sg = Path.Combine(root, "audio-diag", "Saved Games", "DCS");
     new HrtfLibrary(state).Import(Make("audio-diag/Private folder/ears.sofa", "warn"), "ears", new FixtureHrtfConverter());
-    Make("audio-diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:01.000 audio: on (hrtf ears, head pose on)\n09:00:02.000 perf: fps=80\n09:00:10.000 audio: stats sounds=7 p99=0.12 ms\n");
+    // The pilot names the sets (often after a person): the package says "personal set N" instead, everywhere.
+    new HrtfLibrary(state).Import(Make("audio-diag/Private folder/jo.sofa", "fixture"), "Jo", new FixtureHrtfConverter());
+    Make("audio-diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:00.500 audio: HRTF Ann Lee not usable (payload checksum); the default set is used\n09:00:01.000 audio: on (48000 Hz stereo, HRTF ears: 145 directions, head radius 8.8 cm, near field on, at most 48 sounds)\n09:00:02.000 perf: fps=80\n09:00:05.000 audio: HRTF Jo (crossfading)\n09:00:10.000 audio: running, 7 sounds, p99 0.12 ms per block\n");
+    Make("audio-diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.ini", "[Audio]\nBinaural=1\nHrtf=ears\n");
     var text = Diagnostics.AudioSummary(state, sg);
-    Require(text.Contains("ears: \"ears\", 145 directions, 48000 Hz") && text.Contains("audio: on (hrtf ears, head pose on)") && text.Contains("audio: stats sounds=7") && !text.Contains("perf:") && !text.Contains("Private folder") && !text.Contains(".sofa"), text);
+    Require(text.Contains("2 of the pilot's own") && text.Contains("personal set 2: 145 directions, 48000 Hz") && text.Contains("HRTF personal set 1: 145 directions") && text.Contains("HRTF personal set 2 (crossfading)")
+        && text.Contains("HRTF personal set not usable") && text.Contains("audio: running, 7 sounds") && !text.Contains("perf:") && !text.Contains("Private folder") && !text.Contains(".sofa")
+        && !text.Contains("ears", StringComparison.OrdinalIgnoreCase) && !text.Contains("Ann Lee") && !text.Contains("Jo", StringComparison.Ordinal), text);
+    var redact = Diagnostics.HrtfNameRedactor(state, sg);
+    Require(redact("{\"binauralHrtf\": \"ears\", \"x\": \"Your HRTF set \\\"Ann Lee\\\" is missing\"}") == "{\"binauralHrtf\": \"personal set 1\", \"x\": \"Your HRTF set \\\"personal set\\\" is missing\"}"
+        && redact("Hrtf=default\r\n") == "Hrtf=default\r\n" && redact("both years") == "both years", redact("{\"binauralHrtf\": \"ears\", \"x\": \"Your HRTF set \\\"Ann Lee\\\" is missing\"}"));
     var options = Make("audio-diag/Saved Games/DCS/Config/options.lua", "options = {}");
     var zip = Path.Combine(root, "audio-diag", "package.zip");
-    var entries = Diagnostics.CreatePackage(new DiagnosticSources(state, null, options, null, RuntimeKind.Pimax), "{}", zip);
+    var entries = Diagnostics.CreatePackage(new DiagnosticSources(state, null, options, null, RuntimeKind.Pimax), "{\"draft\": {\"binauralHrtf\": \"Jo\"}}", zip);
     Require(entries.Any(e => e.Name == "dcs-control/audio.txt") && !entries.Any(e => e.Name.EndsWith(".dcshrtf", StringComparison.Ordinal) || e.Name.EndsWith(".sofa", StringComparison.Ordinal)), string.Join(", ", entries.Select(e => e.Name)));
+    using (var package = System.IO.Compression.ZipFile.OpenRead(zip))
+        foreach (var entry in package.Entries)
+        {
+            using var reader = new StreamReader(entry.Open());
+            var content = reader.ReadToEnd();
+            Require(!content.Contains("Ann Lee") && !System.Text.RegularExpressions.Regex.IsMatch(content, @"\b(ears|Jo)\b"), entry.FullName + " names a set: " + content);
+        }
 });
 Test("E2E: CPU Boost and Free VRAM records left by an ended helper survive a moment when the file cannot be read", () =>
 {

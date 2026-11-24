@@ -160,8 +160,8 @@ public sealed record HrtfFacts(string Title, string Source, int SampleRate, int 
         if (!Above || !Below) list.Add(!Above && !Below ? "The measurements cover little above or below you: height will sound vague." : !Above ? "The measurements cover little above you: sounds overhead will sound vague." : "The measurements cover little below you.");
         if (Directions < 100) list.Add("Few measured directions: directions between them are guessed.");
         if (Horizontal < 12) list.Add("Few measurements around you at ear height: left, right and behind may be less exact.");
-        // The radius is a Woodworth fit of the measured onsets, larger than the head itself (SADIE II's KU100: 119 mm, about
-        // 0.9 ms between the ears): unusual below 70 mm or above 140 mm (about 0.52 and 1.05 ms).
+        // The radius is a Woodworth fit of the onsets, close to the head's own size (SADIE II's KU100: 94 mm, about
+        // 0.71 ms between the ears): unusual below 70 mm or above 140 mm (about 0.52 and 1.05 ms).
         if (HeadRadiusMm is < 70 or > 140) list.Add($"The time difference between the ears in the file (up to {MaxItdMs:0.00} ms) is unusual. Check that it is your own measurement.");
         return list;
     }
@@ -237,14 +237,23 @@ public sealed class CliHrtfConverter(string? directory = null) : IHrtfConverter
         var lines = (output.Result + "\n" + error.Result).Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToArray();
         if (process.ExitCode != 0 || !File.Exists(outputPath))
         {
-            var reason = error.Result.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0) ?? lines.LastOrDefault() ?? "the converter gave no reason";
+            var reason = error.Result.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0) ?? lines.LastOrDefault() ?? "no reason was given";
             if (reason.Contains("Unknown command", StringComparison.OrdinalIgnoreCase) || reason.StartsWith("Usage", StringComparison.OrdinalIgnoreCase))
                 reason = "this DCS Control has no SOFA converter yet";
-            throw new HrtfConversionException("The SOFA file was not converted: " + reason.TrimEnd('.') + ".");
+            throw new HrtfConversionException("The SOFA file was not converted: " + MidSentence(reason).TrimEnd('.') + ".");
         }
         var warnings = lines.Where(l => l.StartsWith("warning:", StringComparison.OrdinalIgnoreCase)).Select(l => l[8..].Trim()).Where(l => l.Length > 0).ToArray();
         double? coverage = lines.Select(l => l.StartsWith("coverage:", StringComparison.OrdinalIgnoreCase) && double.TryParse(l[9..].Trim().TrimEnd('%'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var c) ? c / 100 : (double?)null).LastOrDefault(c => c is not null);
         return new(warnings, coverage is { } v ? Math.Clamp(v, 0, 1) : null);
+    }
+
+    /// <summary>The converter's reason continues a sentence: its first word in lower case ("This is not a SOFA file" ->
+    /// "this is not a SOFA file"), unless that word is a name or an abbreviation ("SOFA", "Data.Delay").</summary>
+    internal static string MidSentence(string reason)
+    {
+        var end = reason.IndexOf(' ');
+        var word = end < 0 ? reason : reason[..end];
+        return word.Length > 1 && char.IsUpper(word[0]) && word.Skip(1).All(char.IsLower) ? char.ToLowerInvariant(word[0]) + reason[1..] : reason;
     }
 }
 
@@ -275,7 +284,12 @@ public sealed class FixtureHrtfConverter : IHrtfConverter
 public sealed class HrtfLibrary(string stateRoot)
 {
     public const int MaxSets = 16;
+    /// <summary>What a set's name may be (Binaural.IsValidHrtfName), in the page's words.</summary>
+    public const string NameRule = "Use a name of 1 to 64 letters, digits, spaces, dashes, dots or underscores, not \"default\".";
     public string Folder { get; } = Path.Combine(Path.GetFullPath(stateRoot), "hrtf");
+    /// <summary>Sets already read, by path: kept while the file and its sidecar have the same size and time (List runs with
+    /// every state reply of the page; reading and checking a 9 MB set each time is not needed).</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Length, DateTime Written, long SideLength, DateTime SideWritten, HrtfSet Set)> Cache = new(StringComparer.OrdinalIgnoreCase);
     private sealed record Sidecar(string? FromFile, DateTimeOffset? Imported, IReadOnlyList<string>? Warnings, double? Coverage);
     private string FileOf(string name) => Path.Combine(Folder, name + Binaural.HrtfExtension);
     private string SidecarOf(string name) => Path.Combine(Folder, name + ".json");
@@ -305,15 +319,21 @@ public sealed class HrtfLibrary(string stateRoot)
         try
         {
             var path = FileOf(name); var info = new FileInfo(path);
-            if (!info.Exists || info.Length > HrtfFile.MaxFileBytes) return null;
+            if (!info.Exists || info.Length > HrtfFile.MaxFileBytes) { Cache.TryRemove(info.FullName, out _); return null; }
+            var sideInfo = new FileInfo(SidecarOf(name));
+            long sideLength = sideInfo.Exists ? sideInfo.Length : -1; var sideWritten = sideInfo.Exists ? sideInfo.LastWriteTimeUtc : default;
+            if (Cache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc
+                && cached.SideLength == sideLength && cached.SideWritten == sideWritten && cached.Set.Name == name) return cached.Set;
             var facts = HrtfFile.Validate(File.ReadAllBytes(path), out _);
-            if (facts is null) return null;
+            if (facts is null) { Cache.TryRemove(info.FullName, out _); return null; }
             Sidecar? side = null;
             try { if (File.Exists(SidecarOf(name))) side = JsonData.Deserialize<Sidecar>(File.ReadAllText(SidecarOf(name))); }
             catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { }
             var warnings = (side?.Warnings ?? []).Concat(facts.Warnings()).Distinct(StringComparer.Ordinal).ToArray();
-            return new(name, facts.Title.Length > 0 ? facts.Title : name, facts.Source, facts.SampleRate, facts.Directions, facts.Taps, Math.Round(facts.HeadRadiusMm, 1),
+            var set = new HrtfSet(name, facts.Title.Length > 0 ? facts.Title : name, facts.Source, facts.SampleRate, facts.Directions, facts.Taps, Math.Round(facts.HeadRadiusMm, 1),
                 side?.FromFile, side?.Imported, warnings, info.Length, side?.Coverage);
+            Cache[info.FullName] = (info.Length, info.LastWriteTimeUtc, sideLength, sideWritten, set);
+            return set;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
@@ -357,7 +377,7 @@ public sealed class HrtfLibrary(string stateRoot)
     public HrtfSet Import(string sofaPath, string name, IHrtfConverter converter, CancellationToken cancel = default)
     {
         if (!Binaural.IsValidHrtfName(name) || name.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Use a name of 1 to 64 letters, digits, spaces, dashes, dots or underscores, not \"default\".");
+            throw new InvalidDataException(NameRule);
         if (Exists(name)) throw new HrtfNameTakenException(name, FreeName(name));
         if (List().Count >= MaxSets) throw new InvalidOperationException($"You have {MaxSets} HRTF sets. Remove one first.");
         var info = new FileInfo(sofaPath);

@@ -35,16 +35,19 @@ public sealed record HrtfConvertedSet(byte[] File, HrtfConversionReport Report, 
 /// <summary>
 /// SOFA HRIRs -> .dcshrtf (native/binaural/include/hrtf_format.h). Steps, in order:
 ///   1. checks: rate 44.1-96 kHz, at least 100 directions, finite data, IRs of 16 samples or more;
-///   2. directions closer than 0.05 degrees merged (the first kept), the convex hull triangulated (SphereHull); the
-///      directions must surround the head;
-///   3. onsets: the lag aligning each IR with its own minimum-phase version (HrtfDsp.MinimumPhaseDelay), plus
-///      Data.Delay; the common minimum removed;
-///   4. diffuse-field equalisation: the power average over directions (weighted by their share of the sphere), smoothed
+///   2. directions closer than 0.05 degrees merged (their IRs and Data.Delay averaged, the first direction kept), the
+///      convex hull triangulated (SphereHull); the directions must surround the head;
+///   3. diffuse-field equalisation: the power average over directions (weighted by their share of the sphere), smoothed
 ///      to 1/3 octave, inverted, centred on its 200 Hz-10 kHz mean, limited to +-15 dB;
-///   5. minimum phase (real cepstrum) of each equalised magnitude, truncated to `taps` (128 at 48 kHz, scaled with the rate)
+///   4. minimum phase (real cepstrum) of each equalised magnitude, truncated to `taps` (128 at 48 kHz, scaled with the rate)
 ///      with a half-Hann tail over the last quarter;
-///   6. front normalisation: one gain so that white noise from straight ahead (the interpolated front IRs) comes out at
-///      0 dB per ear;
+///   5. onsets: per ear, the delay that makes the stored minimum-phase IR match the measured phase over 200-1500 Hz
+///      (HrtfDsp.ExcessPhaseDelay), plus Data.Delay; the common minimum removed. Each ear keeps its own measured delay
+///      (not a mean held constant with the difference split around it): with the near field on, the renderer looks each
+///      ear up from that ear's own direction, which needs each ear's own delay curve;
+///   6. front normalisation: one gain so that noise from straight ahead (the interpolated front IRs) comes out at 0 dB on
+///      the mean of the two ears, measured over 200 Hz-8 kHz (where the sound of DCS is; the 12-24 kHz half of a white
+///      spectrum would otherwise decide the level);
 ///   7. head radius: least-squares fit of Woodworth's ITD = (r/c)(phi + sin phi), phi the lateral angle, over all
 ///      directions (c = 343 m/s).
 /// Deterministic: the same input gives the same bytes.
@@ -53,6 +56,11 @@ public static class HrtfConverter
 {
     public const double SpeedOfSound = 343.0;
     const double MergeDegrees = 0.05;
+    /// <summary>Band of the front normalisation (hertz).</summary>
+    public const double FrontBandLowHz = 200, FrontBandHighHz = 8000;
+    /// <summary>A set measured closer than this has the near field in its responses; the renderer's near-field model
+    /// assumes a far-field measurement (docs/BINAURAL_AUDIO.md 4.2).</summary>
+    public const double NearMeasurementM = 1.0;
 
     public static HrtfConvertedSet Convert(HrirSet set, bool personal, int? taps = null)
     {
@@ -76,10 +84,12 @@ public static class HrtfConverter
         var outTaps = taps ?? Math.Clamp((int)Math.Round(128 * set.SampleRate / 48000 / 8) * 8, 16, 512);
         if (outTaps < DcsHrtfFile.MinTaps || outTaps > DcsHrtfFile.MaxTaps) throw new HrtfConversionException("Tap count out of range.");
         var warnings = new List<string>();
+        if (set.MeasurementDistanceM < NearMeasurementM)
+            warnings.Add($"Measured at {set.MeasurementDistanceM:0.0#} m: the set already holds some near-field effect, so close sounds (in the cockpit) get a little more of it.");
 
-        // 2. Directions: unit, merged, triangulated.
+        // 2. Directions: unit, merged (repeats averaged), triangulated.
         var unit = new List<double[]>();
-        var source = new List<int>();
+        var members = new List<List<int>>();
         var cosMerge = Math.Cos(MergeDegrees * Math.PI / 180);
         var merged = 0;
         for (var i = 0; i < m; i++)
@@ -88,12 +98,15 @@ public static class HrtfConverter
             var len = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
             if (len < 1e-9) throw new HrtfConversionException("A direction has zero length.");
             double[] u = [v[0] / len, v[1] / len, v[2] / len];
-            var duplicate = false;
-            foreach (var w in unit)
-                if (u[0] * w[0] + u[1] * w[1] + u[2] * w[2] > cosMerge) { duplicate = true; break; }
-            if (duplicate) { merged++; continue; }
+            var duplicate = -1;
+            for (var j = 0; j < unit.Count; j++)
+            {
+                var w = unit[j];
+                if (u[0] * w[0] + u[1] * w[1] + u[2] * w[2] > cosMerge) { duplicate = j; break; }
+            }
+            if (duplicate >= 0) { members[duplicate].Add(i); merged++; continue; }
             unit.Add(u);
-            source.Add(i);
+            members.Add([i]);
         }
         if (merged > 0) warnings.Add($"{merged} repeated directions merged.");
         var flat = new double[unit.Count * 3];
@@ -114,6 +127,26 @@ public static class HrtfConverter
         if (t != 2 * n - 4) throw new HrtfConversionException("The triangulation is not closed.");
         var dirs = new double[n][];
         for (var i = 0; i < n; i++) dirs[i] = unit[keep[i]];
+        // The measurement of each kept direction: a repeat's IRs and Data.Delay averaged sample by sample.
+        var raw = new float[n][][];
+        var rawDelay = new double[n][];
+        for (var i = 0; i < n; i++)
+        {
+            var group = members[keep[i]];
+            raw[i] = new float[2][];
+            rawDelay[i] = new double[2];
+            for (var e = 0; e < 2; e++)
+            {
+                if (group.Count == 1) raw[i][e] = set.Ir[group[0]][e];
+                else
+                {
+                    var avg = new double[length];
+                    foreach (var g in group) for (var k = 0; k < length; k++) avg[k] += set.Ir[g][e][k];
+                    raw[i][e] = avg.Select(x => (float)(x / group.Count)).ToArray();
+                }
+                if (set.Delay is { } sd) rawDelay[i][e] = group.Average(g => sd[g][e]);
+            }
+        }
         var minPlane = double.MaxValue;
         var largestGap = 0.0;
         var vertexArea = new double[n];
@@ -132,22 +165,11 @@ public static class HrtfConverter
         if (minEl > -45) warnings.Add($"No directions below {minEl:0} degrees elevation: sounds from below use the nearest ones.");
         if (largestGap > 15) warnings.Add($"Sparse grid: up to {largestGap:0} degrees between neighbouring directions.");
 
-        // 3. Onsets (samples at the file rate), common minimum removed.
-        var onset = new double[n * 2];
-        Parallel.For(0, n, i =>
-        {
-            for (var e = 0; e < 2; e++)
-                onset[i * 2 + e] = HrtfDsp.MinimumPhaseDelay(set.Ir[source[keep[i]]][e]) + (set.Delay?[source[keep[i]]][e] ?? 0);
-        });
-        var minOnset = onset.Min();
-        for (var i = 0; i < onset.Length; i++) onset[i] -= minOnset;
-        if (onset.Max() > 0.005 * set.SampleRate) throw new HrtfConversionException("Onset delays differ by more than 5 ms: the impulse responses are not aligned.");
-
-        // 4. Diffuse-field equalisation.
+        // 3. Diffuse-field equalisation.
         var N = HrtfDsp.NextPow2(Math.Max(length, outTaps) * 4);
         var bins = N / 2 + 1;
         var mags = new double[n * 2][];
-        Parallel.For(0, n * 2, j => mags[j] = HrtfDsp.Magnitude(set.Ir[source[keep[j / 2]]][j % 2], N));
+        Parallel.For(0, n * 2, j => mags[j] = HrtfDsp.Magnitude(raw[j / 2][j % 2], N));
         var power = new double[bins];
         var totalArea = vertexArea.Sum();
         for (var i = 0; i < n; i++)
@@ -165,7 +187,7 @@ public static class HrtfConverter
         var centre = count > 0 ? sum / count : 0;
         for (var k = 0; k < bins; k++) eqDb[k] = Math.Clamp(eqDb[k] - centre, -15, 15);
 
-        // 5. Minimum phase.
+        // 4. Minimum phase.
         var ir = new float[n * 2 * outTaps];
         Parallel.For(0, n * 2, j =>
         {
@@ -174,16 +196,38 @@ public static class HrtfConverter
             HrtfDsp.MinimumPhase(eq, N, outTaps).CopyTo(ir, j * outTaps);
         });
 
-        // 6. Front normalisation on the interpolated front IRs.
+        // 5. Onsets (samples at the file rate): the stored IR against the measured one. The equaliser's own phase is the
+        // same in every IR, so it only shifts every onset alike and is removed with the common minimum.
+        var onset = new double[n * 2];
+        Parallel.For(0, n * 2, j =>
+            onset[j] = HrtfDsp.ExcessPhaseDelay(raw[j / 2][j % 2], ir.AsSpan(j * outTaps, outTaps), set.SampleRate) + rawDelay[j / 2][j % 2]);
+        var minOnset = onset.Min();
+        for (var i = 0; i < onset.Length; i++) onset[i] -= minOnset;
+        if (onset.Max() > 0.005 * set.SampleRate) throw new HrtfConversionException("Onset delays differ by more than 5 ms: the impulse responses are not aligned.");
+
+        // 6. Front normalisation on the interpolated front IRs, over 200 Hz-8 kHz.
         var (fi, fw) = Locate(dirs, tris, [1, 0, 0]);
-        var energy = 0.0;
+        double bandPower = 0;
+        var bandBins = 0;
         for (var e = 0; e < 2; e++)
+        {
+            var front = new float[outTaps];
             for (var k = 0; k < outTaps; k++)
             {
                 double v = 0;
                 for (var j = 0; j < 3; j++) v += fw[j] * ir[(fi[j] * 2 + e) * outTaps + k];
-                energy += 0.5 * v * v;
+                front[k] = (float)v;
             }
+            var mag = HrtfDsp.Magnitude(front, N);
+            for (var k = 1; k < bins; k++)
+            {
+                var f = k * set.SampleRate / N;
+                if (f < FrontBandLowHz || f > FrontBandHighHz) continue;
+                bandPower += mag[k] * mag[k];
+                bandBins++;
+            }
+        }
+        var energy = bandBins > 0 ? bandPower / bandBins : 0;
         if (!(energy > 1e-12)) throw new HrtfConversionException("The front impulse responses are silent.");
         var gain = 1 / Math.Sqrt(energy);
         for (var i = 0; i < ir.Length; i++) ir[i] = (float)(ir[i] * gain);

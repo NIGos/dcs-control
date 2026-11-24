@@ -538,10 +538,15 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         // 3D headphone audio in the module's newest log (Audio page status), and the applied profile's state.
                         var audioOptions = await Task.Run(EngineOptionsPath);
                         var audioApplied = await Task.Run(service.ReadAppliedProfile);
+                        // On in the applied profile, but without an HRTF set Launch DCS deployed none of it: unavailable,
+                        // whatever an older module's log says, and not "applied" (the in-flight switch has nothing to switch).
+                        var audioWanted = audioApplied?.Profile.ForLaunch().UsesBinauralAudio == true;
+                        var audioUsable = !audioWanted || await Task.Run(service.BinauralAudioUsable);
                         return Reply(id, new
                         {
-                            status = audioOptions is null ? null : await Task.Run(() => Binaural.ReadStatus(audioOptions, DcsRunning())),
-                            applied = audioApplied?.Profile.ForLaunch().UsesBinauralAudio == true, dcsRunning = DcsRunning(),
+                            status = audioOptions is null ? null : !audioUsable ? new AudioStatus("unavailable", Binaural.UnusableReason + " DCS's own sound plays.")
+                                : await Task.Run(() => Binaural.ReadStatus(audioOptions, DcsRunning())),
+                            applied = audioWanted && audioUsable, dcsRunning = DcsRunning(),
                         });
                     }
                     if (engine)
@@ -1006,7 +1011,14 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // stays on this side). The offline verification gives a fixture path instead of the dialog.
                     var library = service.Hrtf;
                     string? sofa;
-                    if (data.TryGetProperty("name", out var chosen) && chosen.ValueKind == JsonValueKind.String) sofa = _pendingSofa;
+                    if (data.TryGetProperty("name", out var chosen) && chosen.ValueKind == JsonValueKind.String)
+                    {
+                        // The second step: the file picked before. A name the library would refuse asks again (the file is kept).
+                        sofa = _pendingSofa;
+                        var again = chosen.GetString()!.Trim();
+                        if (sofa is not null && (!Binaural.IsValidHrtfName(again) || again.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase)))
+                            return Reply(id, new { needName = true, invalid = HrtfLibrary.NameRule, suggested = library.FreeName(Binaural.NameFrom(again.Length > 0 ? again : Path.GetFileNameWithoutExtension(sofa))) });
+                    }
                     else if (offline && data.TryGetProperty("fixture", out var fixturePath) && fixturePath.ValueKind == JsonValueKind.String) sofa = fixturePath.GetString();
                     else
                     {

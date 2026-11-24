@@ -170,6 +170,19 @@ foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/nati
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
     Write-Sha256Sidecar $target
 }
+# The engine payload carries the generic HRTF set itself, as the RCDATA resource HRTF_DEFAULT. Checked the way the app
+# reads it (DcsVr.Core PeResource, Binaural.PayloadHasDefaultHrtf), and byte for byte against native/binaural/data: a
+# payload built before the set was made, or from another one, would leave 3D audio greyed out or play another set.
+if (Test-Path -LiteralPath (Join-Path $hrtfData 'sadie2_ku100.dcshrtf')) {
+    # Loaded from its bytes, so the published DcsVr.Core.dll is not held open by this script.
+    $peResource = [System.Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $payloadRoot 'DcsVr.Core.dll'))).GetType('DcsVr.Core.PeResource', $true)
+    $payloadImage = [IO.File]::ReadAllBytes((Join-Path $payloadRoot 'components/dcsqvcull/DcsQvCullPayload.dll'))
+    $embeddedHrtf = $peResource.GetMethod('Find').Invoke($null, [object[]]@($payloadImage, [int]$peResource.GetField('RcData').GetValue($null), 'HRTF_DEFAULT'))
+    $expectedHrtf = [IO.File]::ReadAllBytes((Join-Path $hrtfData 'sadie2_ku100.dcshrtf'))
+    if ($null -eq $embeddedHrtf) { throw 'DcsQvCullPayload.dll has no HRTF_DEFAULT resource: rebuild the engine module (scripts/build-dcsqvcull.ps1) now that native/binaural/data has the generic set.' }
+    if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$embeddedHrtf, $expectedHrtf)) { throw "DcsQvCullPayload.dll embeds another HRTF set ($($embeddedHrtf.Length) bytes) than native/binaural/data/sadie2_ku100.dcshrtf: rebuild the engine module." }
+    Write-Output "DcsQvCullPayload.dll embeds the generic HRTF set ($($expectedHrtf.Length) bytes, as native/binaural/data)."
+}
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/pupilshift') -Force | Out-Null
 $pupilShift = Join-Path $payloadRoot 'components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/pupil-shift/XR_APILAYER_DCSVR_pupil_shift.dll') -Destination $pupilShift -Force

@@ -275,7 +275,7 @@ static class SofaTests
             require(!File.ReadAllText(Path.Combine(library.Folder, "my ears.json")).Contains("My measurements", StringComparison.Ordinal), "the folder is not kept");
             var bad = Path.Combine(folder, "refused.sofa"); File.WriteAllText(bad, "no");
             try { library.Import(bad, "refused", new CliHrtfConverter(directory)); throw new Exception("not refused"); }
-            catch (HrtfConversionException e) { require(e.Message.StartsWith("The SOFA file was not converted: This is not a SOFA file", StringComparison.Ordinal), e.Message); }
+            catch (HrtfConversionException e) { require(e.Message.StartsWith("The SOFA file was not converted: this is not a SOFA file", StringComparison.Ordinal), e.Message); }
             require(library.List().Count == 1 && Directory.GetFiles(library.Folder).Length == 2, "nothing kept for the refused file");
         });
 
@@ -286,35 +286,26 @@ static class SofaTests
             require(File.Exists(committed), "native/binaural/data/sadie2_ku100.dcshrtf is missing (scripts/fetch-hrtf.ps1)");
             var facts = HrtfFile.Validate(File.ReadAllBytes(committed), out var why);
             require(facts is { Directions: 8703, SampleRate: 48000, Taps: 128, Personal: false, Title: "SADIE II KU100" }, "the app's check: " + why);
-            // The app's report: no warning for the generic head (its fitted radius, 119 mm, is about 0.9 ms between the ears).
-            require(facts!.Warnings().Count == 0 && Math.Abs(facts.MaxItdMs - 0.89) < 0.02, string.Join("; ", facts.Warnings()) + " " + facts.MaxItdMs);
+            // The app's report: no warning for the generic head (its fitted radius, 94 mm, is about 0.71 ms between the ears).
+            require(facts!.Warnings().Count == 0 && Math.Abs(facts.MaxItdMs - 0.71) < 0.02, string.Join("; ", facts.Warnings()) + " " + facts.MaxItdMs);
             if (!File.Exists(archive)) { skip("no .cache/hrtf/D1_HRIR_SOFA.zip (scripts/fetch-hrtf.ps1 downloads it)"); return; }
-            var sofa = Path.Combine(root, "sadie", "D1_48K.sofa");
-            Directory.CreateDirectory(Path.GetDirectoryName(sofa)!);
+            var folder = Path.Combine(root, "sadie");
+            Directory.CreateDirectory(folder);
             using (var zip = ZipFile.OpenRead(archive))
-                zip.Entries.Single(e => e.Name.Contains("48K", StringComparison.Ordinal) && e.Name.EndsWith(".sofa", StringComparison.OrdinalIgnoreCase)).ExtractToFile(sofa);
+                foreach (var entry in zip.Entries.Where(e => e.Name.EndsWith(".sofa", StringComparison.OrdinalIgnoreCase)))
+                    entry.ExtractToFile(Path.Combine(folder, entry.Name), true);
+            string Sofa(string rate) => Directory.GetFiles(folder, "*.sofa").Single(p => Path.GetFileName(p).Contains(rate, StringComparison.Ordinal));
+            var sofa = Sofa("48K");
             var read = SofaReader.Read(sofa, "SADIE II KU100", "SADIE II v2-2 (Univ. of York) D1, Apache-2.0, modified");
             require(read.Set.Directions.Length == 8802 && read.Set.SampleRate == 48000 && read.Set.Ir[0][0].Length == 256 && read.Warnings.Count == 0, string.Join("; ", read.Warnings));
             var a = HrtfConverter.Convert(read.Set, personal: false);
             var b = HrtfConverter.Convert(SofaReader.Read(sofa, "SADIE II KU100", "SADIE II v2-2 (Univ. of York) D1, Apache-2.0, modified").Set, personal: false);
             require(a.File.AsSpan().SequenceEqual(b.File), "converts bit-identically twice");
             require(a.File.AsSpan().SequenceEqual(File.ReadAllBytes(committed)), "differs from the committed set: run scripts/fetch-hrtf.ps1 and commit the result");
-            // Magnitude per third octave (200 Hz-16 kHz) against the source HRIRs, equalised and scaled as the converter does.
+            // Magnitude per third octave (200 Hz-16 kHz) against the source HRIRs (repeats averaged), equalised and scaled
+            // as the converter does.
             var d = DcsHrtfFile.Read(a.File);
-            var worst = 0.0;
-            var sources = new List<int>();  // the source measurement of each kept direction (repeats merged)
-            for (var i = 0; i < d.DirectionCount; i++)
-            {
-                double[] u = [d.Directions[i * 3], d.Directions[i * 3 + 1], d.Directions[i * 3 + 2]];
-                var best = 0; var bestDot = -2.0;
-                for (var j = 0; j < read.Set.Directions.Length; j++)
-                {
-                    var v = read.Set.Directions[j];
-                    var dot = u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
-                    if (dot > bestDot + 1e-12) { bestDot = dot; best = j; }
-                }
-                sources.Add(best);
-            }
+            var measured = HrtfItdMetrics.MeasuredFor(d, read.Set);
             var errors = new double[d.DirectionCount];
             Parallel.For(0, d.DirectionCount, i =>
             {
@@ -322,14 +313,50 @@ static class SofaTests
                 for (var e = 0; e < 2; e++)
                 {
                     var got = HrtfTests.BandsDb(d.Ir.AsSpan((i * 2 + e) * d.Taps, d.Taps), 2048, d.SampleRate, 1);
-                    var want = HrtfTests.BandsDb(read.Set.Ir[sources[i]][e], 2048, d.SampleRate, d.FrontGain, a.DiffuseFieldEqDb, a.SpectrumPoints);
+                    var want = HrtfTests.BandsDb(measured[i][e], 2048, d.SampleRate, d.FrontGain, a.DiffuseFieldEqDb, a.SpectrumPoints);
                     for (var k = 0; k < got.Length; k++) w = Math.Max(w, Math.Abs(got[k] - want[k]));
                 }
                 errors[i] = w;
             });
-            worst = errors.Max();
+            var worst = errors.Max();
             Console.WriteLine($"  SADIE II KU100: {d.DirectionCount} directions, fitted radius {d.DatasetHeadRadiusM * 100:0.00} cm, worst third-octave error {worst:0.000} dB, {a.File.Length} bytes");
             require(worst <= 1.0, $"magnitude error {worst:0.000} dB");
+            // Front normalised over 200 Hz-8 kHz.
+            var front = 10 * Math.Log10(HrtfTests.FrontBandEnergy(d));
+            require(Math.Abs(front) < 0.05, $"front level {front:0.000} dB over 200 Hz-8 kHz");
+
+            // Time between the ears as rendered (stored IR + stored onset) against the measurement: the interaural phase
+            // delay over 200-1500 Hz. The earlier cross-correlation onsets were 119 us RMS off (272 us at worst, the front
+            // 154 us to the left); the excess-phase onsets are 9 us RMS (31 us at worst, the front within 2 us).
+            var (orig, rend) = HrtfItdMetrics.PhaseDelays(d, measured);
+            var err = orig.Zip(rend, (o, r) => r - o).ToArray();
+            var rms = Math.Sqrt(err.Average(x => x * x));
+            var maxErr = err.Max(x => Math.Abs(x));
+            var f = HrtfItdMetrics.Front(d);
+            // Adjacent directions on the horizontal ring (1 degree apart): the stored ITD steps no more than the
+            // measurement's own (16 us) plus a little, each ear's onset by less than 3 samples; the earlier onsets jumped
+            // by up to 209 us (ITD) and 215 us (one ear).
+            var ring = HrtfItdMetrics.HorizontalRing(d);
+            double step = 0, measuredStep = 0, earStep = 0;
+            for (var k = 0; k < ring.Length; k++)
+            {
+                int i = ring[k], j = ring[(k + 1) % ring.Length];
+                step = Math.Max(step, Math.Abs(HrtfItdMetrics.StoredItdUs(d, i) - HrtfItdMetrics.StoredItdUs(d, j)));
+                measuredStep = Math.Max(measuredStep, Math.Abs(orig[i] - orig[j]));
+                for (var e = 0; e < 2; e++) earStep = Math.Max(earStep, Math.Abs(d.Delays[i * 2 + e] - d.Delays[j * 2 + e]) / d.SampleRate * 1e6);
+            }
+            Console.WriteLine($"  SADIE II KU100 time between the ears, rendered vs measured (200-1500 Hz): RMS {rms:0.0} us, worst {maxErr:0.0} us, front {rend[f]:0.0} us (measured {orig[f]:0.0}); horizontal ring of {ring.Length}: largest step {step:0.0} us (measured {measuredStep:0.0}), one ear's onset {earStep:0.0} us");
+            require(rms < 15, $"ITD RMS error {rms:0.0} us");
+            require(maxErr < 50, $"worst ITD error {maxErr:0.0} us");
+            require(Math.Abs(rend[f]) < 30 && Math.Abs(HrtfItdMetrics.StoredItdUs(d, f)) < 30, $"front ITD {rend[f]:0.0} us rendered, {HrtfItdMetrics.StoredItdUs(d, f):0.0} stored");
+            require(ring.Length >= 360 && step < 30 && earStep < 60, $"ring of {ring.Length}: ITD step {step:0.0} us, one ear's step {earStep:0.0} us");
+            // The same head at 44.1 and 96 kHz fits the same radius (the cross-correlation onsets moved it with the rate).
+            foreach (var rate in new[] { "44K", "96K" })
+            {
+                var other = HrtfConverter.Convert(SofaReader.Read(Sofa(rate)).Set, personal: false);
+                Console.WriteLine($"  SADIE II KU100 at {rate}: fitted radius {other.Report.FittedHeadRadiusM * 100:0.00} cm");
+                require(Math.Abs(other.Report.FittedHeadRadiusM - a.Report.FittedHeadRadiusM) < 0.001, $"{rate}: radius {other.Report.FittedHeadRadiusM:0.0000} m vs {a.Report.FittedHeadRadiusM:0.0000} m");
+            }
         });
     }
 }
