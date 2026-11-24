@@ -441,6 +441,18 @@ others only append.
 4. Run the personal-data check.
 5. Live tests (8.6) only with the user's go, DCS state checked first.
 
+Done on `feat/hrtf-audio`: the payload compiles and links the real core (`DcsQvBinauralCore` in
+`native/dcsqvcull/CMakeLists.txt`); the stand-in stays for the module's own scenarios, and the end-to-end test
+`DcsQvCullAudioE2ETests` drives the module with the real core (docs/BINAURAL_AUDIO_HOOKS.md, "Tests"). The release
+build also runs `scripts/build-binaural.ps1`. The app's status reader parses the module's own lines (section 10), the
+module's LogVoices file is `audio_voices.csv`, and the invariant test reads back every `[Audio]` key the app writes.
+Still open: the generic set itself (`native/binaural/data/sadie2_ku100.dcshrtf`, from SADIE II through
+`scripts/fetch-hrtf.ps1`) and the SOFA reader for `DcsVr.Cli hrtf-convert`, both waiting for the go to download the
+dataset and PureHDF. Until then the payload has no `HRTF_DEFAULT` resource: with 3D audio on, the module stays off
+(`audio: off (no HRTF set: this build has no default HRTF set)`, shown on the Audio page), and Import SOFA answers
+"this DCS Control has no SOFA converter yet". `Binaural.PayloadHasAudio` (Live) finds the resource name in the module's
+code either way, so it tells "this payload has the audio module", not "this payload has the set".
+
 ## 10. The app side (task D): what the app writes, reads and calls
 
 Implemented on `feat/hrtf-app` (`src/DcsVr.Core/BinauralAudio.cs`, `HrtfLibrary.cs`; the Audio page in `src/DcsVr.App/ui`).
@@ -461,7 +473,7 @@ Tasks A and B match these when they merge; the integrator checks them against th
   `OpenXrEyeGaze=0` when nothing else needs the gaze. Without the layer component, 3D audio installs without it.
 - `options.lua sound.main_layout = "stereo"` (owned, restored by Back to stock and when 3D audio is turned off). The
   `spatial` driver is never written; when `sound.driver_name` is `spatial`, Checks warns (`audio-spatial`).
-- Runtime files removed by Back to stock: `toggle_audio.flag`, `audio_*.csv` (the LogVoices CSV must match this pattern).
+- Runtime files removed by Back to stock: `toggle_audio.flag`, `audio_*.csv` (the module writes LogVoices to `audio_voices.csv`).
 
 **Live:** every field above but `binauralExcludeContexts`, file `DcsQvCull.ini`, only while the installed payload has the
 audio part: the app looks for the UTF-16 resource name `HRTF_DEFAULT` in the installed `DcsQvCullPayload.dll` (task B
@@ -473,12 +485,16 @@ not a live key (read when DCS starts VR), so turning 3D audio on in VR waits.
 
 | Line | Meaning for the app |
 |---|---|
-| `audio: on (...)` | running; inside, `hrtf <name>` and `head pose on`/`off` are shown when present |
+| `audio: on (<rate> Hz stereo, HRTF <name>: <n> directions, ...)` | running, with that set |
+| `audio: HRTF <name> (crossfading)` | another set picked live |
 | `audio: off (<reason>)` | off for the session; the reason is shown as is (Checks `audio-status`) |
-| `audio: <id> not found (<why>)` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
-| `audio: switched off` / `audio: switched on` | the kill switch (key or flag) |
-| `audio: stats ... sounds=<n> ... p99=<x> ms` | sounds rendered in 3D and the p99 cost per block (`owned=` or `voices=` also read) |
-| `audio: budget ... -> <n>` (or `back-off`) | a CPU back-off, down to n sounds (Checks `audio-backoff`) |
+| `audio: off (<id> not found (<why>))` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
+| `audio: kill switch (<by>): binaural OFF (...)` / `... binaural ON` | the kill switch (key or flag) |
+| `audio: running, <n> sounds, p99 <x> ms per block, ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D, the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
+| `audio: CPU budget: at most <n> sounds now (... over budget)` | a CPU back-off, down to n sounds (Checks `audio-backoff`); `(10 s under half the budget)` raises it again |
+
+These are the module's own lines (`native/dcsqvcull/src/main/audio.inc`); the module's `Phrases` test keeps them in the
+source and the app's status test parses them verbatim.
 
 **SOFA converter** (task A), called through the CLI contract `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> --name <name>`
 (`CliHrtfConverter`, hidden, below-normal priority, two-minute limit): exit 0 with the file written is a conversion;

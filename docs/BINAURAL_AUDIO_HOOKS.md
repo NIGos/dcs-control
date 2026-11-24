@@ -479,7 +479,18 @@ Where the implementation differs from or adds to the sections above:
   push events to a ring this thread logs from.
 - **FTZ/DAZ** are set only around our own DSP in each P4 call and restored before ED's next kernel runs.
 - **Status word** bits 53 (configured), 54 (active), 55 (configured but off); see `status_word.h`.
-- **Build.** The payload links BinauralCore when `DCSQV_BINAURAL_CORE_LIB` names its `.lib`
-  (`scripts/build-dcsqvcull.ps1` passes the environment variable of that name); without it the module logs
-  `audio: off (this build has no binaural renderer)`. The default set is embedded as RCDATA `HRTF_DEFAULT` when
-  `native/binaural/data/sadie2_ku100.dcshrtf` exists.
+- **Build.** The payload always links BinauralCore, compiled from `native/binaural/src` by the module's own CMake
+  (target `DcsQvBinauralCore`; `native/binaural` is not added as a subdirectory, its harness runs in
+  `scripts/build-binaural.ps1`). The default set is embedded as RCDATA `HRTF_DEFAULT` when
+  `native/binaural/data/sadie2_ku100.dcshrtf` exists; without it the module logs
+  `audio: off (no HRTF set: this build has no default HRTF set)`, which the Audio page shows as the reason.
+- **Tests.** `DcsQvCullTests` runs the module's scenarios against the stand-in core (`test/audio_fake_core.cpp`, a core
+  whose output and refusals the tests control); `DcsQvCullAudioE2ETests` (`test/audio_e2e_test.cpp`) runs the module
+  on the fake image with the real core and the harness's synthetic spherical-head set: a source circling the head
+  gives the core's own ITD / ILD trajectory (Woodworth for the configured head), the radio stays centred, nothing is
+  allocated on the audio threads. Both share the rig in `test/audio_rig.h` and the allocation counter in
+  `test/audio_rt_alloc.cpp`.
+- **Head pose.** Both reads (the pose DCS used, at the frame's first panner call; the newest pose predicted to the
+  block's end, on the render thread) go through `head_pose_reader.h` `ReadPredicted`: 150 ms staleness, writer = this
+  process, speed guards, 50 ms horizon. The running line ends `head pose on|off|unused`.
+- **LogVoices** writes `audio_voices.csv` next to the payload (Back to stock removes `audio_*.csv`).
