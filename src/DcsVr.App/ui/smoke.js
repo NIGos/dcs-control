@@ -6,11 +6,11 @@ window.runWebSmoke = async function() {
   // Smoothness buffer and stays in the profile file only.
   const PROFILE_FIELDS = [
     'quadViews','gaze','quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
-    'quadEdgeBlend','quadEdgeMatch','quadRoundFocus','quadHideFocusEdge','quadGazeGlideMs','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
-    'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
+    'quadEdgeBlend','quadRoundFocus','quadHideFocusEdge','quadGazeGlideMs','quadEdgeMatch','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor','quadSharpening','quadPeripheryContrast','quadSharpenTaper',
+    'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','neuralWorkingScale','neuralIntensity','neuralStyle','quadNeuralEdgeFade','neuralBeforeUpscaling',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenFoveated','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -28,8 +28,9 @@ window.runWebSmoke = async function() {
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
-  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadGazeGlideMs','neuralAdvanced','showOverlay','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
-    'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftVirtualImageM','depthBoostFarStartM','runtimeManifestPath'];
+  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadSharpenTaper','keepOtherDxgi','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','nvidiaFlowScale','showOverlay',
+    'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
+    'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
   const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
     return missing.length || extra.length || twice.length || expected.length !== actual.length ? ` (missing: ${missing.join(', ') || 'none'}; extra: ${extra.join(', ') || 'none'}${twice.length ? '; twice: '+twice.join(', ') : ''})` : ''; };
@@ -332,6 +333,20 @@ window.runWebSmoke = async function() {
       { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, gpu = ['engineFastShaderPaths','engineShadowCache','engineWaterSkip','engineIdleEffectSkip'].filter(k => ui.profile[k]).length;
         const tracked = ui.profile.quadViews === 'QuadViewsFoveated' && !ui.profile.quadViewsLayerDirectory && ui.profile.gaze === 'EyeTracked', gaze = ['quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase'].filter(k => ui.profile[k]).length;
         check('The GPU savings fold counts its switches; the eye-tracking fold counts its own, or says it needs eye tracking',value('engineWaterSkip') === `${gpu} of 4 on` && $('setting-engineFastShaderPaths').closest('details') === $('setting-engineWaterSkip').closest('details') && value('quadSaccadeLead') === (tracked ? `${gaze} of 4 on` : 'Eye tracked only')); }
+      { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, p = ui.profile, fg = p.frameGen, desktop = p.desktop;
+        const shape = value('quadEdgeBlend').startsWith(p.quadRoundFocus ? 'Round · edge ' : 'Rounded rectangle · edge '), taper = value('quadSharpenTaper') === (p.quadSharpenTaper ? 'Fades at the edge' : 'Even to the edge');
+        const dxgi = value('keepOtherDxgi') === (p.keepOtherDxgi ? 'Kept working' : 'Set aside while flying'), nrDefaults = !p.quadNeuralEdgeFade || !p.neuralBeforeUpscaling || value('quadNeuralEdgeFade') === 'Defaults';
+        const fgDefaults = p.frameGenPassThrough !== 'Balanced' || !p.frameGenDeepPipeline || p.frameGenParallelEyes || value('frameGenPassThrough') === 'Defaults';
+        edit('frameGenDeepPipeline',!p.frameGenDeepPipeline); const deepSaid = value('frameGenPassThrough').includes('No smoothness buffer') === !p.frameGenDeepPipeline; edit('frameGenDeepPipeline',!p.frameGenDeepPipeline);
+        const boostKeys = [!desktop && 'boostMoveVrRuntime','boostMoveBackgroundApps','boostElevated'].filter(Boolean), boostCount = value('boostMoveVrRuntime') === `${boostKeys.filter(k => p[k]).length} of ${boostKeys.length} on`;
+        const flowFold = $('setting-nvidiaFlowScale').closest('details'); edit('frameGen','Nvidia'); const nvidia = !flowFold.hidden; edit('frameGen','FidelityFx'); const gone = flowFold.hidden && !$('setting-smoothCursor').hidden; edit('frameGen',fg);
+        const panel = value('diagnosticOverlayAtStart').includes(p.diagnosticOverlayAtStart ? 'shown at start' : 'hidden at start'), reopen = value('freeVramReopen').startsWith(p.freeVramReopen ? 'Reopened after' : 'Not reopened');
+        const pupil = value('pupilShiftEyeRadiusMm').includes(' · ') && $('setting-pupilShiftEyeRadiusMm').closest('details') === $('setting-pupilShiftVirtualImageM').closest('details');
+        check('The new folds show their values: shape and edge, sharpening taper, dxgi, DLSS 5 and frame generation defaults, CPU Boost count, panel, reopen, pupil',shape && taper && dxgi && nrDefaults && fgDefaults && deepSaid && boostCount && panel && reopen && pupil);
+        check('The optical flow fold is there with NVIDIA and gone with FidelityFX; Smooth mouse cursor stays',nvidia && gone && !$('setting-smoothCursor').closest('details'));
+        check('Each card shows its main switches first: the moved settings sit in folds, the ones pilots change stay in sight',['quadEdgeBlend','quadRoundFocus','quadSharpenTaper','keepOtherDxgi','quadNeuralEdgeFade','neuralBeforeUpscaling','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','nvidiaFlowScale','flowPreset','bidirectionalFlow','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVramReopen','freeVramForce','pupilShiftEyeRadiusMm','diagnosticOverlayAtStart','diagnosticVram','headsetPanelPosition'].every(k => $('setting-'+k).closest('details.advanced'))
+          && ['quadHideFocusEdge','quadSharpening','quadPeripheryContrast','neuralRendering','neuralRuntimePath','neuralFocusArea','neuralWorkingScale','neuralIntensity','neuralStyle','frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','fpsLimit','headsetRefreshHz','frameGenHudSymbology','smoothCursor','cpuBoost','boostDcsPriority','freeVram','freeVramApps','pauseTobiiDesktop','lowerMonitor','pupilShift','headsetPanel','dcs','options'].every(k => !$('setting-'+k).closest('details'))
+          && $('setting-frameGenFoveated').compareDocumentPosition($('setting-frameGenPassThrough')) & Node.DOCUMENT_POSITION_FOLLOWING); }
       // Soft focus edge is one of Hide the focus edge's parts: in its Fine-tune fold, greyed out with it, counted by it.
       { const fold = $('setting-quadGazeGlideMs').closest('details'), value = () => fold.querySelector(':scope > summary > .fold-value').textContent, provider = ui.profile.quadViews, hide = ui.profile.quadHideFocusEdge, blend = ui.profile.quadEdgeBlend;
         edit('quadViews','QuadViewsFoveated'); edit('quadHideFocusEdge',true); const p = ui.profile, on = [p.quadGazeGlideMs > 0, p.quadEdgeMatch, p.quadFocusFadeIn > 0, p.quadKeepHistoryOnSaccade, p.quadBandMatch > 0, p.quadBandMatchColor].filter(Boolean).length;
@@ -527,10 +542,17 @@ window.runWebSmoke = async function() {
     check('Free VRAM refuses to close a process that starts DCS',ui.state.issues.some(i => i.code === 'boost-launcher' && i.severity === 'Error'));
     ui.navigate('diagnostics');
     { const fix = [...$('checkGroups').querySelectorAll('.check-fix .check-row')], row = fix.find(r => r.textContent.includes('CPU Boost app lists'));
-      check('Checks lists the problem once under Must fix, one line with a link to the fix',row && row.querySelector('[data-open-page=boost]') && getComputedStyle(row.querySelector('.check-line')).whiteSpace === 'nowrap' && fix.filter(r => r.textContent.includes('CPU Boost app lists')).length === 1);
+      check('Checks lists the problem once under Must fix, one line with a link to the list it names',row && row.querySelector('[data-reveal=freeVramApps]') && getComputedStyle(row.querySelector('.check-line')).whiteSpace === 'nowrap' && fix.filter(r => r.textContent.includes('CPU Boost app lists')).length === 1);
       check('Checks groups Must fix, Check yourself and OK, with OK folded',$('checkGroups').querySelector('.check-group.check-fix h3').textContent.includes('Must fix') && $('checkGroups').querySelector('.check-group.check-check h3').textContent.includes('Check yourself') && (!$('checkGroups').querySelector('details.check-ok') || !$('checkGroups').querySelector('details.check-ok').open));
       row.querySelector('.check-line').click(); check('A click shows the whole text',row.classList.contains('expanded'));
       ui.navigate('overview'); check('Overview counts what to fix and links to Checks',$('dashStatus').querySelector('.dash-chip.fix[data-open-page=diagnostics]')?.textContent.includes('must fix')); }
+    // The same message for CPU Boost's Background apps opens that list, inside the closed Other programs fold.
+    { const boost = ui.profile.cpuBoost, move = ui.profile.boostMoveBackgroundApps, apps = (ui.profile.boostBackgroundApps || []).join('\n'), fold = $('setting-boostBackgroundApps').closest('details');
+      edit('cpuBoost',true); edit('boostMoveBackgroundApps',true); edit('boostBackgroundApps','steam'); await ui.run('refresh');
+      const items = ui.checkItems().filter(c => c.id === 'boost-launcher'), bg = items.find(c => c.text.startsWith('CPU Boost')), vram = items.find(c => c.text.startsWith('Free VRAM'));
+      fold.open = false; ui.revealSetting(ui.fields.find(f => f.path === bg?.action?.reveal)); const opened = fold.open && !$('input-boostBackgroundApps').hidden;
+      edit('boostBackgroundApps',apps); edit('boostMoveBackgroundApps',move); edit('cpuBoost',boost); fold.open = false; await ui.run('refresh');
+      check('Each CPU Boost app-list check opens the list it names, inside its fold',bg?.action?.reveal === 'boostBackgroundApps' && vram?.action?.reveal === 'freeVramApps' && bg.title === 'CPU Boost app lists' && opened); }
     edit('freeVramApps',vramDefaults); edit('freeVram',false); const boostPlan = await ui.request('boostPlan',ui.draft());
     // What happens at launch is fetched again for Boost and route edits, not for other edits.
     ui.navigate('boost'); await sleep(450); let requests = ui.boostRequests; edit('quadSharpening',.61); edit('neuralIntensity',.8); await sleep(450);
