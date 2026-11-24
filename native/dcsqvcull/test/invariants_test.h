@@ -433,6 +433,7 @@ struct KeyRow {
 #define IVF(m) [](const wchar_t* ini) -> double { return static_cast<double>(cgrade::ReadModeIni(ini, 1).m); }
 #define IVE(m) [](const wchar_t* ini) -> double { return static_cast<double>(cgrade::ReadModeIni(ini, 2).m); }
 #define IVX(m) [](const wchar_t* ini) -> double { return static_cast<double>(vrfx::ReadIni(ini).m); }
+#define IVA(expr) [](const wchar_t* ini) -> double { const audcfg::Read r = audcfg::ReadIni(ini); return static_cast<double>(expr); }
 const KeyRow kKeys[] = {
     {L"General", L"PerceptionOnly", kNum, L"0", IV(g_perceptionOnly.load())},
     {L"General", L"Diagnostics", kNum, L"0", IV(g_cfg.diagnostics)},
@@ -522,11 +523,22 @@ const KeyRow kKeys[] = {
     {L"VrFx", L"GVisionRedout", kNum, nullptr, IVX(gvRedout)},
     {L"VrFx", L"GVisionTolerance", kNum, nullptr, IVX(gvTolerance)},
     {L"VrFx", L"GVisionMode", kNum, nullptr, IVX(gvMode)},
+    // Binaural audio (native/binaural/include/binaural_config.h; read by the audio module's own reader).
+    {L"Audio", L"Binaural", kNum, L"0", IVA(r.cfg.binaural)},
+    {L"Audio", L"HeadCircumferenceCm", kNum, L"57", IVA(r.cfg.headCircumferenceCm)},
+    {L"Audio", L"LateHeadTracking", kNum, L"1", IVA(r.cfg.lateHeadTracking)},
+    {L"Audio", L"NearField", kNum, L"1", IVA(r.cfg.nearField)},
+    {L"Audio", L"MaxObjects", kNum, L"48", IVA(r.cfg.maxObjects)},
+    {L"Audio", L"LevelTrimDb", kNum, L"0", IVA(r.cfg.levelTrimDb)},
+    {L"Audio", L"CpuBudgetPercent", kNum, L"25", IVA(r.cfg.cpuBudgetPercent)},
+    {L"Audio", L"LogVoices", kNum, L"0", IVA(r.cfg.logVoices)},
+    {L"Hotkeys", L"AudioToggle", kHotkey, nullptr, IVA(r.toggleVk * 8 + r.toggleMods)},
 };
 #undef IV
 #undef IVF
 #undef IVE
 #undef IVX
+#undef IVA
 // Keys the app writes that kKeys does not read back here, with the reason.
 const struct {
   const wchar_t *sec, *key, *why;
@@ -534,6 +546,8 @@ const struct {
     {L"Dev", L"PayloadPath", L"developer path, empty unless developer mode; read whole by the loader (r62_dev_ini_test)"},
     {L"Dev", L"IniPath", L"developer path, empty unless developer mode; read whole by qvdev::ReadDevPath (r62_dev_ini_test)"},
     {L"Model", L"ShaderCacheDir", L"a folder; resolved by qvcachedir (shader_cache_dir_test)"},
+    {L"Audio", L"Hrtf", L"a set name (text); read and validated by audcfg::ReadIni (audio_test Config)"},
+    {L"Audio", L"ExcludeContexts", L"a list of context ids (text); parsed by binaural_config::ParseExcludeContexts"},
 };
 
 double Expected(int kind, const std::wstring& v, bool* ok) {
