@@ -35,7 +35,8 @@
 //    the focus edge's blend band and the focus view's projection at once; at fixation the eye is not suppressed, and the
 //    band's change (the blend weight times the focus/periphery difference) showed as a flash at the border. Spread over
 //    a few frames the same change is a slow fade. Saccades (the lead's), the first frame, a gap of 200 ms or more, an
-//    older display time and moves longer than GlideMaxDeg still jump.
+//    older display time and moves longer than GlideMaxDeg still jump. Smooth pursuit (the target moving the same way
+//    for PursuitFrames frames) is followed as without the glide (see PursuitSpeed).
 #pragma once
 
 #include <algorithm>
@@ -81,6 +82,14 @@ class GazeFilter {
     // glide is for the deadzone's steps and slow drift. Closer than GlideSnapDeg the focus is at the gaze.
     static constexpr float GlideMaxDeg = 2.f;
     static constexpr float GlideSnapDeg = 0.02f;
+    // Glide's pursuit rule (round 3): a glide lagging a gaze that keeps moving (smooth pursuit) built up a lag, then the
+    // GlideMaxDeg jump caught it up in one step larger than the gaze's own (1.55 against 0.67 degrees at 30 deg/s and
+    // 45 FPS): the flash the glide is there to hide. Two target moves in a row at 8 deg/s or more, each the same way,
+    // are pursuit: the focus then follows the target's own move plus at most 0.1 degree of the lag, so after a few
+    // frames it is exactly the focus without the glide. The deadzone's isolated steps and drift still glide.
+    static constexpr float PursuitSpeed = 8.f;
+    static constexpr int PursuitFrames = 2;
+    static constexpr float PursuitCatchUpDeg = 0.1f;
 
     // Once per located frame (time in ns, a display time): the gaze unit vector's angular speed since the previous one.
     // A frame located again for the same time, a non-finite vector or a gap of 200 ms or more changes nothing. Display
@@ -299,6 +308,8 @@ class GazeFilter {
         int64_t time{0};
         int64_t shownTime{0};  // Glide: the display time `shown` is for
         bool shownValid{false};
+        GazeVec2 lastTarget{}, lastStep{};  // Glide's pursuit rule: the last target and its move (degrees)
+        int pursuitFrames{0};               // moves in a row at PursuitSpeed or faster, the same way
         int64_t heldTime{0};
         int64_t lostAt{0};
         int64_t counted{0};  // the display time last counted in eyeFrames
@@ -313,7 +324,9 @@ class GazeFilter {
     // result). With glideMs 0 it is the target itself, exactly as before the glide. The same display time located
     // again (or one within MinSampleSeconds, as Eye counts frames) shows the same focus; an older one too.
     GazeVec2 Glide(EyeState& e, int64_t time, GazeVec2 target, float ndcPerDegX, float ndcPerDegY, const GazeSettings& s) {
-        if (s.glideMs <= 0.f) {
+        // Not "<= 0": a glide time that is not a number is off too. The start parse (std::stof, clamp) keeps "nan" from
+        // settings.cfg, and with it every shown focus became NaN.
+        if (!(s.glideMs > 0.f)) {
             e.shownValid = false;
             return target;
         }
@@ -323,12 +336,43 @@ class GazeFilter {
             e.shownTime = time;
             return target;
         };
-        if (!e.shownValid || m_leadSaccade || ndcPerDegX <= 0.f || ndcPerDegY <= 0.f) return jump();
+        const auto restart = [&] {
+            e.lastTarget = target;
+            e.lastStep = {};
+            e.pursuitFrames = 0;
+            return jump();
+        };
+        if (!e.shownValid || m_leadSaccade || ndcPerDegX <= 0.f || ndcPerDegY <= 0.f) return restart();
         if (time <= e.shownTime || (time - e.shownTime) / 1e9f < MinSampleSeconds) return e.shown;
         const float dt = (time - e.shownTime) / 1e9f;
+        if (dt >= 0.2f) return restart();
+        // Pursuit: the target's own move this frame (degrees). PursuitFrames moves in a row, each at PursuitSpeed or
+        // faster and each the same way as the one before, are the eye following something, not the deadzone's
+        // isolated steps or tracker noise.
+        const GazeVec2 step{(target.x - e.lastTarget.x) / ndcPerDegX, (target.y - e.lastTarget.y) / ndcPerDegY};
+        const float stepDeg = std::sqrt(step.x * step.x + step.y * step.y);
+        if (stepDeg >= PursuitSpeed * dt) {
+            const bool sameWay = e.pursuitFrames == 0 || step.x * e.lastStep.x + step.y * e.lastStep.y > 0.f;
+            e.pursuitFrames = sameWay ? e.pursuitFrames + 1 : 1;
+        } else {
+            e.pursuitFrames = 0;
+        }
+        e.lastStep = step;
+        e.lastTarget = target;
         const float dx = (target.x - e.shown.x) / ndcPerDegX, dy = (target.y - e.shown.y) / ndcPerDegY;
         const float distance = std::sqrt(dx * dx + dy * dy);
-        if (dt >= 0.2f || distance > GlideMaxDeg) return jump();
+        if (e.pursuitFrames >= PursuitFrames) {
+            // In pursuit the focus moves as the target does (as with glide 0), plus at most PursuitCatchUpDeg of what
+            // the glide's first frames left behind: never a step larger than the target's own by more than that.
+            const float reach = stepDeg + PursuitCatchUpDeg;
+            if (distance <= reach) return jump();
+            const float f = reach / distance;
+            e.shown = {e.shown.x + (target.x - e.shown.x) * f, e.shown.y + (target.y - e.shown.y) * f};
+            e.shownTime = time;
+            m_stats.glided++;
+            return e.shown;
+        }
+        if (distance > GlideMaxDeg) return jump();
         const float k = 1.f - std::exp(-dt * 1000.f / s.glideMs);
         e.shown = {e.shown.x + (target.x - e.shown.x) * k, e.shown.y + (target.y - e.shown.y) * k};
         if (distance * (1.f - k) < GlideSnapDeg) e.shown = target;
