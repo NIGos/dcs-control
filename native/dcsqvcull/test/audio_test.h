@@ -671,20 +671,48 @@ void SwitchesAndFallbacks() {
       Block(r, a.data(), b.data(), 480);
     }
     Check(!audio::g_userOff.load() && audio::g_cnt.ownedNow.load() == 3, "audio kill switch: the flag again turns it back on");
-    // ED's overrun counter: 3 increments within 10 s while binaural renders: off for the session.
+    // ED's overrun counter counts anybody's slow block: 3 overruns while our own work is a few percent of the block
+    // (a system or DCS hitch) leave binaural on.
     for (int k = 0; k < 3; ++k) {
       W<uint32_t>(r.w.wasapi, 0x2274, R<uint32_t>(r.w.wasapi, 0x2274) + 1);
       SimFrame(r);
       Block(r, a.data(), b.data(), 480);
     }
+    Tick();
+    Check(audio::g_offReason.load() == audio::kOffNone && audio::g_cnt.ownedNow.load() == 3,
+          "audio overruns: DCS's overruns while our work is a small share of the block are not held against binaural");
+    // 3 increments within 10 s while our work is a real share of the block (3 voices x 0.6 ms of 10 ms = 18 %, half the
+    // 25 % budget is the line): off for the session.
+    audiofake::g_spinUs = 600;
+    for (int k = 0; k < 3; ++k) {
+      W<uint32_t>(r.w.wasapi, 0x2274, R<uint32_t>(r.w.wasapi, 0x2274) + 1);
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    audiofake::g_spinUs = 0;
     Block(r, a.data(), b.data(), 480);
     Block(r, a.data(), b.data(), 480);
     const double db2 = ErrDb(a.data(), b.data(), 960);
     Tick();
     printf("     overruns: off reason %d, then %.1f dB from DCS's mix\n", audio::g_offReason.load(), db2);
     Check(audio::g_offReason.load() == audio::kOffOverruns && db2 < -60 && (audr::g_status.load() & qvstatus::kAudioOff),
-          "audio overruns: 3 of DCS's render overruns within 10 s turn binaural off for the session (DCS's panning, "
-          "status bit 55, an audio: off line)");
+          "audio overruns: 3 of DCS's render overruns within 10 s with our work a real share of the block turn binaural "
+          "off for the session (DCS's panning, status bit 55, an audio: off line)");
+    // The kill switch off and on again re-arms it (the pilot asked for it); earlier overruns no longer count.
+    for (int k = 0; k < 2; ++k) {
+      audio::g_loop.lastFlag = 0;
+      _wfopen_s(&f, (r.dir + L"toggle_audio.flag").c_str(), L"wb");
+      if (f) fclose(f);
+      Tick();
+    }
+    for (int i = 0; i < 4; ++i) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    Tick();
+    Check(audio::g_offReason.load() == audio::kOffNone && !audio::g_userOff.load() && audio::g_cnt.ownedNow.load() == 3 &&
+              audio::g_offText.empty() && !(audr::g_status.load() & qvstatus::kAudioOff),
+          "audio overruns: the kill switch off and on again brings binaural back (an audio: on line, status bit 55 clear)");
     RigDown(r);
   }
   {  // P4 outside an armed P5 block (offline renderer, Windows spatial path): DCS's own call.
@@ -796,7 +824,7 @@ void Config() {
   Tick();
   const audio::Rt rt = audio::ReadRt();
   Check(audiofake::g_setHrtf.load() == hr0 + 1 && audiofake::g_setRadius.load() == rad0 + 1 &&
-            audiofake::g_setNear.load() == nf0 + 1 && std::fabs(audiofake::g_lastRadius - 0.54f / 6.2831853f) < 1e-4 &&
+            audiofake::g_setNear.load() == nf0 + 1 && std::fabs(audiofake::g_lastRadius - 0.0875f * 54.0f / 57.0f) < 1e-5 &&
             std::fabs(rt.trim - 0.5011872f) < 1e-5 && !rt.nearField && rt.maxObjects == 8 && audio::g_hrtfName == L"personal",
         "audio Live: a changed ini reaches the module at once (HRTF set crossfaded, head size, near field, trim, MaxObjects)");
   WriteIni(q.dir, "[Audio]\r\nBinaural=1\r\nHrtf=missing\r\nLateHeadTracking=0\r\n");
@@ -811,7 +839,26 @@ void Config() {
   Check(audio::g_cnt.ownedNow.load() == 0 && memcmp(a.data(), b.data(), sizeof(float) * 960) == 0 &&
             audio::g_installed.load(),
         "audio Live: Binaural=0 fades every voice back to DCS's panning (hooks stay, pass-through)");
+  // Back to 1: running again on the same binding, and the module says so (the app's status reads it as running).
+  WriteIni(q.dir, "[Audio]\r\nBinaural=1\r\nLateHeadTracking=0\r\n");
+  Tick();
+  for (int i = 0; i < 4; ++i) {
+    SimFrame(q);
+    Block(q, a.data(), b.data(), 480);
+  }
+  Check(audio::g_cnt.ownedNow.load() == 3 && audio::g_offText.empty(), "audio Live: Binaural back to 1 renders again (off text cleared)");
+  // A busy settings slot (a writer preempted between its two stores) gives the reader its last good copy, never "off".
+  const uint32_t seq = audio::g_rt.seq.load();
+  audio::g_rt.seq.store(seq | 1u);
+  const audio::Rt busy = audio::ReadRt();
+  audio::g_rt.seq.store(seq);
+  Check(busy.binaural && !busy.late, "audio settings: a busy slot gives the last good copy (binaural stays on)");
   RigDown(q);
+  // Head size: the default circumference gives the renderer exactly the set's own fitted radius (ITD scale 1).
+  Rig h;
+  OwnedRig(h, kIniOn);
+  Check(std::fabs(audiofake::g_lastInitRadius - 0.0875f) < 1e-7, "audio head size: 57 cm plays the set's own timing (radius = the set's fit)");
+  RigDown(h);
 }
 
 // Late head rotation: pure correction, and through the pose block end to end.
@@ -1040,13 +1087,110 @@ void Stress() {
   RigDown(r);
 }
 
+// DCS's second output (options.lua sound.hp_output): two WASAPI renderers, each with its own thread calling P5. The
+// binding stays with one live renderer (no switching back and forth), and moves to the one the world's 3D sounds play
+// on, even when the other output's first block came first.
+void TwoOutputs() {
+  Rig r;
+  OwnedRig(r, kIniOn);  // the main output (r.w) bound by its first block
+  World hp;
+  hp.Init();
+  std::vector<float> a(2 * 480), b(2 * 480), c(2 * 480);
+  auto hpBlock = [&]() {
+    memset(c.data(), 0, sizeof(float) * 960);
+    reinterpret_cast<DrvP5>(r.im.base + kDrvP5)(hp.wasapi, c.data(), 480);
+  };
+  const uint32_t ep0 = audio::g_epoch.load();
+  for (int i = 0; i < 100; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    hpBlock();
+    Tick();
+    if (i % 50 == 49) {
+      audio::g_loop.lastWorld = 0;
+      Tick();
+    }
+  }
+  audr::Binding* bnd = audio::g_binding.load();
+  Check(audio::g_epoch.load() == ep0 && bnd && bnd->renderer == r.w.Renderer() && audio::g_cnt.ownedNow.load() == 3 &&
+            audio::g_retiredBindings.empty(),
+        "audio two outputs: with the main output bound, the headphones output's blocks never take the binding (100 "
+        "alternating blocks, no rebind)");
+  RigDown(r);
+  hp.Destroy();
+
+  // The headphones output's block comes first: it is bound, then the binding moves to the main output once the world's
+  // 3D sounds are seen on it for 2 s, and stays there.
+  Rig q;
+  RigUp(q, kIniOn);
+  World hp2;
+  hp2.Init();
+  SetContext2D(q, 7, true);
+  AddBoth(q, 0, true, 1, kSine, 0.5f, 440, 1.0f, 3);
+  AddBoth(q, 1, true, 1, kNoise, 0.25f, 0, 0.9f, 7);
+  PosBoth(q, 0, 5, 1, 4);
+  PosBoth(q, 1, -3, 0, -6);
+  for (int i = 0; i < 2; ++i) CreateVoice(q, i);
+  memset(c.data(), 0, sizeof(float) * 960);
+  reinterpret_cast<DrvP5>(q.im.base + kDrvP5)(hp2.wasapi, c.data(), 480);
+  Tick();
+  const bool hpFirst = audio::g_binding.load() && audio::g_binding.load()->renderer == hp2.Renderer();
+  const uint32_t ep1 = audio::g_epoch.load();
+  int switches = 0;
+  void* last = audio::g_binding.load() ? audio::g_binding.load()->renderer : nullptr;
+  for (int i = 0; i < 200; ++i) {
+    SimFrame(q);
+    Block(q, a.data(), b.data(), 480);
+    memset(c.data(), 0, sizeof(float) * 960);
+    reinterpret_cast<DrvP5>(q.im.base + kDrvP5)(hp2.wasapi, c.data(), 480);
+    if (i % 40 == 39) audio::g_loop.lastWorld = 0;  // one "second" of the world count every 40 blocks
+    Tick();
+    void* now = audio::g_binding.load() ? audio::g_binding.load()->renderer : nullptr;
+    if (now != last) ++switches, last = now;
+  }
+  bnd = audio::g_binding.load();
+  printf("     two outputs: headphones output first %s, %d switch(es), %u rebind(s)\n", hpFirst ? "bound" : "not bound",
+         switches, audio::g_epoch.load() - ep1);
+  Check(hpFirst && bnd && bnd->renderer == q.w.Renderer() && switches == 1 && audio::g_epoch.load() - ep1 == 1 &&
+            audio::g_cnt.ownedNow.load() == 2,
+        "audio two outputs: the binding moves once to the output the world's 3D sounds play on, and stays");
+  RigDown(q);
+  hp2.Destroy();
+}
+
+// No HRTF set at all (a build without the generic set, no personal set): ed_sound is never patched.
+bool NoHrtf(const wchar_t*, std::vector<uint8_t>*) { return false; }
+void NoSetNoHooks() {
+  g_rigHrtf = &NoHrtf;
+  Rig r;
+  RigUp(r, kIniOn);
+  for (int i = 0; i < 3; ++i) {
+    audio::g_loop.lastInstall = 0;
+    Tick();
+  }
+  const bool untouched = memcmp(r.textBefore.data(), r.im.base + kTextBegin, r.textBefore.size()) == 0;
+  Check(!audio::g_installed.load() && audio::g_hookState.load() == 0 && untouched &&
+            audio::g_offText.find("no HRTF set") == 0 && (audr::g_status.load() & qvstatus::kAudioOff),
+        "audio without any HRTF set: ed_sound.dll is not patched (an audio: off (no HRTF set: ...) line, status bit 55)");
+  RigDown(r);
+  g_rigHrtf = &TestHrtf;
+  // A personal set present without the generic one: patched (the module renders with the personal set).
+  g_rigHrtf = [](const wchar_t* name, std::vector<uint8_t>* out) { return wcscmp(name, L"default") != 0 && TestHrtf(name, out); };
+  Rig p;
+  RigUp(p, "[Audio]\r\nBinaural=1\r\nHrtf=mine\r\nLateHeadTracking=0\r\n");
+  Check(audio::g_installed.load(), "audio with only a personal HRTF set: installed");
+  RigDown(p);
+  g_rigHrtf = &TestHrtf;
+}
+
 // The log phrases the app reads, and the status bits.
 void Phrases() {
   const std::string src = lptest::ReadAllSources();
   const char* phrases[] = {"\"audio: off (%s)\"", "\"audio: on (%.0f Hz stereo, HRTF %ls", "\"audio: running, %u sounds, p99 ",
                            "\"audio: hooks in (ed_sound.dll 0x%08x, %s)\"", "\"audio: kill switch (%s): binaural %s\"",
                            "\"audio: ctx %d 2d=%d cockpitGain=%d output=%d crosstalk=%.3f/%.3f\"",
-                           "\"audio: listener-vs-pose: "};
+                           "\"audio: listener-vs-pose: ", "\"audio: on (%s, HRTF %ls: %u directions)\"",
+                           "\"audio: HRTF %ls not usable (%s); the default set is used\""};
   int missing = 0;
   for (const char* p : phrases)
     if (src.find(p) == std::string::npos) ++missing, printf("     audio phrase missing: %s\n", p);
@@ -1075,6 +1219,8 @@ inline void Run() {
   SwitchesAndFallbacks();
   Config();
   LateHead();
+  TwoOutputs();
+  NoSetNoHooks();
   NoAlloc();
   Phrases();
   Stress();

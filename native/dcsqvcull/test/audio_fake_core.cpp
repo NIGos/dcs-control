@@ -26,6 +26,7 @@ float g_lastAdded[2 * binaural::kMaxFramesPerCall];
 uint32_t g_lastFrames = 0;
 float g_lastMono[binaural::kMaxFramesPerCall];
 float g_lastRadius = 0;
+float g_lastInitRadius = 0;
 }  // namespace audiofake
 
 namespace binaural {
@@ -86,6 +87,7 @@ bool Renderer::Init(const Config& c, char* error, std::size_t errorCapacity) {
   }
   impl_->cfg = c;
   impl_->radius = c.headRadiusM;
+  audiofake::g_lastInitRadius = c.headRadiusM;
   return true;
 }
 void Renderer::SetHrtf(const HrtfSet* s) {

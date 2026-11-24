@@ -283,6 +283,8 @@ struct Binding {
   double calmSeconds = 0;
   int64_t overrunTimes[3] = {};
   int overrunHead = 0;
+  double prevShare = 0;        // our share of the previous block (dspTicks / block duration)
+  uint32_t overrunGen = 0;     // the module's re-arm generation these overrun times belong to
 };
 
 // What one armed device block carries (render thread, set by MixWrap, read by RenderWrap).

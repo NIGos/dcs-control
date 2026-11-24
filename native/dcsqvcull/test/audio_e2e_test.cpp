@@ -104,9 +104,10 @@ void Circle() {
 
   // The same core driven directly: same set, rate, head radius; the same noise (the fake voice's generator, same seed)
   // and the same positions, block by block.
-  const float radius = binaural_config::HeadRadiusFromCircumferenceCm(kCircumferenceCm);
   char err[160] = {};
   binaural::HrtfSet* set = binaural::LoadHrtf(g_set.data(), g_set.size() * 4, kRate, err, sizeof(err));
+  // The head radius the module gives the core: the set's own fitted radius scaled by the circumference (57 cm: 1).
+  const float radius = binaural_config::PilotItdRadiusM(set ? binaural::DescribeHrtf(set).datasetHeadRadiusM : 0.0f, kCircumferenceCm);
   auto direct = std::make_unique<binaural::Renderer>();
   binaural::Config cc;
   cc.sampleRate = kRate;
@@ -228,7 +229,7 @@ void Circle() {
         "audio e2e: through ed_sound's call sites, the hooked output's ITD / ILD trajectory is the core's own (same "
         "signal and positions driven directly): within 10 us and 0.25 dB in every 80 ms window");
   Check(worstItdWood <= 30e-6 && std::fabs(right.itd - side) <= 30e-6 && std::fabs(left.itd + side) <= 30e-6,
-        "audio e2e: the ITD follows Woodworth for the configured head (57 cm, r = 9.07 cm) all around the head, "
+        "audio e2e: the ITD follows Woodworth for the configured head (57 cm: the set's own 8.75 cm head) all around the head, "
         "within 30 us (about +-680 us at the sides)");
   Check(signs, "audio e2e: a source on the right leads at the right ear and is louder there, on the left the "
                "opposite (every window more than 9 degrees off the median plane)");

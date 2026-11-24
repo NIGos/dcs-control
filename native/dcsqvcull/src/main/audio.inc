@@ -30,7 +30,11 @@ std::atomic<void*> g_newRenderer{nullptr};  // render thread -> control thread: 
 std::atomic<bool> g_userOff{false};       // kill switch (toggle_audio.flag / [Hotkeys] AudioToggle)
 std::atomic<bool> g_stopping{false};      // Stop is fading everything back before the sites are restored
 enum OffReason : int { kOffNone = 0, kOffOverruns = 1, kOffPanLaw = 2 };
-std::atomic<int> g_offReason{kOffNone};   // binaural off for the rest of the DCS session
+std::atomic<int> g_offReason{kOffNone};   // binaural off for the rest of the DCS session (overruns: until re-armed)
+std::atomic<uint32_t> g_overrunGen{0};    // bumped when the overrun stop is re-armed (bindings drop their overrun times)
+// The renderer the world's 3D sounds play on (control thread picks it from audsim's counts, MixWrap reads it).
+std::atomic<void*> g_worldRenderer{nullptr};
+constexpr double kLiveBindingS = 0.2;     // a binding whose renderer delivered a block within this is in use
 std::atomic<dcsvr_headpose::Block*> g_pose{nullptr};
 std::atomic<uint32_t> g_selfPid{0};       // the pose block's writer must be this process (set by Start)
 thread_local audr::Block* t_block = nullptr;
@@ -65,15 +69,18 @@ inline void WriteRt(const Rt& r) {
   std::atomic_thread_fence(std::memory_order_release);
   g_rt.seq.store(q + 2, std::memory_order_release);
 }
+// Each reading thread keeps its last good copy: a writer preempted between its two stores must not switch binaural
+// off for a frame (that would release every owned voice and fade it back in with a new generation).
+thread_local Rt t_rtLast;
 inline Rt ReadRt() {
   for (int i = 0; i < 64; ++i) {
     const uint32_t a = g_rt.seq.load(std::memory_order_acquire);
     if (a & 1u) continue;
     Rt r = g_rt.d;
     std::atomic_thread_fence(std::memory_order_acquire);
-    if (g_rt.seq.load(std::memory_order_relaxed) == a) return r;
+    if (g_rt.seq.load(std::memory_order_relaxed) == a) return t_rtLast = r;
   }
-  return Rt{};  // a writer kept the slot busy: off for this block / frame
+  return t_rtLast;  // a writer kept the slot busy: this thread's last good copy
 }
 
 // Test overrides (production: null).
@@ -226,8 +233,16 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
   g_cnt.blocks.fetch_add(1, std::memory_order_relaxed);
   audr::Binding* b = g_binding.load(std::memory_order_acquire);
   if (!b || b->renderer != rend || b->retired.load(std::memory_order_relaxed)) {
-    if (g_installed.load(std::memory_order_relaxed) && (!b || b->renderer != rend))
-      g_newRenderer.store(rend, std::memory_order_release);
+    // Another renderer (DCS's second output, options.lua sound.hp_output, has its own thread calling here): the control
+    // thread is told only when it could be the one to bind: nothing bound, the bound one stopped delivering blocks, or
+    // this one carries the world's 3D sounds. Two live outputs never take turns.
+    if (g_installed.load(std::memory_order_relaxed) && (!b || b->renderer != rend)) {
+      bool ask = !b || b->retired.load(std::memory_order_relaxed) || rend == g_worldRenderer.load(std::memory_order_relaxed);
+      if (!ask)
+        ask = static_cast<double>(Qpc() - b->lastUseQpc.load(std::memory_order_relaxed)) >
+              kLiveBindingS * static_cast<double>(QpcFreq());
+      if (ask) g_newRenderer.store(rend, std::memory_order_release);
+    }
     g_res.mix(rend, out, frames);
     return;
   }
@@ -275,7 +290,20 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
   g_cnt.armedBlocks.fetch_add(1, std::memory_order_relaxed);
   g_cnt.activeLastBlock.store(blk.hrtfVoices, std::memory_order_relaxed);
   audr::BudgetTick(*b, g_cnt, g_ev, {rt.cpuBudget, rt.maxObjects}, frames, blk.dspTicks, now, freq);
-  if (audr::OverrunTick(*b, blk.hrtfVoices > 0, now, freq)) {
+  // ED's overrun counter counts any slow block, ours or not (a system or DCS hitch). An overrun is held against binaural
+  // only when our own work took a real share of this block or the one before (half the CPU budget or more); our usual
+  // cost (a few percent of a block) never stops it for somebody else's hitch.
+  const double share =
+      static_cast<double>(blk.dspTicks) / static_cast<double>(freq) / (static_cast<double>(frames) / static_cast<double>(b->rate));
+  const double ours = 0.5 * rt.cpuBudget / 100.0;
+  const bool attributable = blk.hrtfVoices > 0 && (share >= ours || b->prevShare >= ours);
+  b->prevShare = share;
+  const uint32_t og = g_overrunGen.load(std::memory_order_relaxed);
+  if (b->overrunGen != og) {  // re-armed (kill switch, Live Binaural): earlier overruns no longer count
+    b->overrunGen = og;
+    memset(b->overrunTimes, 0, sizeof(b->overrunTimes));
+  }
+  if (audr::OverrunTick(*b, attributable, now, freq)) {
     g_cnt.overruns.fetch_add(1, std::memory_order_relaxed);
     int none = kOffNone;
     if (g_offReason.compare_exchange_strong(none, kOffOverruns)) g_ev.Push({audr::kEvOverrunsOff, 3, 0, 0});
@@ -295,6 +323,15 @@ void LogOff(const std::string& why) {
   Log("audio: off (%s)", why.c_str());
 }
 void LogOn() { g_offText.clear(); }
+
+// The binaural stop for DCS's overruns is for the session, unless the pilot asks for it again (kill switch back on, or
+// Binaural back to 1 in the settings). The pan-law stop stays (the output does not follow the pan law it measures).
+bool RearmOverruns() {
+  int over = kOffOverruns;
+  if (!g_offReason.compare_exchange_strong(over, kOffNone)) return false;
+  g_overrunGen.fetch_add(1, std::memory_order_acq_rel);
+  return true;
+}
 
 bool Install() {
   const uint8_t* base = EdBase();
@@ -388,6 +425,10 @@ std::wstring g_hrtfRequested;                  // the last [Audio] Hrtf value ac
 std::wstring g_cfgIni;
 FILETIME g_cfgTime{}, g_cfgDevTime{};  // the effective ini's and the deployed ini's write times
 void* g_rejectedRenderer = nullptr;
+const binaural::HrtfSet* g_curSet = nullptr;   // the set the current binding's core was last given
+// The renderer choice (WorldTick): the busiest renderer of the world's 3D sounds, adopted after 2 s in a row.
+void* g_worldCandidate = nullptr;
+int g_worldSeconds = 0;
 
 bool HrtfBytes(const std::wstring& name, std::vector<uint8_t>* out, std::string* why) {
   if (g_testHrtf) {
@@ -464,6 +505,41 @@ binaural::HrtfSet* SetFor(std::wstring name, uint32_t rate, std::string* why, st
   return nullptr;
 }
 
+// A set to render with exists (the named one, or the generic one it falls back to). Checked before ed_sound is patched.
+bool HrtfReady(const std::wstring& name, std::string* why) {
+  std::vector<uint8_t> bytes;
+  std::string w;
+  if (name != binaural_config::kDefaultHrtfName && HrtfBytes(name, &bytes, &w)) return true;
+  if (HrtfBytes(binaural_config::kDefaultHrtfName, &bytes, &w)) return true;
+  *why = w;
+  return false;
+}
+
+// Once a second: the renderer most of the world's 3D sounds played on in the last second (audsim's counts), adopted as
+// g_worldRenderer when it led two seconds in a row. Entries unseen for a second are dropped.
+void WorldTick() {
+  void* best = nullptr;
+  uint32_t bestN = 0;
+  for (audsim::Sim::RendCount& rc : g_sim.world) {
+    const void* r = rc.rend.load(std::memory_order_relaxed);
+    const uint32_t n = rc.n.exchange(0, std::memory_order_relaxed);
+    if (!r) continue;
+    if (!n) {
+      rc.rend.store(nullptr, std::memory_order_relaxed);
+      continue;
+    }
+    if (n > bestN) best = const_cast<void*>(r), bestN = n;
+  }
+  if (!best) return;
+  g_worldSeconds = best == g_worldCandidate ? g_worldSeconds + 1 : 1;
+  g_worldCandidate = best;
+  if (g_worldSeconds >= 2 && g_worldRenderer.load() != best) {
+    g_worldRenderer.store(best, std::memory_order_release);
+    audr::Binding* b = g_binding.load();
+    if (b && b->renderer != best) g_newRenderer.store(best, std::memory_order_release);  // bind it (it may be quiet now)
+  }
+}
+
 bool ReadRenderer(void* rend, double* rate, uint32_t* ch, double z[2], bool lfe[2], float w3d[2][2]) {
   __try {
     const uint8_t* r = static_cast<const uint8_t*>(rend);
@@ -517,7 +593,7 @@ void Bind(void* rend) {
   binaural::Config cc;
   cc.sampleRate = static_cast<uint32_t>(rate);
   cc.maxSources = binaural::kMaxSources;
-  cc.headRadiusM = binaural_config::HeadRadiusFromCircumferenceCm(c.headCircumferenceCm);
+  cc.headRadiusM = binaural_config::PilotItdRadiusM(audr::CoreDescribe(set).datasetHeadRadiusM, c.headCircumferenceCm);
   cc.nearField = c.nearField;
   char err[160] = {};
   if (!core || !audr::CoreInit(core, cc, err, sizeof(err))) {
@@ -527,6 +603,7 @@ void Bind(void* rend) {
     return;
   }
   audr::CoreSetHrtf(core, set);
+  g_curSet = set;
   auto* b = new audr::Binding();
   b->renderer = rend;
   b->rate = static_cast<uint32_t>(rate);
@@ -554,6 +631,14 @@ void Bind(void* rend) {
   LogOn();
   Log("audio: on (%.0f Hz stereo, HRTF %ls: %u directions, head radius %.1f cm, near field %s, at most %d sounds)", rate,
       used.c_str(), info.directions, cc.headRadiusM * 100.0, c.nearField ? "on" : "off", c.maxObjects);
+}
+
+// "audio: on (<why>, HRTF <name>: <n> directions)" when binaural works again on the same binding (the app reads any
+// "on (" line as running again).
+void LogOnAgain(const char* why) {
+  if (!g_binding.load() || !g_curSet) return;
+  LogOn();
+  Log("audio: on (%s, HRTF %ls: %u directions)", why, g_hrtfName.c_str(), audr::CoreDescribe(g_curSet).directions);
 }
 
 void FreeBinding(audr::Binding* b) {
@@ -617,9 +702,7 @@ void ReadConfig(bool force) {
         c.levelTrimDb, c.cpuBudgetPercent, c.excludeContextMask, c.logVoices ? 1 : 0);
   // Live changes the core takes directly (each ramps inside the next block).
   if (audr::Binding* b = g_binding.load()) {
-    if (first || prev.headCircumferenceCm != c.headCircumferenceCm)
-      audr::CoreSetHeadRadius(b->core, binaural_config::HeadRadiusFromCircumferenceCm(c.headCircumferenceCm));
-    if (first || prev.nearField != c.nearField) audr::CoreSetNearField(b->core, c.nearField);
+    bool newSet = false;
     if (c.hrtf != g_hrtfRequested) {
       g_hrtfRequested = c.hrtf;
       std::string why;
@@ -627,13 +710,23 @@ void ReadConfig(bool force) {
       binaural::HrtfSet* set = SetFor(c.hrtf, b->rate, &why, &used);
       if (set && used != g_hrtfName) {
         audr::CoreSetHrtf(b->core, set);
+        g_curSet = set;
+        newSet = true;
         g_hrtfName = used;
         Log("audio: HRTF %ls (crossfading)", used.c_str());
       }
     }
+    // The head size is relative to the set's own measured head (binaural_config.h PilotItdRadiusM): set again for a new
+    // circumference or a new set.
+    if ((first || newSet || prev.headCircumferenceCm != c.headCircumferenceCm) && g_curSet)
+      audr::CoreSetHeadRadius(b->core, binaural_config::PilotItdRadiusM(audr::CoreDescribe(g_curSet).datasetHeadRadiusM, c.headCircumferenceCm));
+    if (first || prev.nearField != c.nearField) audr::CoreSetNearField(b->core, c.nearField);
   }
   if (!c.binaural && !first && prev.binaural) LogOff("binaural is off in the settings");
-  if (c.binaural && g_binding.load() && !prev.binaural && !first) LogOn();
+  if (c.binaural && !prev.binaural && !first) {
+    RearmOverruns();
+    LogOnAgain("re-enabled in the settings");
+  }
 }
 
 // ---- control thread: the loop ----------------------------------------------------------------------------------------
@@ -784,7 +877,7 @@ void PoseTick() {
 }
 
 struct Loop {
-  ULONGLONG lastFlag = 0, lastStats = 0, lastCtx = 0, lastDiag = 0, lastVoices = 0, lastInstall = 0, lastCfg = 0;
+  ULONGLONG lastFlag = 0, lastStats = 0, lastCtx = 0, lastDiag = 0, lastVoices = 0, lastInstall = 0, lastCfg = 0, lastWorld = 0;
   bool keyWas = false;
   uint64_t statsHrtf = 0, statsPose = 0;
 };
@@ -794,6 +887,7 @@ void ToggleUser(const char* by) {
   const bool off = !g_userOff.load();
   g_userOff.store(off);
   Log("audio: kill switch (%s): binaural %s", by, off ? "OFF (DCS's own panning)" : "ON");
+  if (!off && RearmOverruns()) LogOnAgain("re-armed by the kill switch after DCS's overruns");
 }
 
 void ControlTick() {
@@ -806,14 +900,27 @@ void ControlTick() {
   const binaural_config::AudioConfig& c = g_cfgRead.cfg;
   if (c.binaural && g_hookState.load() == 0 && now - L.lastInstall >= 2000) {
     L.lastInstall = now;
-    if (Install()) LogContexts();
+    // ed_sound is patched only when there is a set to render with: the generic one in this build, or the pilot's own.
+    std::string why;
+    if (!HrtfReady(c.hrtf, &why)) LogOff("no HRTF set: " + why);
+    else if (Install()) LogContexts();
   }
   PoseTick();
+  if (now - L.lastWorld >= 1000) {
+    L.lastWorld = now;
+    WorldTick();
+  }
   if (void* rend = g_newRenderer.exchange(nullptr)) {
-    // A renderer refused once is looked at again every 5 s (or after a settings change), not at every block.
+    // A renderer refused once is looked at again every 5 s (or after a settings change), not at every block. While the
+    // bound renderer delivers blocks, another one is bound only when the world's 3D sounds play on it (it is then the
+    // main output and the bound one the headphones / radio output), or to validate the bound one again.
     static ULONGLONG lastRejectedTry = 0;
     const bool retry = rend != g_rejectedRenderer || now - lastRejectedTry >= 5000;
-    if (g_installed.load() && c.binaural && retry) {
+    audr::Binding* cur = g_binding.load();
+    const bool curLive = cur && !cur->retired.load() &&
+                         static_cast<double>(Qpc() - cur->lastUseQpc.load()) <= kLiveBindingS * static_cast<double>(QpcFreq());
+    const bool wanted = !curLive || rend == cur->renderer || rend == g_worldRenderer.load();
+    if (g_installed.load() && c.binaural && retry && wanted) {
       if (rend == g_rejectedRenderer) lastRejectedTry = now;
       Bind(rend);
     }
@@ -913,7 +1020,7 @@ void Start() {
   g_thread = CreateThread(nullptr, 0, qvexit::Thread<AudioThread>, nullptr, 0, nullptr);
 }
 
-void JoinThread(DWORD ms) {
+bool JoinThread(DWORD ms) {
   g_quit = true;
   if (g_thread) {
     if (WaitForSingleObject(g_thread, ms) == WAIT_OBJECT_0) {
@@ -921,14 +1028,22 @@ void JoinThread(DWORD ms) {
       g_thread = nullptr;
     } else {
       Log("audio: control thread did not stop within %lu ms", ms);
+      return false;
     }
   }
+  return true;
 }
 
 // Payload stop (hot reload, Stop): fade back, restore the sites, stop the thread. Bindings are freed only when no
 // wrapper call is in flight (an old payload stays mapped, so its code stays callable either way).
 void Stop() {
-  JoinThread(3000);
+  if (!JoinThread(3000)) {
+    // Still inside a load, a Bind or Install (it may hold ED's mutex or be using g_sets): nothing here is touched or
+    // freed (a leak, never a use after free). The sites keep calling this payload, which stays mapped; the next
+    // payload's Resolve accepts these thunks and takes the sites over.
+    audr::g_status.store(0);
+    return;
+  }
   if (g_installed.load()) Uninstall(400);
   if (g_inflight.load() == 0 && !g_installed.load()) {
     if (audr::Binding* b = g_binding.exchange(nullptr)) FreeBinding(b);

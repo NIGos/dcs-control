@@ -51,6 +51,30 @@ struct Sim {
   // ranking scratch (no allocation)
   Rec* cand[Owner::kRecCap];
   Rec* ownedSeen[Owner::kRecCap];
+  // The renderers the world's 3D sounds play on, counted per panner call (sim thread adds, the control thread reads and
+  // clears): with a second DCS output (options.lua sound.hp_output) the module binds the one these sounds use, never
+  // the headphones / radio output. Entries are claimed lock-free; a lost count between a read and a clear is harmless.
+  struct RendCount {
+    std::atomic<const void*> rend{nullptr};
+    std::atomic<uint32_t> n{0};
+  };
+  static constexpr int kRendCounts = 4;
+  RendCount world[kRendCounts];
+  void CountWorld(const void* rnd) {
+    if (!rnd) return;
+    for (RendCount& c : world)
+      if (c.rend.load(std::memory_order_relaxed) == rnd) {
+        c.n.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    for (RendCount& c : world) {
+      const void* expect = nullptr;
+      if (c.rend.compare_exchange_strong(expect, rnd, std::memory_order_relaxed) || expect == rnd) {
+        c.n.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
+  }
 
   void Reset() {
     own.Reset();
@@ -59,6 +83,10 @@ struct Sim {
     winStart = 0;
     winSolves = winMismatch = 0;
     panLawTripped = false;
+    for (RendCount& c : world) {
+      c.rend.store(nullptr, std::memory_order_relaxed);
+      c.n.store(0, std::memory_order_relaxed);
+    }
     if (meta)
       for (int s = 0; s < kSlots; ++s) {
         meta->voice[s].store(nullptr, std::memory_order_release);
@@ -280,6 +308,9 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   if (!r) return;
   r->sound = sound;
   r->lastFrame = o.frame;
+  // Which output the world's 3D sounds use (counted whether binaural is on or not: the binding is chosen by it).
+  if (sound && Rd<uint64_t>(sound, off::kSndIs3D) != 0 && Rd<uint8_t>(voice, off::kVCtx2d) == 0)
+    s.CountWorld(Rd<void*>(voice, off::kVRenderer));
   // Qualification (hook spec 5.1).
   bool q = cfg.on && e.boundRenderer && sound && Rd<void*>(voice, off::kVRenderer) == e.boundRenderer &&
            e.engineState != off::kStateOffline && Rd<uint64_t>(sound, off::kSndIs3D) != 0 &&
