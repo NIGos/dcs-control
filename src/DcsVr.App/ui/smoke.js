@@ -10,7 +10,7 @@ window.runWebSmoke = async function() {
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','frameGenFoveated','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenFoveated','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -289,7 +289,7 @@ window.runWebSmoke = async function() {
       { const b = $('setting-frameGenDeepPipeline').querySelector('.more-toggle'); b.click(); const opened = !$('more-frameGenDeepPipeline').hidden && b.getAttribute('aria-expanded') === 'true' && b.textContent === 'Less';
         b.click(); check('More shows the detail and Less hides it again',opened && $('more-frameGenDeepPipeline').hidden && b.getAttribute('aria-expanded') === 'false' && b.textContent === 'More'); }
       { const b = $('stabilityControls').querySelector('.card-heading .more-toggle'), detail = b && $(b.getAttribute('aria-controls')); b?.click(); const opened = detail && !detail.hidden && detail.textContent.includes('power lines');
-        b?.click(); check('A card subtitle keeps its detail behind More too',opened && detail.hidden && $('stabilityControls').textContent.includes('EXPERIMENTAL')); }
+        b?.click(); check('A card subtitle keeps its detail behind More too',opened && detail.hidden && $('stabilityControls').textContent.includes('Calms shimmering')); }
       $('searchOpen').click(); $('searchInput').value = 'arriving late'; $('searchInput').dispatchEvent(new Event('input'));
       check('Search also finds the words behind More',[...$('searchResults').querySelectorAll('b')].some(b => b.textContent === 'Smoothness buffer')); $('searchDialog').close();
       { const diag = $('setting-showOverlay').closest('details'), value = () => diag.querySelector(':scope > summary > .fold-value').textContent, keys = ['showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm'];
@@ -338,10 +338,9 @@ window.runWebSmoke = async function() {
         check('Card subtitles with more to say keep it behind More'+(bad.length ? ' ('+bad.join(', ')+')' : ''),!bad.length);
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
-      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated',
-          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
-        const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its sixteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+      // 0.7: foveated frame generation and the rest fly well; no setting, card or guide section says experimental any more.
+      { const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL');
+        check('No EXPERIMENTAL tag or experimental wording on any page',!tags.length && !/experimental/i.test($('pages').textContent)); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -381,7 +380,7 @@ window.runWebSmoke = async function() {
         && why({...base,engineOptimizations:false}) === 'Turn on Engine Optimizations to change these.'
         && fs.every(f => f.condition(base) && !f.condition({...base,engineOptimizations:false}))); }
     { const lists = $('setting-engineRecordersEmulatedLists');
-      check('Multi-threaded shadows and G-buffer without driver support: on the Engine page, off by default, hidden on NVIDIA with command lists, not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === false && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
+      check('Multi-threading without driver support: on the Engine page, off by default, hidden on NVIDIA with command lists, not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === false && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
     { const prewarm = $('setting-engineShaderCachePrewarm'), threads = $('setting-engineShaderCompileWorkers');
       check('Shader preparation sits in the Engine page\'s Advanced fold: menu prep on, Auto threads by default, not live',prewarm && threads && prewarm.closest('details') && prewarm.closest('details') === threads.closest('details') && prewarm.closest('details') !== $('setting-engineDevMode').closest('details') && ui.profile.engineShaderCachePrewarm === true && ui.profile.engineShaderCompileWorkers === 0 && !(ui.state?.liveFields || []).some(p => p.startsWith('engineShader')));
       const box = document.createElement('div');
@@ -401,7 +400,7 @@ window.runWebSmoke = async function() {
       press(27); edit('engineOptimizations',was); }
     { const was = {pupilShift:ui.profile.pupilShift, quadViews:ui.profile.quadViews, gaze:ui.profile.gaze, engine:ui.profile.engineOptimizations}; edit('engineOptimizations',true);
       edit('pupilShift',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); ui.navigate('pupil'); const k = $('input-pupilShiftToggleKey');
-      check('Pupil shift has its own page, marked experimental, with its switch as a capture field (Ctrl+Shift+F10)',!$('page-pupil').hidden && $('pupilControls').textContent.includes('EXPERIMENTAL') && $('pupilNeeds').hidden && ui.fields.find(f => f.path === 'pupilShiftToggleKey').type === 'hotkey' && ui.profile.pupilShiftToggleKey === '121:5' && k.textContent === 'Ctrl+Shift+F10');
+      check('Pupil shift has its own page, with its switch as a capture field (Ctrl+Shift+F10)',!$('page-pupil').hidden && $('pupilControls').textContent.includes('Pupil shift') && $('pupilNeeds').hidden && ui.fields.find(f => f.path === 'pupilShiftToggleKey').type === 'hotkey' && ui.profile.pupilShiftToggleKey === '121:5' && k.textContent === 'Ctrl+Shift+F10');
       k.click(); press(122,'as'); check('The pupil shift switch refuses a key another switch uses',k.classList.contains('capturing') && ui.profile.pupilShiftToggleKey === '121:5'); press(27);
       edit('gaze','Fixed'); ui.navigate('pupil'); check('A fixed focus on the Pimax runtime needs nothing: the layer reads the OpenXR eye gaze',$('pupilNeeds').hidden);
       const route = ui.profile.runtime; document.querySelector('#routeSwitch [data-route="SboysSteamVr"]').click(); edit('gaze','Fixed'); ui.navigate('pupil');
@@ -411,7 +410,7 @@ window.runWebSmoke = async function() {
       await new Promise(r => setTimeout(r,300)); check('The pupil shift status reads the log through the bridge',!!$('pupilStatus').querySelector('.engine-state')); }
     { const was = {on:ui.profile.peripheryStability, quadViews:ui.profile.quadViews, strength:ui.profile.peripheryStabilityStrength, neural:ui.profile.neuralRendering, foveated:ui.profile.foveatedDlss}; ui.navigate('foveation');
       const f = ui.fields.find(x => x.path === 'peripheryStabilityStrength');
-      check('Periphery stability is a card on the Quad Views page, off by default, marked experimental',f.page === 'foveation' && $('stabilityControls').textContent.includes('Periphery stability') && $('stabilityControls').textContent.includes('EXPERIMENTAL') && (was.on || f.input.disabled) && ui.fields.find(x => x.path === 'peripheryStability').type === 'toggle');
+      check('Periphery stability is a card on the Quad Views page, off by default',f.page === 'foveation' && $('stabilityControls').textContent.includes('Periphery stability') && (was.on || f.input.disabled) && ui.fields.find(x => x.path === 'peripheryStability').type === 'toggle');
       edit('peripheryStability',true); edit('quadViews','QuadViewsFoveated'); edit('peripheryStabilityStrength','0.25');
       check('With the bundled Quad Views it needs nothing and its strength is editable',$('stabilityNeeds').hidden && !f.input.disabled && ui.profile.peripheryStabilityStrength === 0.25);
       // Pimax native needs DLSS 5 and Foveated DLSS off (they force the bundled provider).
@@ -422,8 +421,8 @@ window.runWebSmoke = async function() {
       check('Depth boost is off by default and its settings wait for it',ui.profile.depthBoost === false && ui.profile.depthBoostMax === 1.4 && ui.profile.depthBoostMode === 'Realistic' && ui.profile.depthBoostRealisticMax === 1.25 && $('input-depthBoostMax').disabled && $('setting-depthBoostMax').classList.contains('inactive') && $('input-depthBoostMode').disabled);
       edit('engineOptimizations',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); edit('pupilShift',true); edit('depthBoost',true); ui.navigate('pupil');
       const k = $('input-depthBoostToggleKey');
-      check('Depth boost has its card on the Perception page, marked experimental, with its switch as a capture field (Alt+Shift+F10)',!$('page-pupil').hidden && $('depthControls')
-        && $('depthControls').closest('#page-pupil') && $('depthControls').textContent.includes('EXPERIMENTAL') && $('depthControls').textContent.includes('landings')
+      check('Depth boost has its card on the Perception page, with its switch as a capture field (Alt+Shift+F10)',!$('page-pupil').hidden && $('depthControls')
+        && $('depthControls').closest('#page-pupil') && $('depthControls').textContent.includes('landings')
         && ui.fields.find(f => f.path === 'depthBoostToggleKey').type === 'hotkey' && ui.profile.depthBoostToggleKey === '121:6' && k.textContent === 'Alt+Shift+F10' && !$('input-depthBoostRealisticMax').disabled && $('input-depthBoostMax').disabled);
       k.click(); press(121,'cs'); check('The Depth boost switch refuses the pupil shift switch',k.classList.contains('capturing') && ui.profile.depthBoostToggleKey === '121:6'); press(27);
       check('No transition choice or transition key: the dual camera only moves the depth smoothly',!$('input-depthBoostTransition') && !$('input-depthBoostTransitionKey') && !$('input-ownAircraftTrueDepth').disabled && ui.profile.ownAircraftTrueDepth === true);

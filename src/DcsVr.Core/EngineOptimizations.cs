@@ -196,7 +196,7 @@ public static class EngineOptimizations
     public static bool AmdOnly(IReadOnlyList<GpuAdapter> adapters) =>
         adapters.Any(a => a.Vendor == "AMD") && !adapters.Any(a => a.Vendor == "NVIDIA");
 
-    /// <summary>The Engine page shows "Multi-threaded shadows and G-buffer without driver support" only where it can matter:
+    /// <summary>The Engine page shows "Multi-threading without driver support" only where it can matter:
     /// the GPU is AMD, or the latest module log says DriverCommandLists=0, or it is already on (so it can be turned off).
     /// Hidden on NVIDIA with command lists. The interface applies the same rule (app.js, engineRecordersEmulatedLists).</summary>
     public static bool ShowsEmulatedListsOption(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists, bool on) =>
@@ -218,7 +218,7 @@ public static class EngineOptimizations
             return start + $"The cause: NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. {mfaa.Fix}, then start DCS again.";
         if (GpuInfo.Adapters().Any(a => a.Vendor == "NVIDIA"))
             return start + "NVIDIA cards have them, so check in NVIDIA Control Panel (Global settings and the DCS World program) that Antialiasing - MFAA is Off, that DCS runs on the NVIDIA card and not on integrated graphics, and that no other program wraps DCS's graphics (ReShade, Special K, overlays).";
-        return start + "This graphics driver does not offer them (common on AMD cards). Multi-threaded shadows and G-buffer without driver support, on this page, runs them anyway, with a smaller gain.";
+        return start + "This graphics driver does not offer them (common on AMD cards). Multi-threading without driver support, on this page, runs them anyway, with a smaller gain.";
     }
     private static string Capabilities(string line) =>
         string.Join(", ", System.Text.RegularExpressions.Regex.Matches(line, @"(DriverCommandLists|ConstantBufferOffsetting|ID3D11DeviceContext1)=0").Select(m => m.Groups[1].Value + " missing")) is { Length: > 0 } list ? list : "see DcsQvCull.log";
