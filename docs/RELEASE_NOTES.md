@@ -11,7 +11,7 @@
 - Quad Views uses a fixed focus in the centre (the Quest 3 has no eye tracking), 55% × 75% of the view to start with, so the instruments stay sharp.
 - Frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off.
 - Refresh rate 72, 80, 90 or 120 Hz, as set in Virtual Desktop. Keep Synchronous Spacewarp off there; Checks reminds you.
-- DLSS 5 and foveated frame generation are offered but not yet flown on this route. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
+- The route is new: DLSS 5 and foveated frame generation are offered but have had less testing on it, so feedback on GitHub is very welcome. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
 
 **Hide the focus edge.** On by default, in the Focus area card of the Quad Views page, and it applies in flight. When you look somewhere else, the short flash at the edge of the focus area is much smaller.
 - Its parts are under **Fine-tune**: Smooth small moves (eye jumps are never delayed), Soft focus edge, Fade in, Steady periphery through eye jumps, and Match brightness (and color) at the edge. Fade in and the matching need foveated frame generation.
@@ -49,7 +49,7 @@
 
 **Lighter pages.** Each card shows its main settings; the rest are in folds whose closed line says what is set ("14 of 14 on", "Defaults"). Texts are shorter and plainer on every page, and experimental settings carry an **EXPERIMENTAL** tag.
 
-**Both eyes at once (experimental).** Off by default, under Advanced on the Frame generation page. Each eye's generated frame is made on its own GPU queue, so it is ready about 1 ms sooner, with the same image. Not flown yet.
+**Both eyes at once (experimental).** Off by default, under Advanced on the Frame generation page. Each eye's generated frame is made on its own GPU queue, so it is ready about 1 ms sooner, with the same image. It has had less testing than the rest.
 
 **Match brightness for DLSS 5.** Off by default, in Advanced image controls on the DLSS page. It keeps the DLSS 5 area as bright as the view around it. In a test flight the darker disc some setups show became much fainter but did not go away.
 
