@@ -100,8 +100,11 @@ New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
 # DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
 # them (the terrain prefetch fix included), and the pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in
 # the profile folder when the profile enables it. Built on every release so a stale DLL can never ship; collected below.
+# BinauralCore (scripts/build-binaural.ps1), the HRTF renderer the engine payload links, is built and tested beside them:
+# its harness (A1-A14 of docs/BINAURAL_AUDIO.md) runs only here, the payload build compiles the same sources.
 if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
-$nativeBuilds = @((Start-NativeBuild 'dcsqvcull' 'build-dcsqvcull.ps1'), (Start-NativeBuild 'pupil-shift' 'build-pupil-shift.ps1'))
+$nativeBuilds = @((Start-NativeBuild 'dcsqvcull' 'build-dcsqvcull.ps1'), (Start-NativeBuild 'pupil-shift' 'build-pupil-shift.ps1'),
+    (Start-NativeBuild 'binaural' 'build-binaural.ps1'))
 # A release that stops before collecting them stops them too.
 trap { if ($nativeBuilds) { $nativeBuilds.Job | Where-Object State -eq 'Running' | Stop-Job -ErrorAction SilentlyContinue }; break }
 # The launcher at the top of the release folder (starts files\DcsControl.exe); the interface render below uses it too.

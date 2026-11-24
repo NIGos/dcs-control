@@ -1,11 +1,10 @@
-// Test-only stand-in for BinauralCore (native/binaural/include/binaural_core.h), linked into DcsQvCullTests until the
-// real core (task A) is merged; the integrator may keep it for the module's own tests (they check the module, not the
-// DSP). Behaviour: an equal-power left/right pan from the source's position (z right), the call's gain, interpolated
-// linearly across each call from the previous call's state (kReset: no interpolation), added with the ownership weight
-// w0 -> w1. Same thread rules and refusals as the contract (frames > kMaxFramesPerCall, slot out of range, no set).
-//
-// Also the allocation counter of the audio tests: operator new / delete counted on threads that set
-// audiofake::t_rtThread (the tests' simulation and render threads).
+// Test-only stand-in for BinauralCore (native/binaural/include/binaural_core.h), linked into DcsQvCullTests: the
+// module's own tests check the module (ownership, fades, fallbacks, refusals), not the DSP, and need a core whose
+// output they can predict and whose refusals and slowness they control. The real core is linked into the payload and
+// into DcsQvCullAudioE2ETests (audio_e2e_test.cpp). Behaviour: an equal-power left/right pan from the source's position
+// (z right), the call's gain, interpolated linearly across each call from the previous call's state (kReset: no
+// interpolation), added with the ownership weight w0 -> w1. Same thread rules and refusals as the contract (frames >
+// kMaxFramesPerCall, slot out of range, no set). The allocation counter is in audio_rt_alloc.cpp.
 #include <windows.h>
 
 #include <atomic>
@@ -19,8 +18,6 @@
 #include "binaural_core.h"
 
 namespace audiofake {
-thread_local bool t_rtThread = false;
-std::atomic<uint64_t> g_rtAllocs{0};
 std::atomic<bool> g_refuse{false};
 std::atomic<uint32_t> g_spinUs{0};
 std::atomic<uint64_t> g_renders{0}, g_resets{0}, g_setHrtf{0}, g_setRadius{0}, g_setNear{0}, g_begin{0}, g_end{0};
@@ -30,35 +27,6 @@ uint32_t g_lastFrames = 0;
 float g_lastMono[binaural::kMaxFramesPerCall];
 float g_lastRadius = 0;
 }  // namespace audiofake
-
-void* operator new(size_t n) {
-  if (audiofake::t_rtThread) audiofake::g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-  if (void* p = malloc(n ? n : 1)) return p;
-  throw std::bad_alloc();
-}
-void* operator new[](size_t n) {
-  if (audiofake::t_rtThread) audiofake::g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-  if (void* p = malloc(n ? n : 1)) return p;
-  throw std::bad_alloc();
-}
-void* operator new(size_t n, const std::nothrow_t&) noexcept {
-  if (audiofake::t_rtThread) audiofake::g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-  return malloc(n ? n : 1);
-}
-void* operator new[](size_t n, const std::nothrow_t&) noexcept {
-  if (audiofake::t_rtThread) audiofake::g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-  return malloc(n ? n : 1);
-}
-void operator delete(void* p) noexcept {
-  if (p && audiofake::t_rtThread) audiofake::g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-  free(p);
-}
-void operator delete[](void* p) noexcept {
-  if (p && audiofake::t_rtThread) audiofake::g_rtAllocs.fetch_add(1, std::memory_order_relaxed);
-  free(p);
-}
-void operator delete(void* p, size_t) noexcept { operator delete(p); }
-void operator delete[](void* p, size_t) noexcept { operator delete[](p); }
 
 namespace binaural {
 

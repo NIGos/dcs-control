@@ -14,11 +14,8 @@ if ($LASTEXITCODE -ne 0) { throw 'A [Perception] key is dead with Engine Optimiz
 & (Join-Path $PSScriptRoot 'check-written-keys.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never reads (check-written-keys.ps1).' }
 $build = Join-Path $workspaceRoot 'artifacts/native/dcsqvcull'
-# Binaural audio: the payload links BinauralCore when DCSQV_BINAURAL_CORE_LIB names its .lib (native/binaural); without
-# it the audio module builds and stays off ("audio: off (this build has no binaural renderer)").
-$binauralArgs = @()
-if ($env:DCSQV_BINAURAL_CORE_LIB) { $binauralArgs = @("-DDCSQV_BINAURAL_CORE_LIB=$($env:DCSQV_BINAURAL_CORE_LIB)") }
-& $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release @binauralArgs
+# Binaural audio: the payload compiles BinauralCore from native/binaural/src (its own harness: scripts/build-binaural.ps1).
+& $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull configuration failed.' }
 & $wrapper cmake --build $build --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull build failed.' }
@@ -40,7 +37,8 @@ foreach ($name in @($testEnvironment.Keys)) {
     if (-not $callerEnvironment[$name] -and ($name -ne 'DCSVR_QV_DLL' -or (Test-Path -LiteralPath $testEnvironment[$name]))) { Set-Item "env:$name" $testEnvironment[$name] }
 }
 try {
-    $testSources = @((Join-Path $workspaceRoot 'native/dcsqvcull/test'), (Join-Path $workspaceRoot 'native/dcsqvcull/lua'), (Join-Path $workspaceRoot 'native/dcsqvcull/CMakeLists.txt'))
+    $testSources = @((Join-Path $workspaceRoot 'native/dcsqvcull/test'), (Join-Path $workspaceRoot 'native/dcsqvcull/lua'), (Join-Path $workspaceRoot 'native/dcsqvcull/CMakeLists.txt'),
+        (Join-Path $workspaceRoot 'native/binaural/src'), (Join-Path $workspaceRoot 'native/binaural/include'), (Join-Path $workspaceRoot 'native/binaural/test'))
     foreach ($name in @($testEnvironment.Keys)) { if ([Environment]::GetEnvironmentVariable($name)) { $testSources += [Environment]::GetEnvironmentVariable($name) } }
     $testFingerprint = Get-NativeTestFingerprint $build $testSources
     if (-not (Test-NativeTestsCurrent $build $testFingerprint)) {
