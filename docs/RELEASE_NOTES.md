@@ -2,16 +2,17 @@
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.
 
-**Foveated frame generation.** A new switch on the Frame generation page, off by default. The focus area and the rest of the view get their generated frames separately: about half the GPU time for generated frames, and 4 GB less video memory on the test PC. The two are joined into one image before the headset gets it, so there is no line or flicker at the edge of the focus area (about 0.13 ms of GPU per frame). It helps most with a small focus area; with a very large one it can cost more than it saves. It needs bundled Quad Views, NVIDIA frame generation and the Pimax or Quest 3 VD route. It gets ready on the loading screen, which pauses once for half a second, so the flight starts with only a short hitch.
+**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. The focus area and the rest of the view get their generated frames separately: about half the GPU time for generated frames, and 4 GB less video memory on the test PC. The two are joined into one image before the headset gets it, so there is no line or flicker at the edge of the focus area (about 0.13 ms of GPU per frame). It helps most with a small focus area; with a very large one it can cost more than it saves. It needs bundled Quad Views, NVIDIA frame generation and the Pimax or Quest 3 VD route. It gets ready on the loading screen, which pauses once for half a second, so the flight starts with only a short hitch.
 
 **Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop (VDXR). Contributed by @Mav87th (GitHub PR #29), who flew it with an RTX 5070 Ti. The Quest 3 has no eye tracking, so Quad Views uses a fixed focus in the centre, 55% × 75% of the view to start with, which keeps the instruments sharp. Frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off. The refresh rate is 72, 80, 90 or 120 Hz, as set in Virtual Desktop. Keep Synchronous Spacewarp off in Virtual Desktop; Checks reminds you. DLSS 5 and foveated frame generation are offered but not yet flown on this route. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
 
-**Hide the focus edge.** On by default, in the Focus area card of the Quad Views page, and it applies in flight. When you look somewhere else, the short flash at the edge of the focus area is much smaller. Its parts are under Fine-tune: smooth small moves (eye jumps are never delayed), fade in, steady periphery through eye jumps, and match brightness (and color) at the edge; fade in and the matching work with foveated frame generation. With DLSS 5, Local tone 0 removes most of what is left, at the cost of some local contrast.
+**Hide the focus edge.** On by default, in the Focus area card of the Quad Views page, and it applies in flight. When you look somewhere else, the short flash at the edge of the focus area is much smaller. Its parts are under Fine-tune: smooth small moves (eye jumps are never delayed), soft focus edge, fade in, steady periphery through eye jumps, and match brightness (and color) at the edge; fade in and the matching work with foveated frame generation. With DLSS 5, Local tone 0 removes most of what is left, at the cost of some local contrast.
 
 **Eye-tracking options from @Heartbreak-1 (GitHub PR #26).**
-- **Soft focus edge** (off by default): in the edge band the focus area first drops to the periphery's resolution, then fades out, so the ring around where you look is harder to see. It works with foveated frame generation too.
-- **Stay ahead until your eyes land** (on by default): during a fast eye movement the focus area stays ahead of your eyes until they land.
-- **Slide back when tracking is lost** (on by default): when the eye tracker loses your eyes for more than a moment, the focus area slides to the centre over 150 ms instead of jumping.
+- **Soft focus edge** (experimental, off by default): in the edge band the focus area first drops to the periphery's resolution, then fades out, so the ring around where you look is harder to see. It works with foveated frame generation too.
+- Soft focus edge is now under Focus area > Hide the focus edge > Fine-tune, and is off while Hide the focus edge is off.
+- **Stay ahead until your eyes land** (experimental, on by default): during a fast eye movement the focus area stays ahead of your eyes until they land.
+- **Slide back when tracking is lost** (experimental, on by default): when the eye tracker loses your eyes for more than a moment, the focus area slides to the centre over 150 ms instead of jumping.
 - These two join Focus ahead of fast eye movements and Steady focus while looking in a new **Eye-tracking options** fold. All four work with frame generation.
 
 **Go back to the previous version.** If an update gives you trouble, **Go back** (Help & support, under Updates) puts DCS back to stock, installs the version you had before from its own signed setup, and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again on its own; **Check now** still shows it.
@@ -33,18 +34,18 @@
 
 **A stuck DCS shows on every page (GitHub #21).** 0.6.6 showed a DCS left in the background on the Overview only. Now the status at the top of every page says **DCS has no window**, **DCS is not responding** or **DCS has crashed** (its crash window is still open), with **End DCS** next to it. A crashed DCS used to count as running and kept the app waiting. The app keeps watching while it is minimised, so you are told as soon as you open it. A DCS without a window is now pointed out after a minute instead of half a minute, so one that is only slow to close is left alone.
 
-**GPU savings on the Engine Optimizations page.** A new fold with Cache distant shadows, Faster terrain and shader paths and two new switches, both off by default:
+**GPU savings on the Engine Optimizations page.** A new fold with Cache distant shadows, Faster terrain and shader paths and two new experimental switches, both off by default:
 - **Skip hidden water**: DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late.
 - **Skip unused effects**: skips water shading that changes nothing, and the heat-haze passes when nothing is hot. Same image, small saving (about 0.2 ms over open sea).
 - **Faster terrain and shader paths** stays on by default and gives the same image. It can now be turned off, so a problem like GitHub #28 can be ruled in or out.
 
-**Both eyes at once.** Off by default, on the Frame generation page. Each eye's generated frame is made on its own GPU queue, so generated frames are ready about 1 ms sooner, with the same image. Not flown yet.
+**Both eyes at once (experimental).** Off by default, under Advanced on the Frame generation page. Each eye's generated frame is made on its own GPU queue, so generated frames are ready about 1 ms sooner, with the same image. Not flown yet.
 
 **Match brightness for DLSS 5.** Off by default, in Advanced image controls on the DLSS page. It keeps the DLSS 5 area as bright as the view around it, for the slightly darker disc some setups show there. In a test flight the disc became much fainter but did not go away: part of it is DLSS 5 softening fine cloud detail, which brightness cannot change.
 
 **Shaders are prepared with one thread while you fly.** After a DCS or app update the engine module prepares its shaders again. It now uses one thread in flight and all of them in the main menu and on loading screens, so the first flights after an update cost DCS's render thread less. The engine's test suite pauses it while it measures.
 
-**Clearer settings.** Shorter, plainer texts on every page. No setting is marked experimental any more: foveated frame generation, Sharp HUD and the Perception features are regular options.
+**Clearer settings.** Shorter, plainer texts on every page. Each card shows its main switches; the rest is in folds that say what is set.
 
 **More settings apply in flight.** With Live on, these now change while DCS runs: Hide the focus edge and its parts, the four eye-tracking options, Far depth's strength and key, the headset panel's position, the FPS and VRAM counters, Faster terrain and shader paths (its full gain comes within a few minutes of flying), Skip hidden water and Skip unused effects. Another Focus or Periphery DLSS preset chosen in flight is used from the next mission start. The Quad Views settings, Far depth and the headset panel apply live once the profile has been launched from 0.7.
 
