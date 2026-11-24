@@ -1,8 +1,8 @@
 # First headset validation
 
-This procedure is a checklist for a first test on a new PC or headset.
+A checklist for testers: a careful first test on a new PC or headset. For a normal first flight, the [User Guide](USER_GUIDE.md#first-run) is enough.
 
-Run **Guided setup** first. [SETUP.md](SETUP.md) covers prerequisites, the Pimax/Sboys installation route and the automatic preflight. On the audited PC, Pimax baseline and combined preparation pass their automatic file checks. Sboys currently has driver 1.3.0-beta.2, no detected OpenXR gaze bridge and no selected tracking route in the generated test profile. Update to the pinned 1.3.0 through its About page, select the actual tracking hardware, and validate gaze or explicitly choose Fixed focus before that route's test. These are detected preparation requirements, not headset measurements.
+Run **Guided setup** first. [SETUP.md](SETUP.md) covers prerequisites, the Pimax/Sboys installation route and the automatic preflight. On the Sboys route, install the pinned 1.3.0 driver through its About page, select the actual tracking hardware, and validate gaze or choose Fixed focus before that route's test.
 
 Start with the original Pimax runtime and your existing working headset setup. Confirm refresh rate, gaze calibration, and tracking. Choose a small repeatable mission with readable cockpit displays. Record the runtime, headset resolution, DCS settings, and CPU/GPU frame times.
 
