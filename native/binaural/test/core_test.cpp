@@ -17,6 +17,7 @@
 #include <new>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "binaural_config.h"
@@ -711,6 +712,180 @@ static void TestCrossfades(const std::vector<std::uint32_t>& file, const std::ve
     }
 }
 
+// ---- A10: crossfades with short calls ---------------------------------------------------------------------------------
+// The device or the module may call with few frames (a short WASAPI period, or the last sub-block of a call). Every
+// crossfade keeps its own length across calls: an HRTF swap fades over 10 ms and a direction update over 64 frames
+// however the calls are cut. Calls of 7 and 33 frames: a swap and a fast moving source (every filter crossfading) stay
+// as smooth as the 480-frame call (A10's limit).
+static void TestShortCalls(const std::vector<std::uint32_t>& file, const std::vector<std::uint32_t>& file2) {
+    const std::uint32_t total = 19200, at = 9600;
+    const Vec in = Sine(total, 1000.0, 48000.0, 1.0f);
+    for (std::uint32_t block : {7u, 33u}) {
+        Rig rig(file, 48000);
+        char err[64];
+        HrtfSet* second = LoadHrtf(file2.data(), file2.size() * 4, 48000, err, sizeof(err));
+        CHECK(rig.ok && second);
+        if (!rig.ok || !second) return;
+        Vec out(total * 2, 0.0f);
+        bool swapped = false;
+        for (std::uint32_t o = 0; o < total; o += block) {
+            const std::uint32_t n = std::min(block, total - o);
+            if (!swapped && o >= at) rig.r.SetHrtf(second), swapped = true;
+            const Dir3 d = FromAzEl(60, 10);
+            SourceUpdate u{{d.x * 3, d.y * 3, d.z * 3}, 1.0f, o == 0 ? source_flags::kReset : 0u};
+            MonoInput mi{in.data() + o, nullptr, 1, 1.0f};
+            rig.r.BeginBlock(n);
+            rig.r.Render(0, u, mi, n, 1.0f, 1.0f, out.data() + 2 * o);
+            rig.r.EndBlock();
+        }
+        double worst = -1e9;
+        for (int ear = 0; ear < 2; ++ear) {
+            const Vec y = Channel(out, ear);
+            const double before = MaxD2(y, 2000, at - 64), after = MaxD2(y, at + 1200, total);
+            const double during = MaxD2(y, at - 64, at + 1200);
+            worst = std::max(worst, during - std::max(before, after));
+            CHECKM(during <= std::max(before, after) + 1e-3, "%u-frame calls, ear %d: swap %.5f vs steady %.5f / %.5f", block, ear, during, before, after);
+        }
+        CHECK(rig.r.GetStats().hrtfSwaps == 1);
+        std::printf("A10 HRTF swap in %u-frame calls: worst step above the steady signal %.2e (limit 1e-3)\n", block, std::max(worst, 0.0));
+        ReleaseHrtf(rig.set);
+        ReleaseHrtf(second);
+        rig.set = nullptr;
+    }
+    // A source circling at 360 deg/s: every filter update crossfades over 64 frames whatever the call length, so the
+    // output with 7-frame calls is as smooth as with 480-frame calls.
+    auto circle = [&](std::uint32_t block) {
+        Rig rig(file, 48000);
+        Vec out(total * 2, 0.0f);
+        if (!rig.ok) return out;
+        for (std::uint32_t o = 0; o < total; o += block) {
+            const std::uint32_t n = std::min(block, total - o);
+            const Dir3 d = FromAzEl(360.0 * (o + n) / 48000.0, 0);
+            SourceUpdate u{{d.x * 3, d.y * 3, d.z * 3}, 1.0f, o == 0 ? source_flags::kReset : 0u};
+            MonoInput mi{in.data() + o, nullptr, 1, 1.0f};
+            rig.r.BeginBlock(n);
+            rig.r.Render(0, u, mi, n, 1.0f, 1.0f, out.data() + 2 * o);
+            rig.r.EndBlock();
+        }
+        ReleaseHrtf(rig.set);
+        return out;
+    };
+    const Vec ref = circle(480), shortCalls = circle(7);
+    double dRef = 0.0, dShort = 0.0;
+    for (int ear = 0; ear < 2; ++ear) {
+        dRef = std::max(dRef, MaxD2(Channel(ref, ear), 2000, total));
+        dShort = std::max(dShort, MaxD2(Channel(shortCalls, ear), 2000, total));
+    }
+    std::printf("A10 source circling 360 deg/s: largest second difference %.5f in 7-frame calls, %.5f in 480-frame calls\n", dShort, dRef);
+    CHECK(dShort <= dRef + 1e-3);
+}
+
+// ---- set handshake: a set the audio thread is adopting is never handed back for freeing -------------------------------
+// The audio thread stops inside BeginBlock right after its second pending read matched set B (trying = B, inUse still
+// A); the control thread then gives set C and asks for retired sets; for each set that passes its pending and trying
+// checks it lets the audio thread finish adopting (inUse = B, trying cleared) before reading inUse. B must never come
+// back while the audio thread uses it (reading inUse before trying, as the first version did, returned it).
+namespace handshake {
+HANDLE g_paused = nullptr, g_go = nullptr, g_done = nullptr;
+const HrtfSet* g_target = nullptr;
+std::atomic<int> g_stage{0};  // 0 armed, 1 the audio thread paused, 2 released
+void Hook(int point, const HrtfSet* s) {
+    if (point == 0 && s == g_target && g_stage.load() == 0) {
+        g_stage = 1;
+        SetEvent(g_paused);
+        WaitForSingleObject(g_go, 10000);
+    } else if (point == 1 && g_stage.load() == 1) {
+        g_stage = 2;
+        SetEvent(g_go);
+        WaitForSingleObject(g_done, 10000);
+    }
+}
+}  // namespace handshake
+static void TestSetHandshake(const std::vector<std::uint32_t>& file, const std::vector<std::uint32_t>& file2) {
+    namespace hs = handshake;
+    Rig rig(file, 48000);  // set A
+    char err[64];
+    HrtfSet* b = LoadHrtf(file2.data(), file2.size() * 4, 48000, err, sizeof(err));
+    HrtfSet* c = LoadHrtf(file.data(), file.size() * 4, 48000, err, sizeof(err));
+    CHECK(rig.ok && b && c);
+    if (!rig.ok || !b || !c) return;
+    rig.r.BeginBlock(480);  // adopts A
+    rig.r.EndBlock();
+    rig.r.SetHrtf(b);
+    hs::g_paused = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    hs::g_go = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    hs::g_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    hs::g_target = b;
+    hs::g_stage = 0;
+    detail::SetHandshakeHook(&hs::Hook);
+    std::thread audio([&] {
+        rig.r.BeginBlock(480);  // adopts B (paused inside by the hook)
+        rig.r.EndBlock();
+        SetEvent(hs::g_done);
+    });
+    const bool paused = WaitForSingleObject(hs::g_paused, 10000) == WAIT_OBJECT_0;
+    rig.r.SetHrtf(c);
+    std::vector<const HrtfSet*> early;
+    while (const HrtfSet* s = rig.r.TakeRetiredHrtf()) early.push_back(s);
+    SetEvent(hs::g_go);  // if no probe released it
+    audio.join();
+    detail::SetHandshakeHook(nullptr);
+    const bool bEarly = std::find(early.begin(), early.end(), b) != early.end();
+    // B is in use now (adopted); A was in use while the control thread looked. The next block adopts C; then A and B.
+    rig.r.BeginBlock(480);
+    rig.r.EndBlock();
+    std::vector<const HrtfSet*> later;
+    while (const HrtfSet* s = rig.r.TakeRetiredHrtf()) later.push_back(s);
+    const bool allBack = std::find(later.begin(), later.end(), b) != later.end() &&
+                         (std::find(early.begin(), early.end(), rig.set) != early.end() || std::find(later.begin(), later.end(), rig.set) != later.end()) &&
+                         std::find(later.begin(), later.end(), c) == later.end();
+    std::printf("Set handshake: the audio thread paused while adopting B %s; retired during it %zu (B %s), after the next block %zu\n",
+                paused ? "yes" : "NO", early.size(), bEarly ? "RETURNED" : "kept", later.size());
+    CHECK(paused && hs::g_stage.load() >= 1);
+    CHECK(!bEarly);
+    CHECK(allBack);
+    for (HANDLE h : {hs::g_paused, hs::g_go, hs::g_done}) CloseHandle(h);
+    ReleaseHrtf(b);
+    ReleaseHrtf(c);
+    ReleaseHrtf(rig.set);
+}
+
+// ---- head size follows the set ---------------------------------------------------------------------------------------
+// The ITD radius is a scale of the set's own fitted radius: a new set keeps the pilot's head size without a second call
+// (a set and the radius meant for another set are never paired, not even for one block).
+static void TestRadiusFollowsSet(const std::vector<std::uint32_t>& file, const std::vector<std::uint32_t>& file2) {
+    const float scale = 60.0f / 57.0f;
+    Rig rig(file, 48000, 0.0875f * scale);
+    char err[64];
+    HrtfSet* b = LoadHrtf(file2.data(), file2.size() * 4, 48000, err, sizeof(err));
+    CHECK(rig.ok && b);
+    if (!rig.ok || !b) return;
+    const Dir3 d = FromAzEl(70, 0);
+    const Vec in(480 * 40, 0.0f);
+    RenderStatic(rig.r, 0, d, 3.0f, Vec(4800, 0.0f), 480);
+    rig.r.SetHrtf(b);  // no SetHeadRadius: the head size carries over
+    Vec out(2 * 480, 0.0f);
+    for (int k = 0; k < 40; ++k) {
+        SourceUpdate u{{d.x * 3, d.y * 3, d.z * 3}, 1.0f, 0u};
+        MonoInput mi{in.data(), nullptr, 1, 1.0f};
+        rig.r.BeginBlock(480);
+        rig.r.Render(0, u, mi, 480, 1.0f, 1.0f, out.data());
+        rig.r.EndBlock();
+    }
+    const float dv[3] = {d.x, d.y, d.z};
+    float want[2], kept[2];
+    detail::ExpectedDelays(*b, dv, DescribeHrtf(b).datasetHeadRadiusM * scale, want);
+    detail::ExpectedDelays(*b, dv, 0.0875f * scale, kept);
+    const float got[2] = {detail::SourceDelay(rig.r, 0, 0), detail::SourceDelay(rig.r, 0, 1)};
+    const double err0 = std::max(std::fabs(got[0] - want[0]), std::fabs(got[1] - want[1]));
+    std::printf("Head size follows the set: ITD %.3f samples on set B (expected %.3f; the old absolute radius would give %.3f)\n",
+                got[1] - got[0], want[1] - want[0], kept[1] - kept[0]);
+    CHECK(err0 < 0.01);
+    CHECK(std::fabs((want[1] - want[0]) - (kept[1] - kept[0])) > 0.5);  // the two rules differ here
+    ReleaseHrtf(rig.set);
+    ReleaseHrtf(b);
+}
+
 // ---- A11: robustness ------------------------------------------------------------------------------------------------------
 static void TestRobustness(const std::vector<std::uint32_t>& file) {
     Rig rig(file, 48000);
@@ -1131,6 +1306,9 @@ int main(int argc, char** argv) {
         TestLatency(file, 48000, {1, 7, 480, 1056, 4096});         // A8
         TestBlockInvariance(file);                                 // A9
         TestCrossfades(file, file2);                               // A10
+        TestShortCalls(file, file2);                               // A10, short calls
+        TestSetHandshake(file, file2);
+        TestRadiusFollowsSet(file, file2);
         TestRobustness(file);                                      // A11
         TestRealTime(file);                                        // A12 + determinism
         for (std::uint32_t rate : {44100u, 96000u}) {              // A13 (48 kHz above)

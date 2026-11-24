@@ -23,8 +23,11 @@ namespace binaural {
 namespace {
 
 std::atomic<int> g_forceKernels{0};
+std::atomic<detail::HandshakeHook> g_handshakeHook{nullptr};  // the harness's interleaving probe (null in the module)
 constexpr std::uint32_t kHistMax = kMaxDeviceTaps - 1;  // FIR input history kept per slot
-constexpr int kBufs = 3;                                // coefficient buffers per ear (current, next, swap)
+// Coefficient buffers per ear: the current filter and the one a direction crossfade fades out, and during an HRTF set
+// crossfade the old set's two as well.
+constexpr int kBufs = 4;
 
 double BesselI0(double x) {
     double sum = 1.0, term = 1.0;
@@ -72,8 +75,19 @@ struct Slot {
     std::int32_t triCache[2] = {-1, -1};
     float fdir[2][3] = {};
     std::int32_t ftri[2] = {-1, -1};
-    int cur[2] = {0, 0};             // coefficient buffer in use per ear
-    std::uint32_t taps = 0;          // taps of the current filters (their set's)
+    // Filters per ear (coefficient buffer indices, -1: none). Every crossfade runs over a fixed number of frames counted
+    // across sub-blocks and calls, so a short call never shortens it.
+    int cur[2] = {0, 0};             // the newest filter (the current set's)
+    int from[2] = {-1, -1};          // the filter a direction crossfade is fading out
+    std::uint32_t fromDone[2] = {};  // frames of that crossfade done (of kFilterFadeFrames)
+    // HRTF set crossfade (kSwapFadeS): the old set's filters, frozen at its start, fade out against the new set's.
+    int old[2] = {-1, -1};
+    int oldFrom[2] = {-1, -1};       // the old set's own direction crossfade, still running when the set changed
+    std::uint32_t oldFromDone[2] = {};
+    std::uint32_t swapDone = 0, swapLen = 0;  // swapLen 0: no set crossfade
+    std::uint32_t taps = 0;          // taps of the current set's filters
+    std::uint32_t oldTaps = 0;       // taps of the old set's (during a set crossfade)
+    std::uint32_t histValid = 0;     // the newest FIR input history samples that are valid (older ones are cleared)
     std::uint64_t serial = 0;        // HRTF set of the current filters
     float* coef = nullptr;           // [ear][kBufs][kMaxDeviceTaps], zero beyond each filter's taps
     float* xh = nullptr;             // FIR input history, kHistMax samples (the last taps - 1 are valid)
@@ -106,6 +120,16 @@ inline std::uint32_t MaxAbsBits(const float* x, std::uint32_t n) {
 }
 constexpr std::uint32_t kNonFiniteBits = 0x7f800000u;
 
+// A set's fitted ITD radius (hrtf_format validates it; the default radius for a set without one).
+inline float FitOf(const HrtfSet& s) { return s.datasetHeadRadiusM > 0.0f ? s.datasetHeadRadiusM : kDefaultHeadRadiusM; }
+
+// The first coefficient buffer of an ear that no filter in use holds.
+inline int FreeBuf(const Slot& s, int e) {
+    for (int b = 0; b < kBufs; ++b)
+        if (b != s.cur[e] && b != s.from[e] && b != s.old[e] && b != s.oldFrom[e]) return b;
+    return -1;  // never: at most three are in use when a filter is built
+}
+
 // y += (z - y) * (i + 1) / n: a linear crossfade from y to z over n samples.
 inline void FadeTo(float* y, const float* z, std::uint32_t n, float a0, float da) {
     for (std::uint32_t i = 0; i < n; ++i) y[i] += (z[i] - y[i]) * (a0 + da * static_cast<float>(i));
@@ -133,10 +157,14 @@ struct Renderer::Impl {
     std::atomic<const HrtfSet*> pending{nullptr};
     std::atomic<const HrtfSet*> inUse{nullptr};
     std::atomic<const HrtfSet*> trying{nullptr};
-    std::atomic<float> headRadius{kDefaultHeadRadiusM};
+    // The ITD radius as a scale of the set's own fitted radius (0 until the first SetHrtf): a set and the radius meant
+    // for it can never be paired wrongly for a block, and a new set keeps the pilot's head size.
+    std::atomic<float> headScale{0.0f};
     std::atomic<float> earRadius{kDefaultHeadRadiusM};
     std::atomic<bool> nearField{true};
     std::vector<const HrtfSet*> owned;  // control thread only
+    const HrtfSet* lastGiven = nullptr; // control thread: the set SetHrtf got last
+    float radiusAsked = kDefaultHeadRadiusM;  // control thread: the ITD radius asked for (Init, SetHeadRadius)
 
     // audio thread
     const HrtfSet* set = nullptr;
@@ -237,7 +265,10 @@ struct Renderer::Impl {
         float step = 0.0f;
         bool reached = true;
         if (std::fabs(diff) > 1e-6f) {
-            step = diff / static_cast<float>(L);
+            // Spread over at least a whole sub-block: a short call (or the short last sub-block of a call) glides as
+            // slowly as a long one, and the rest follows in the next call.
+            step = diff / static_cast<float>(std::max(L, kSubBlockFrames));
+            if (L < kSubBlockFrames) reached = false;
             if (step > kMaxDelayStep) step = kMaxDelayStep, reached = false;
             if (step < -kMaxDelayStep) step = -kMaxDelayStep, reached = false;
         }
@@ -282,7 +313,7 @@ bool Renderer::Init(const Config& config, char* error, std::size_t errorCapacity
     float radius = config.headRadiusM == 0.0f ? kDefaultHeadRadiusM : config.headRadiusM;
     if (!std::isfinite(radius)) radius = kDefaultHeadRadiusM;
     radius = std::clamp(radius, kMinItdRadiusM, kMaxItdRadiusM);
-    m.headRadius.store(radius);
+    m.radiusAsked = radius;
     m.radius = radius;
     float ear = config.earRadiusM == 0.0f || !std::isfinite(config.earRadiusM) ? kDefaultHeadRadiusM : config.earRadiusM;
     ear = std::clamp(ear, kMinEarRadiusM, kMaxEarRadiusM);
@@ -333,24 +364,37 @@ void Renderer::SetHrtf(const HrtfSet* set) {
     Impl& m = *impl_;
     if (!set) return;
     if (std::find(m.owned.begin(), m.owned.end(), set) == m.owned.end()) m.owned.push_back(set);
+    // The first set turns the radius asked for into its scale; later sets keep the scale (published before the set).
+    if (!m.lastGiven) m.headScale.store(m.radiusAsked / FitOf(*set));
+    m.lastGiven = set;
     m.pending.store(set);
 }
 
+// The hazard check, in this order: pending, then trying, then inUse. BeginBlock stores trying = p, checks pending again,
+// and only then stores inUse = p and clears trying. Reading trying before inUse means a set the audio thread is
+// adopting is always seen: either trying still holds it, or (trying already cleared) inUse was stored before that and
+// holds it now; and a trying read too early to see p came before the audio thread's second pending read, which then
+// sees the newer pending and does not adopt p. (Reading inUse first could miss both: inUse read before the adoption,
+// trying read after it was cleared.)
 const HrtfSet* Renderer::TakeRetiredHrtf() {
     Impl& m = *impl_;
     for (auto it = m.owned.begin(); it != m.owned.end(); ++it) {
         const HrtfSet* s = *it;
-        if (s != m.pending.load() && s != m.inUse.load() && s != m.trying.load()) {
-            m.owned.erase(it);
-            return s;
-        }
+        if (s == m.pending.load()) continue;
+        if (s == m.trying.load()) continue;
+        if (auto hook = g_handshakeHook.load(std::memory_order_relaxed)) hook(1, s);
+        if (s == m.inUse.load()) continue;
+        m.owned.erase(it);
+        return s;
     }
     return nullptr;
 }
 
 void Renderer::SetHeadRadius(float metres) {
     if (!std::isfinite(metres)) return;
-    impl_->headRadius.store(std::clamp(metres, kMinItdRadiusM, kMaxItdRadiusM));
+    Impl& m = *impl_;
+    m.radiusAsked = std::clamp(metres, kMinItdRadiusM, kMaxItdRadiusM);
+    if (m.lastGiven) m.headScale.store(m.radiusAsked / FitOf(*m.lastGiven));
 }
 void Renderer::SetEarRadius(float metres) {
     if (!std::isfinite(metres)) return;
@@ -374,6 +418,7 @@ void Renderer::BeginBlock(std::uint32_t frames) {
         m.trying.store(p);
         const HrtfSet* again = m.pending.load();
         if (again == p) {
+            if (auto hook = g_handshakeHook.load(std::memory_order_relaxed)) hook(0, p);
             if (p->sampleRate == m.cfg.sampleRate) {
                 m.set = p;
                 m.inUse.store(p);
@@ -384,7 +429,10 @@ void Renderer::BeginBlock(std::uint32_t frames) {
         p = again;
     }
     m.trying.store(nullptr);
-    m.radius = m.headRadius.load(std::memory_order_relaxed);
+    if (m.set) {
+        const float scale = m.headScale.load(std::memory_order_relaxed);
+        m.radius = std::clamp(scale * FitOf(*m.set), kMinItdRadiusM, kMaxItdRadiusM);
+    }
     m.earR = m.earRadius.load(std::memory_order_relaxed);
     {
         const float target = m.nearField.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
@@ -462,7 +510,6 @@ bool Renderer::Render(std::uint32_t slot, const SourceUpdate& update, const Mono
     const float newGain = update.gain;
     const bool nearOn = m.nearOnBlock && !(update.flags & source_flags::kNoNearField);
     const bool reset = (update.flags & source_flags::kReset) || !s.hasState;
-    const bool swap = !reset && s.serial != set.serial;
     const std::uint32_t T = set.taps;
 
     EarTarget tg[2];
@@ -478,30 +525,54 @@ bool Renderer::Render(std::uint32_t slot, const SourceUpdate& update, const Mono
             s.delay[e] = tg[e].delay;
             s.shelf[e] = tg[e].shelf;
             s.cur[e] = 0;
+            s.from[e] = s.old[e] = s.oldFrom[e] = -1;
+            s.fromDone[e] = s.oldFromDone[e] = 0;
             m.BuildFilter(tg[e], e, s.Coef(e, 0));
             std::memcpy(s.fdir[e], tg[e].dir, sizeof(tg[e].dir));
             s.ftri[e] = tg[e].tri;
         }
+        s.swapDone = s.swapLen = 0;
         s.serial = set.serial;
         s.taps = T;
+        s.oldTaps = 0;
+        s.histValid = kHistMax;  // all zero: the silence before the sound
         s.hasState = true;
     }
-    const std::uint32_t oldTaps = s.taps;
-    if (swap) {
+    // A new set: the current filters (and a direction crossfade they may be in) are frozen as the old side and fade out
+    // against the new set's over kSwapFadeS, however the calls are cut. A set that arrives during that crossfade waits
+    // for its end; meanwhile the filters get no direction updates (they would be built from a set they do not belong
+    // to).
+    if (s.serial != set.serial && s.swapLen == 0) {
+        for (int e = 0; e < 2; ++e) {
+            s.old[e] = s.cur[e];
+            s.oldFrom[e] = s.from[e];
+            s.oldFromDone[e] = s.fromDone[e];
+            s.cur[e] = s.from[e] = -1;  // the new set's first filter is built in the first sub-block
+            s.fromDone[e] = 0;
+        }
         s.triCache[0] = s.triCache[1] = -1;
         s.ftri[0] = s.ftri[1] = -1;
-        if (T > oldTaps) std::memset(s.xh, 0, (kHistMax - (oldTaps - 1)) * sizeof(float));  // older input not kept
+        s.oldTaps = s.taps;
+        s.taps = T;
+        s.serial = set.serial;
+        s.swapLen = std::max(1u, static_cast<std::uint32_t>(std::lround(kSwapFadeS * static_cast<float>(m.cfg.sampleRate))));
+        s.swapDone = 0;
+        m.hrtfSwaps.fetch_add(1, std::memory_order_relaxed);
     }
-    const std::uint32_t Tf = std::max(T, oldTaps);  // filters are zero beyond their own taps
+    const bool updates = s.serial == set.serial;
+    const std::uint32_t Tf = std::max(s.taps, s.swapLen ? s.oldTaps : 0u);  // filters are zero beyond their own taps
     const std::uint32_t need = Tf - 1;
+    if (need > s.histValid) {  // a longer filter than the history kept: the older input is not known (silence)
+        std::memset(s.xh + kHistMax - need, 0, (need - s.histValid) * sizeof(float));
+        s.histValid = need;
+    }
 
     const float prevDir[3] = {s.dir[0], s.dir[1], s.dir[2]};
     const float prevR = s.r, prevGain = s.gain;
     const float dot = prevDir[0] * newDir[0] + prevDir[1] * newDir[1] + prevDir[2] * newDir[2];
-    const int oldBuf[2] = {s.cur[0], s.cur[1]};
-    int newBuf[2] = {-1, -1};  // swap call: the new set's current filter
     bool crossfaded = false;
     const float invFrames = 1.0f / static_cast<float>(frames);
+    constexpr float kInvFade = 1.0f / static_cast<float>(kFilterFadeFrames);
 
     for (std::uint32_t o = 0; o < frames; o += kSubBlockFrames) {
         const std::uint32_t L = std::min(kSubBlockFrames, frames - o);
@@ -527,79 +598,86 @@ bool Renderer::Render(std::uint32_t slot, const SourceUpdate& update, const Mono
         const float* xe = m.xb + kHistMax - need;
         const float step = 1.0f / static_cast<float>(L);
 
-        // Filters to run, in one pass over the input: z[e] gets each ear's output.
-        const float* h[6];
-        float* yo[6];
-        int count = 0;
-        float* z[2] = {m.zb[0] + m.H, m.zb[1] + m.H};
-        if (!swap) {
-            // Each ear's newest filter over the whole sub-block; the previous one only over the crossfade window at
-            // its start (the same click-free linear fade, at a fraction of the cost of running both throughout).
-            int nb[2] = {-1, -1};
-            for (int e = 0; e < 2; ++e) {
-                const float c = tg[e].dir[0] * s.fdir[e][0] + tg[e].dir[1] * s.fdir[e][1] + tg[e].dir[2] * s.fdir[e][2];
-                if (c < kFilterUpdateCos) {
-                    nb[e] = (s.cur[e] + 1) % kBufs;
-                    m.BuildFilter(tg[e], e, s.Coef(e, nb[e]));
-                }
-                h[count] = s.Coef(e, nb[e] >= 0 ? nb[e] : s.cur[e]), yo[count++] = z[e];
-            }
-            m.k.firN(h, count, Tf, xe, yo, L);
-            const std::uint32_t W = std::min(L, kFilterFadeFrames);
-            count = 0;
-            for (int e = 0; e < 2; ++e)
-                if (nb[e] >= 0) h[count] = s.Coef(e, s.cur[e]), yo[count++] = m.y[e];
-            if (count) m.k.firN(h, count, Tf, xe, yo, W);
-            const float fstep = 1.0f / static_cast<float>(W);
-            for (int e = 0; e < 2; ++e) {
-                if (nb[e] < 0) continue;
-                float* yOld = m.y[e];
-                FadeTo(yOld, z[e], W, fstep, fstep);  // old -> new over the window
-                std::memcpy(z[e], yOld, W * sizeof(float));
-                s.cur[e] = nb[e];
+        // New filters: the new set's first one at a set crossfade's start; else, when the direction moved past the
+        // threshold and no direction crossfade is still running, the newest filter becomes the one faded out.
+        for (int e = 0; e < 2; ++e) {
+            if (s.cur[e] < 0) {
+                s.cur[e] = FreeBuf(s, e);
+                m.BuildFilter(tg[e], e, s.Coef(e, s.cur[e]));
                 std::memcpy(s.fdir[e], tg[e].dir, sizeof(tg[e].dir));
                 s.ftri[e] = tg[e].tri;
-                crossfaded = true;
-            }
-        } else {
-            // The old set's filter frozen for the whole call, the new set's tracking the direction; full-call fade.
-            int next[2] = {-1, -1};
-            for (int e = 0; e < 2; ++e) {
-                h[count] = s.Coef(e, oldBuf[e]), yo[count++] = z[e];
-                if (newBuf[e] < 0) {
-                    newBuf[e] = (oldBuf[e] + 1) % kBufs;
-                    m.BuildFilter(tg[e], e, s.Coef(e, newBuf[e]));
+            } else if (updates && s.from[e] < 0) {
+                const float c = tg[e].dir[0] * s.fdir[e][0] + tg[e].dir[1] * s.fdir[e][1] + tg[e].dir[2] * s.fdir[e][2];
+                if (c < kFilterUpdateCos) {
+                    const int nb = FreeBuf(s, e);
+                    m.BuildFilter(tg[e], e, s.Coef(e, nb));
+                    s.from[e] = s.cur[e];
+                    s.fromDone[e] = 0;
+                    s.cur[e] = nb;
                     std::memcpy(s.fdir[e], tg[e].dir, sizeof(tg[e].dir));
                     s.ftri[e] = tg[e].tri;
-                } else {
-                    const float c = tg[e].dir[0] * s.fdir[e][0] + tg[e].dir[1] * s.fdir[e][1] + tg[e].dir[2] * s.fdir[e][2];
-                    if (c < kFilterUpdateCos) {
-                        next[e] = (newBuf[e] + 1) % kBufs;
-                        if (next[e] == oldBuf[e]) next[e] = (next[e] + 1) % kBufs;
-                        m.BuildFilter(tg[e], e, s.Coef(e, next[e]));
-                    }
+                    crossfaded = true;
                 }
-                h[count] = s.Coef(e, newBuf[e]), yo[count++] = m.y[2 * e];
-                if (next[e] >= 0) h[count] = s.Coef(e, next[e]), yo[count++] = m.y[2 * e + 1];
             }
-            if (count <= 4) {
-                m.k.firN(h, count, Tf, xe, yo, L);
-            } else {
-                m.k.firN(h, 4, Tf, xe, yo, L);
-                m.k.firN(h + 4, count - 4, Tf, xe, yo + 4, L);
+        }
+        // In one pass over the input each: the newest filters (z) and the old set's (y[0..1]) over the whole sub-block;
+        // the filters being faded out only over what is left of their crossfade (y[2..3] direction, y[4..5] the old
+        // set's own direction crossfade).
+        float* z[2] = {m.zb[0] + m.H, m.zb[1] + m.H};
+        const bool swapping = s.swapLen != 0;
+        const float* h[4];
+        float* yo[4];
+        int count = 0;
+        for (int e = 0; e < 2; ++e) h[count] = s.Coef(e, s.cur[e]), yo[count++] = z[e];
+        if (swapping)
+            for (int e = 0; e < 2; ++e) h[count] = s.Coef(e, s.old[e]), yo[count++] = m.y[e];
+        m.k.firN(h, count, Tf, xe, yo, L);
+        std::uint32_t wFrom[2] = {}, wOld[2] = {}, wMax = 0;
+        count = 0;
+        for (int e = 0; e < 2; ++e) {
+            if (s.from[e] >= 0) {
+                wFrom[e] = std::min(L, kFilterFadeFrames - s.fromDone[e]);
+                wMax = std::max(wMax, wFrom[e]);
+                h[count] = s.Coef(e, s.from[e]), yo[count++] = m.y[2 + e];
             }
-            for (int e = 0; e < 2; ++e) {
-                float* yn = m.y[2 * e];
-                if (next[e] >= 0) {
-                    FadeTo(yn, m.y[2 * e + 1], L, step, step);
-                    newBuf[e] = next[e];
-                    std::memcpy(s.fdir[e], tg[e].dir, sizeof(tg[e].dir));
-                    s.ftri[e] = tg[e].tri;
-                }
-                FadeTo(z[e], yn, L, static_cast<float>(o + 1) * invFrames, invFrames);
+            if (swapping && s.oldFrom[e] >= 0) {
+                wOld[e] = std::min(L, kFilterFadeFrames - s.oldFromDone[e]);
+                wMax = std::max(wMax, wOld[e]);
+                h[count] = s.Coef(e, s.oldFrom[e]), yo[count++] = m.y[4 + e];
+            }
+        }
+        if (count) m.k.firN(h, count, Tf, xe, yo, wMax);
+        const std::uint32_t wSwap = swapping ? std::min(L, s.swapLen - s.swapDone) : 0u;
+        for (int e = 0; e < 2; ++e) {
+            if (s.from[e] >= 0) {  // direction: the faded-out filter -> the newest
+                float* y = m.y[2 + e];
+                FadeTo(y, z[e], wFrom[e], static_cast<float>(s.fromDone[e] + 1) * kInvFade, kInvFade);
+                std::memcpy(z[e], y, wFrom[e] * sizeof(float));
+                s.fromDone[e] += wFrom[e];
+                if (s.fromDone[e] >= kFilterFadeFrames) s.from[e] = -1;
+            }
+            if (!swapping) continue;
+            float* yOld = m.y[e];
+            if (s.oldFrom[e] >= 0) {  // the old set's own direction crossfade, finished on the old side
+                float* y = m.y[4 + e];
+                FadeTo(y, yOld, wOld[e], static_cast<float>(s.oldFromDone[e] + 1) * kInvFade, kInvFade);
+                std::memcpy(yOld, y, wOld[e] * sizeof(float));
+                s.oldFromDone[e] += wOld[e];
+                if (s.oldFromDone[e] >= kFilterFadeFrames) s.oldFrom[e] = -1;
+            }
+            const float inv = 1.0f / static_cast<float>(s.swapLen);  // the old set -> the new set
+            FadeTo(yOld, z[e], wSwap, static_cast<float>(s.swapDone + 1) * inv, inv);
+            std::memcpy(z[e], yOld, wSwap * sizeof(float));
+        }
+        if (swapping) {
+            s.swapDone += wSwap;
+            if (s.swapDone >= s.swapLen) {
+                s.swapLen = s.swapDone = 0;
+                s.old[0] = s.old[1] = s.oldFrom[0] = s.oldFrom[1] = -1;
             }
         }
         std::memcpy(s.xh + kHistMax - need, m.xb + kHistMax + L - need, need * sizeof(float));
+        s.histValid = need;
 
         // Per ear: delay line, near-field shelf (y + (G - 1) * lowpass(y)), gain and ownership ramps.
         const float gA = prevGain + (newGain - prevGain) * static_cast<float>(o + 1) * invFrames;
@@ -638,13 +716,6 @@ bool Renderer::Render(std::uint32_t slot, const SourceUpdate& update, const Mono
             s.shelf[e] = tg[e].shelf;
         }
     }
-    if (swap) {
-        s.cur[0] = newBuf[0];
-        s.cur[1] = newBuf[1];
-        s.serial = set.serial;
-        m.hrtfSwaps.fetch_add(1, std::memory_order_relaxed);
-    }
-    s.taps = T;
     std::memcpy(s.dir, newDir, sizeof(newDir));
     s.r = newR;
     s.gain = newGain;
@@ -695,6 +766,7 @@ struct RendererAccess {
 
 namespace detail {
 void ForceKernels(int which) { g_forceKernels.store(which); }
+void SetHandshakeHook(HandshakeHook hook) { g_handshakeHook.store(hook); }
 const char* KernelName(const Renderer& r) { return RendererAccess::Of(r).k.name; }
 float SourceDelay(const Renderer& r, std::uint32_t slot, int ear) { return RendererAccess::Of(r).slots[slot].delay[ear]; }
 void SourceFilterDirection(const Renderer& r, std::uint32_t slot, int ear, float out[3]) {
