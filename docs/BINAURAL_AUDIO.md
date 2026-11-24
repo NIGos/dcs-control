@@ -351,13 +351,20 @@ others only append.
   - at each xrLocateViews with a new display time, `xrLocateSpace(view, info->space, displayTime)` with
     `XrSpaceVelocity`;
   - publish per `head_pose_shm.h`;
-  - `qpcDisplay` through `XR_KHR_win32_convert_performance_counter_time` only if the app enabled it, else 0;
-  - the fallback with `from_views`;
-  - gate with PupilShift.ini `[HeadPose] Publish` (default 0);
-  - one log line per session (`head pose: publishing` / `off`).
+  - `qpcDisplay` through `XR_KHR_win32_convert_performance_counter_time`: the application's when it enabled it, else
+    added by the layer at instance creation when `Publish=1` then and the runtime lists it (only then; a refusal retries
+    without it, the rest unchanged); otherwise 0 (`writer_flags::qpc_display` says which);
+  - the fallback with `from_views`; a velocity the runtime does not give is derived from the previous entry (same base
+    space, at most 100 ms before);
+  - gate with PupilShift.ini `[HeadPose] Publish` (default 0; Live): off = no mapping, no VIEW space, no runtime call;
+  - one log line per session (`head pose: publishing` / `off`), one per Live change.
+- **Built** (`feat/hrtf-pose`): `native/pupil_shift/head_pose_publisher.hpp` (writer, pure),
+  `native/binaural/include/head_pose_reader.h` (the module's reader: bounded tear-free read, staleness, extrapolation
+  with a capped horizon and speed limits, `LateCorrectionNow`). No higher-rate source: the layer's only other
+  xrLocateSpace (eye gaze) runs at the same display time, so the feed is one entry per DCS frame and readers predict.
 - **Fakes and tests:**
-  - the fake runtime: VIEW space and velocity support;
-  - tests 8.4 in `pupil_shift_tests.cpp` and the harness;
+  - the fake runtime: VIEW space and velocity support, the time conversion extension;
+  - `head_pose_tests.cpp` (writer, reader, seqlock stress) and the harness's `head_pose_*` scenarios (8.4);
   - a reader test using only the header (the module's reader path).
 - **Constraint:** no change to how the layer moves DCS's views (pose publishing is read-only).
 
