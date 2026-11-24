@@ -1,6 +1,3 @@
 # Allowed hits of scripts/check-personal-data.ps1: "<pattern name> <path glob>" per line ("*" = every pattern).
-# The checker and this list name the patterns themselves.
-* scripts/check-personal-data.ps1
+# Only for the generic patterns; false positives of the local patterns go in the local file (see the checker).
 * scripts/personal-data-allow.txt
-
-

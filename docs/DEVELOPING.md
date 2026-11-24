@@ -97,8 +97,11 @@ the first one's file. The rig's scripts read it (`tools\rig`).
   a comment included, means a rebuild of that component and its tests.
 - Before a release is published, the release flight matrix must pass: `tools/release-matrix/run-matrix.ps1` with the
   package's CLI and `-Baseline` set to the previous release's `results.json` (see [its README](../tools/release-matrix/README.md)).
-- Before a commit: `pwsh -File scripts/check-personal-data.ps1`. No user path, e-mail address or key belongs in the
-  repository, in a release or in the sources ZIP.
+- Before a commit: `pwsh -File scripts/check-personal-data.ps1` (the pre-commit hook runs it). No user path, e-mail
+  address or key belongs in the repository, in a release or in the sources ZIP. The repository holds only generic
+  patterns; the values that identify you (user name, PC name, device serials) go in a local file outside it,
+  `%USERPROFILE%\.dcs-control\personal-data.txt` (or `DCSC_PERSONAL_PATTERNS`), as `pattern <name> <regex>` lines.
+  Create it on every PC you commit from: without it the checker warns.
 
 ## Parked features
 
