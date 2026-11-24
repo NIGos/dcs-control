@@ -14,7 +14,11 @@ if ($LASTEXITCODE -ne 0) { throw 'A [Perception] key is dead with Engine Optimiz
 & (Join-Path $PSScriptRoot 'check-written-keys.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never reads (check-written-keys.ps1).' }
 $build = Join-Path $workspaceRoot 'artifacts/native/dcsqvcull'
-& $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release
+# Binaural audio: the payload links BinauralCore when DCSQV_BINAURAL_CORE_LIB names its .lib (native/binaural); without
+# it the audio module builds and stays off ("audio: off (this build has no binaural renderer)").
+$binauralArgs = @()
+if ($env:DCSQV_BINAURAL_CORE_LIB) { $binauralArgs = @("-DDCSQV_BINAURAL_CORE_LIB=$($env:DCSQV_BINAURAL_CORE_LIB)") }
+& $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release @binauralArgs
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull configuration failed.' }
 & $wrapper cmake --build $build --parallel (Get-BuildJobs)
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull build failed.' }

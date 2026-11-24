@@ -27,6 +27,7 @@ The DLLs are only read: nothing in the DCS install is written.
 | `gen_hook_sigs.py` | Generates `src/hook_sigs.h` (the runtime relocation table) from the manifest |
 | `dcs_patch_check.py` | Checks the manifest against a DCS build and writes `dcs_patch_suggestion.json` with the new locations |
 | `test_patch_check.py`, `test_reloc.py` | Self-tests on copies of the DLLs shifted in memory (optional) |
+| `gen_audio_sigs.py` | ed_sound.dll's binaural audio hook sites: writes `src/audio_sigs.h`; `--check` (in step with the installed DCS), `--report` (where each site is after a DCS update) |
 
 ## Steps
 
