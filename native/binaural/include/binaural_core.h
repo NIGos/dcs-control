@@ -7,11 +7,14 @@
 //   - HRTF set: minimum-phase FIRs + per-ear onset delays (hrtf_format.h), resampled to the device rate at load.
 //   - Direction lookup: barycentric interpolation on the measurement sphere's triangulation. FIRs are interpolated
 //     linearly (minimum phase makes that safe, no comb filtering), delays separately.
-//   - ITD: per-ear fractional delay line (4-tap Lagrange / Thiran, interpolated per sample), delays scaled about their
-//     mean by headRadius / datasetHeadRadius, so head size changes the ITD only.
+//   - ITD: per-ear fractional delay line after the FIR (24-tap Kaiser-windowed sinc, 256 phases interpolated; flat
+//     within 0.02 dB to 0.42 x the rate; 12 samples of look-ahead = the renderer's only added latency), the delay
+//     changing per sample; delays scaled about their mean by headRadius / datasetHeadRadius, so head size changes the
+//     ITD only. The FIR runs first so both ears (and both filters of a crossfade) share one pass over the mono input.
 //   - Near field (NearField on, source < 1 m): per-ear parallax (direction from each ear, ears at +-r on the z axis) for
-//     sources under 2 m, plus a first-order shelving ILD boost/cut per ear (Brungart-style), up to +12 dB at 0.25 m.
-//   - FIR: direct form, AVX2/FMA with an SSE fallback; any block length, no FFT framing, so no added latency.
+//     sources under 2 m (fading out between 1.5 and 2 m), plus a first-order low shelf per ear (1 kHz corner,
+//     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees (+8 dB near ear, -4 dB far ear).
+//   - FIR: direct form, AVX2/FMA with an SSE2 fallback (chosen at Init); any block length, no FFT framing.
 //   - Distance gain, doppler, propagation delay, air and canopy filtering: never applied here (DCS already did them).
 //
 // Units: positions in metres in the head frame = DCS's listener frame (x forward, y up, z right); gains linear.
@@ -134,11 +137,13 @@ public:
     //   outLR[2i]   += w(i) * left(i),  outLR[2i+1] += w(i) * right(i),
     // with w(i) linear from w0 at i = 0 to w1 at i = frames (the ownership fade; 1, 1 for a plain call).
     // Crossfade rules:
-    //   - direction/position: interpolated per kSubBlockFrames from the previous call's state; when the interpolated
-    //     filter weights change by more than 0.5 degrees of arc within the call (or the triangle changes), the old and
-    //     new filters both run and crossfade linearly over the sub-block;
+    //   - direction/position: interpolated per kSubBlockFrames from the previous call's state; when an ear's filter
+    //     direction moves more than 0.5 degrees of arc from the one its current filter was built for, the new filter
+    //     runs over the sub-block and the old one over its first 64 frames, crossfaded linearly over those 64 frames
+    //     (barycentric weights are continuous across triangle edges, so a triangle change alone needs no crossfade);
     //   - ITD: the fractional delays change per sample (no step), at most 1 sample per 16 output samples (faster
-    //     changes are spread over later calls);
+    //     changes are spread over later calls); a change of at most 0.1 sample within a sub-block is rendered as a
+    //     per-sample blend of the delays at its two ends (within 0.05 dB of exact at 16 kHz);
     //   - gain and the near-field shelf: linear ramps across the call;
     //   - a new HRTF set: full-call crossfade old -> new;
     //   - kReset: no interpolation (a new sound starts where it is).
@@ -157,6 +162,7 @@ public:
 private:
     struct Impl;
     Impl* impl_;
+    friend struct RendererAccess;  // the offline harness's read-only probes (src/internal.h); not an API
 };
 
 // CPU budget and back-off (implemented by the audio module, measured with Stats):
@@ -166,7 +172,9 @@ private:
 //     quietest owned voices fade back to DCS's own panning; it climbs back by 4 after 10 s under half the budget;
 //   - ED's own overrun counter (docs/BINAURAL_AUDIO_HOOKS.md section 6, item 7) is the hard stop: 3 overruns in 10 s
 //     turn binaural off for the session.
-// Expected cost (AVX2, 48 kHz, 128 taps): about 3 us per source per 10 ms block, 6 us while crossfading; 48 sources
-// about 0.15-0.3 ms per 10 ms block. Harness target: 64 sources x 480 frames, p99 < 0.5 ms.
+// Measured cost (harness A12, AVX2, 48 kHz, 128 taps, 480 frames, thread CPU time): 64 static sources p50 0.21 ms;
+// 64 sources with the head turning 90 deg/s p50 0.27 ms, p99 0.31 ms; 48 sources (the default MaxObjects) p50 0.21 ms;
+// 64 sources all sweeping ~190 deg/s p99 0.40 ms; SSE2 about 2x. CMake target: binaural_core (include/ is its public
+// include path).
 
 }  // namespace binaural

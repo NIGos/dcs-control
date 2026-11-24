@@ -11,6 +11,7 @@
 | VectorXR (DienerTech) | not used | Not used or distributed. DCS Control only sets `DISABLE_XR_APILAYER_DIENERTECH_VECTORXR=1` for the DCS processes it starts; some frame-generation ideas were compared with it, no code was copied; MPL-2.0 |
 | .NET | SDK 10.0.401 | Self-contained application runtime; Microsoft notices included in publish output |
 | Microsoft WebView2 SDK | 1.0.4258.31 | Managed browser host and native loader; SDK LICENSE and NOTICE included |
+| SADIE II database, subject D1 (Neumann KU100) | v2-2, Zenodo record 12092466, `D1_HRIR_SOFA.zip` (38,151,804 bytes, MD5 `4850c1eb8e63e2d4f605edcdb4d5c883` as Zenodo publishes it; SHA-256 recorded by `scripts/fetch-hrtf.ps1` on the first fetch) | The generic HRTF of the binaural audio: converted (minimum phase, diffuse-field equalised, front-normalised, truncated) into `native/binaural/data/sadie2_ku100.dcshrtf` and embedded in the engine payload; Apache-2.0, University of York; licence and attribution in `native/binaural/data` |
 
 The WebView2 Evergreen Runtime is installed separately and governed by Microsoft's runtime terms. The development machine has runtime 154.0.4258.48. All web assets, navigation icons and aircraft artwork are original project code. No DCS game images, fonts or launcher files are redistributed.
 

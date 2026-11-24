@@ -19,14 +19,19 @@
 //
 // The converter (C#, src/DcsVr.Core, task A) produces:
 //   - minimum-phase IRs (real cepstrum), truncated to `taps` with a half-Hann tail window;
-//   - onset delays from the original HRIRs (threshold onset at -20 dB of the peak, upsampled 8x), so the interaural time
-//     difference is delayRight - delayLeft;
-//   - diffuse-field equalisation (flag kDiffuseFieldEq): every IR divided by the power average over all directions,
-//     smoothed to 1/3 octave, limited to +-15 dB;
+//   - onset delays from the original HRIRs: the lag that best aligns each HRIR with its own minimum-phase version
+//     (cross-correlation upsampled 8x; Nam, Abel and Smith 2008), plus SOFA Data.Delay, the common minimum removed; the
+//     interaural time difference is delayRight - delayLeft. (A -20 dB level threshold was the first plan: band-limited
+//     onsets ring before the threshold and shadowed ears rise late: 38 us of ITD error on a synthetic set vs < 1 us.)
+//   - diffuse-field equalisation (flag kDiffuseFieldEq): every IR divided by the power average over all directions
+//     (weighted by each direction's share of the sphere), smoothed to 1/3 octave, centred on its 200 Hz-10 kHz mean,
+//     limited to +-15 dB;
+//   - triangulation: the convex hull of the directions (repeats within 0.05 degrees merged), t = 2n - 4;
+//   - taps: 128 at 48 kHz, scaled with the rate (120 at 44.1 kHz, 256 at 96 kHz);
 //   - front normalisation (flag kFrontNormalised): one gain for the whole set so that white noise from the front
 //     (x = 1) comes out at 0 dB per ear (energy of the two front IRs averaged = 1). Header.frontGain records it.
-//   - datasetHeadRadiusM: least-squares fit of Woodworth's ITD(theta) = (r / c)(theta + sin theta), c = 343 m/s,
-//     over the horizontal-plane directions; the renderer scales ITDs by (pilot radius / this radius).
+//   - datasetHeadRadiusM: least-squares fit of Woodworth's ITD(phi) = (r / c)(phi + sin phi), c = 343 m/s, phi the
+//     lateral angle, over all directions; the renderer scales ITDs by (pilot radius / this radius).
 //
 // Checksums: FNV-1a 64 of the payload (everything after the header) and of the header with headerFnv1a set to zero.
 // Header-only, C++17, no dependencies besides the standard library.

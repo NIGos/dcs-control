@@ -12,3 +12,5 @@ src/DcsVr.Core/KnownComponents.txt text eol=lf merge=union
 # It is embedded in DcsVr.Core, and the interface files are copied into the package as they are: LF on every checkout,
 # so the bytes that ship do not depend on core.autocrlf.
 src/DcsVr.App/ui/** text eol=lf
+# Binaural HRTF data (native/binaural): binary, never converted.
+*.dcshrtf binary

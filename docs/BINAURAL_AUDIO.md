@@ -214,7 +214,7 @@ Pass: `0 failure(s)`.
 | A4 | 360°/s horizontal sweep of a 1 kHz sine and of noise | no sample-to-sample step larger than the input's own maximum step × 1.05 plus 1e-4; band level monotonic in the lateral angle (±0.5 dB) |
 | A5 | Energy, front | white noise from the front: output per ear 0 dB ± 0.5 dB (front-normalised set) |
 | A6 | Front/back | KU100 front vs back, 2-8 kHz band level difference ≥ 3 dB, as in the source set ±1 dB |
-| A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; parallax: a source 0.3 m at 45° right gets each ear's own direction (left ear sees it at < 45°) |
+| A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; parallax: a source 0.3 m at 45° right gets each ear's own direction (the near, right ear sees it at < 45°, the left ear at > 45°) |
 | A8 | Latency | impulse from the front appears at sample `round(onset delay)` ± 1 with no block delay, for block sizes 1, 7, 480, 1056, 4096 |
 | A9 | Block-size invariance | the same input rendered with blocks of 480 and with random sizes 1-2048: identical within 1e-5 |
 | A10 | Crossfades | HRTF swap, head-radius change, ownership fade (w 0→1 and 1→0), kReset: no step above −60 dBFS on a 0 dBFS sine |
@@ -231,6 +231,36 @@ Pass: `0 failure(s)`.
 - **Bad inputs:** wrong convention, NaN data, fewer than 100 directions or an unsupported rate are rejected with a clear
   reason.
 - **Personal grid:** a synthetic irregular grid converts and validates.
+
+**Task A as built** (`native/binaural`, `binaural_core_test`; numbers from the run in the commit message):
+- The harness runs on a synthetic spherical-head set (an icosphere of 2,562 directions, Brown-Duda head shadow per ear,
+  a back shelf, Woodworth delays), so A1-A13 need no downloaded data. A14 runs as its own ctest (`--default-data`)
+  and prints `SKIP A14` until `native/binaural/data/sadie2_ku100.dcshrtf` is generated.
+- Measured against the criteria above, with these readings of them:
+  - A2/A3: octave bands up to the 16 kHz band, whose top edge is cut at 20 kHz (no fractional delay is flat to
+    Nyquist; 20 kHz is the limit of hearing).
+  - A4: "the input's own maximum step" is the largest step any static direction on the path produces (the HRTF's
+    gain is not 1, so the dry input's step is not a click threshold).
+  - A8: the onset is the first sample at half the peak (a fractional delay's sinc side lobes stay below it), and
+    nothing is output before the interpolator's look-ahead window. The latency is the set's delay plus 12 samples
+    (the 24-tap fractional-delay interpolator); no block delay at any block size.
+  - A10: "no step above -60 dBFS" = the largest second difference during the change exceeds the steady signal's
+    (before and after) by at most 1e-3. Also checked: near field off -> on.
+  - A12: thread CPU time per block (what preemption by other programs does not inflate), each statistic the best
+    of 5 runs of 1,000 blocks. Three scenes: 64 static sources; 64 sources with the head turning 90°/s (the limits
+    apply to both); 64 sources all sweeping ~190°/s (stress, p99 < 1 ms). SSE2 budget 2x.
+- Design changes from section 3, all measured: the FIR runs before the per-ear delay (both ears and both filters of a
+  crossfade share one pass over the mono input); the fractional delay is a 24-tap Kaiser-windowed sinc (flat to
+  0.42 x the rate; a 4-tap Lagrange loses 3 dB at 16 kHz); a direction crossfade lasts the first 64 frames of the
+  sub-block; a triangle change alone does not crossfade (the weights are continuous across edges).
+- The converter's onsets use the minimum-phase cross-correlation, not a -20 dB threshold (hrtf_format.h explains).
+- **Pending, each waiting for the user's go to download:**
+  - `D1_HRIR_SOFA.zip` from Zenodo record 12092466 (38,151,804 bytes; `scripts/fetch-hrtf.ps1` pins size and MD5);
+  - the PureHDF NuGet package (MIT; still 1.0.0-beta.x) for `SofaReader` (SOFA/HDF5 -> `HrirSet`) and the
+    `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> [--name] [--source] [--generic]` command.
+  Everything after the reader (`HrtfConverter`, `DcsHrtfFile`, `SphereHull`) is built and tested on synthetic HRIRs;
+  then `scripts/fetch-hrtf.ps1` generates `native/binaural/data/sadie2_ku100.dcshrtf`, A14 runs on it, and the
+  SADIE licence text joins `native/binaural/data/NOTICE`.
 
 ### 8.3 Audio module (task B, `native/dcsqvcull/test`)
 1. **Fake ed_sound:**
