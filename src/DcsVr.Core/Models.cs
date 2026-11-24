@@ -193,11 +193,12 @@ public sealed record VrProfile
     /// resolution, then fades out (dcsvr_edge_match; round and rounded-rectangle shapes). Without it the band crossfades
     /// two images of very different sharpness, which reads as a ring around where you look. Off by default until seen in
     /// the headset. With <see cref="UsesFoveatedFrameGen"/> the focus layer's output pass does the same taper, with the
-    /// periphery's resolution computed from the two views' sizes and fields of view (patch 0021).</summary>
+    /// periphery's resolution computed from the two views' sizes and fields of view (patch 0021). Part of
+    /// <see cref="QuadHideFocusEdge"/>: written only while it is on.</summary>
     public bool QuadEdgeMatch { get; init; }
-    /// <summary>Bundled Quad Views: hide the focus edge when the eyes move (on by default). Turns on the four settings
-    /// below with their own values; off writes what Quad Views did before them (no glide, no fade-in, the history starts
-    /// over at a saccade, no band match). Flown by the pilot 2026-11-24 with the defaults below, DLSS 5 Local tone 1.</summary>
+    /// <summary>Bundled Quad Views: hide the focus edge when the eyes move (on by default). Turns on the five settings
+    /// (<see cref="QuadEdgeMatch"/> above and the four below) with their own values; off writes what Quad Views did
+    /// before them (no edge match, no glide, no fade-in, the history starts over at a saccade, no band match). Flown by the pilot 2026-11-24 with the defaults below, DLSS 5 Local tone 1.</summary>
     public bool QuadHideFocusEdge { get; init; } = true;
     /// <summary>Eye-tracked bundled Quad Views: small focus moves outside saccades (the deadzone's steps, drift, slow
     /// pursuit) approach the gaze with this time constant instead of in one frame (dcsvr_gaze_glide_ms, Quad Views 0035;

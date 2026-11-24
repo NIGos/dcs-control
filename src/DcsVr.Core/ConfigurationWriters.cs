@@ -496,7 +496,7 @@ public static class ConfigurationWriters
         smoothen_focus_view_edges={Number(p.QuadEdgeBlend)}
         focus_view_shape={(p.QuadRoundFocus ? 2 : 8)}
         dcsvr_sharpen_taper={(p.QuadSharpenTaper ? 1 : 0)}
-        dcsvr_edge_match={(p.QuadEdgeMatch ? "0.6" : "0")}
+        dcsvr_edge_match={(p.QuadHideFocusEdge && p.QuadEdgeMatch ? "0.6" : "0")}
         dcsvr_periphery_sharpen={Number(p.QuadPeripheryContrast)}
         horizontal_fixed_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_fixed_section={Number(Math.Min(p.FoveaHeight, .9))}
