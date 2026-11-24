@@ -1044,6 +1044,8 @@ function buildFields() {
   because(at('quadSaccadeLead','quadGazeStabilize'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
   because(at('quadLostGazeEase'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
   for (const k of ['quadFocusFadeIn','quadBandMatch','quadBandMatchColor']) because(at(k),p => !quad(p) ? qvWhy(p) : !p.quadHideFocusEdge ? 'Turn on Hide the focus edge to use this.' : !usesFoveatedFg(p) ? 'Needs foveated frame generation.' : 'Set Match brightness at the edge above 0.');
+  because(at('quadGazeGlideMs'),p => !quad(p) ? qvWhy(p) : !p.quadHideFocusEdge ? 'Turn on Hide the focus edge to use this.' : 'Needs Focus movement: Eye tracked.');
+  because(at('quadKeepHistoryOnSaccade'),p => !quad(p) ? qvWhy(p) : !p.quadHideFocusEdge ? 'Turn on Hide the focus edge to use this.' : ['Turn on Periphery stability to use this.','peripheryStability']);
   // With Pimax Play's values and its Transition Mode Off the edge is hard whatever Focus edge blending says: the link
   // then goes to the focus area values.
   const noEdgeWhy = (p,text) => effectiveFovea(p).pimax ? ['Turn on Transition Mode in Pimax Play, or set the focus area here.','foveaSource'] : [text,'quadEdgeBlend'];
