@@ -22,6 +22,8 @@
 #define XR_USE_PLATFORM_WIN32
 #include <windows.h>
 #include <openxr/openxr.h>
+#include <unknwn.h>  // openxr_platform.h's Win32 types (WIN32_LEAN_AND_MEAN leaves IUnknown out)
+#include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
 
 #include <algorithm>
@@ -41,6 +43,7 @@
 #include "perception_shm.h"
 #include "dcsvr_drs_preset_filter.h"
 #include "dcsvr_pupil_fov.h"
+#include "head_pose_publisher.hpp"
 #include "pupil_math.hpp"
 #include "predictive_depth.hpp"
 #include "pvr_gaze.hpp"
@@ -200,6 +203,10 @@ struct PredictSecond {
 bool pvr_wanted_setting{true};  // [DepthBoost] PimaxPvrGaze
 bool depth_trace{};             // [DepthBoost] Trace=1: one "dtrace:" line per display time (diagnostics only)
 std::atomic<bool> pvr_wanted{};  // Depth boost enabled and PimaxPvrGaze=1: attach to Pimax's PVR client
+// [HeadPose] Publish=1: the head pose for binaural audio (publish_head_pose); Live. The value last read (under the main
+// mutex) for the Live log line, -1 before the first read.
+std::atomic<bool> head_pose_wanted{};
+int head_pose_ini{-1};
 std::array<XrFovf, 2> last_focus_fov{};
 bool have_last_focus{};
 std::array<Vec3, 2> last_qv{};
@@ -260,6 +267,13 @@ void reload_settings_locked(bool force) {
     s.simulate = ini_float(L"SimulateGaze", 0, path) != 0;
     s.publish_gaze = ini_float(L"PublishGaze", 0, path) != 0;
     settings = s;
+    {
+        const bool head_pose = ini_float(L"Publish", 0, path, L"HeadPose") != 0;
+        if (head_pose_ini >= 0 && head_pose_ini != (head_pose ? 1 : 0))
+            log("head pose: %s (PupilShift.ini [HeadPose] Publish=%d, Live)\n", head_pose ? "publishing" : "off", head_pose ? 1 : 0);
+        head_pose_ini = head_pose ? 1 : 0;
+        head_pose_wanted.store(head_pose, std::memory_order_relaxed);
+    }
     log("settings: enabled=%d eye_radius=%.1fmm virtual_image=%.2fm max_gaze=%.0fdeg simulate=%d (%.1f, %.1f) toggle=%d:%d ipd=%.1fmm publish_gaze=%d\n",
         s.enabled, s.eye_radius * 1000, s.virtual_image, s.max_gaze_deg, s.simulate, s.simulate_x_deg, s.simulate_y_deg,
         pupil_key.vk, pupil_key.mods, s.ipd * 1000, s.publish_gaze ? 1 : 0);
@@ -1521,6 +1535,144 @@ void update_depth_locked(const XrView* views, std::uint32_t n, const EyeGazes& g
     account_depth_locked(base_ipd * 1000, base_ipd * depth.scale() * 1000, scene, pvr_sample, in.landing_step);
 }
 
+// ---- Head pose for binaural audio (Local\DcsVrHeadPose_v1, native/binaural/include/head_pose_shm.h) ------------------
+// PupilShift.ini [HeadPose] Publish=1 (the app writes it with 3D headphone audio and "Follow the head between frames"):
+// at each xrLocateViews with a new display time the layer locates its own VIEW reference space in DCS's base space at
+// that display time, with XrSpaceVelocity, and publishes the head pose (head_pose_publisher.hpp). When the VIEW space
+// cannot be located, the head is taken from the runtime's two primary eye views (from_views). The display time in QPC
+// comes from XR_KHR_win32_convert_performance_counter_time, which the layer adds at instance creation when Publish=1
+// and the runtime offers it (else qpcDisplay stays 0 and readers use the locate time). Publish=0 (default): no mapping,
+// no VIEW space, no runtime call, one atomic load per xrLocateViews. Live: re-read with the rest of the ini. The poses
+// published are the runtime's own, before the layer moves any view; nothing the layer hands DCS changes.
+// The mapping is created at the first publish and closed when the layer unloads (readers keep their own view of it).
+// Its own lock, never nested with the main mutex or eye_mutex; every runtime call of the feed runs under it.
+struct HeadPoseFeed {
+    XrInstance instance{XR_NULL_HANDLE};
+    PFN_xrCreateReferenceSpace create_reference_space{};
+    PFN_xrDestroySpace destroy_space{};
+    PFN_xrLocateSpace locate_space{};
+    PFN_xrConvertTimeToWin32PerformanceCounterKHR to_qpc{};  // only with the extension enabled on the instance
+    const char* qpc_how{"not enabled"};
+    XrSession session{XR_NULL_HANDLE};
+    XrSpace view{XR_NULL_HANDLE};
+    unsigned space_attempts{};          // VIEW space creations tried for this session
+    unsigned next_space_try{};          // frames until the next try after a failure
+    bool session_logged{};
+    unsigned locate_failures{}, fallbacks{}, refused{};
+    bool block_failed{};
+};
+HeadPoseFeed head_feed;
+std::mutex head_mutex;
+head_pose::Publisher head_publisher;
+dcsvr_perception::SharedBlock<dcsvr_headpose::Block> head_block;
+std::int64_t qpc_frequency() {
+    LARGE_INTEGER f{};
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart;
+}
+std::int64_t qpc_now() {
+    LARGE_INTEGER c{};
+    QueryPerformanceCounter(&c);
+    return c.QuadPart;
+}
+
+// At xrLocateViews, right after the runtime's call (views as the runtime returned them), only with Publish=1.
+void publish_head_pose(XrSession session, const XrViewLocateInfo* info, const XrViewState* state, std::uint32_t count, const XrView* views) {
+    if (!head_publisher.claim(info->displayTime)) return;  // once per display time
+    std::lock_guard lock(head_mutex);
+    HeadPoseFeed& f = head_feed;
+    if (!head_block.get()) {
+        if (f.block_failed) return;
+        if (!head_block.open(dcsvr_headpose::block_name, shm_suffix)) {
+            f.block_failed = true;
+            log("head pose: shared memory %ls%ls FAILED (%lu); not published\n", dcsvr_headpose::block_name, shm_suffix, GetLastError());
+            return;
+        }
+        log("head pose: shared memory %ls%ls created\n", dcsvr_headpose::block_name, shm_suffix);
+    }
+    if (f.session != session) {
+        if (f.view != XR_NULL_HANDLE && f.destroy_space) f.destroy_space(f.view);
+        f.session = session;
+        f.view = XR_NULL_HANDLE;
+        f.space_attempts = f.next_space_try = 0;
+        f.session_logged = false;
+    }
+    if (!f.session_logged) {
+        f.session_logged = true;
+        dcsvr_headpose::InitWriter(head_block.get(), qpc_frequency(), GetCurrentProcessId(), f.to_qpc ? dcsvr_headpose::writer_flags::qpc_display : 0u);
+        log("head pose: publishing (display time in QPC: %s)\n", f.qpc_how);
+    }
+    // The VIEW space: created at the first publish of the session; after a failure tried again every 900 frames, at most
+    // 4 times (the eye views stand in meanwhile).
+    if (f.view == XR_NULL_HANDLE && f.create_reference_space && f.space_attempts < 4 && f.next_space_try > 0) --f.next_space_try;
+    else if (f.view == XR_NULL_HANDLE && f.create_reference_space && f.space_attempts < 4) {
+        XrReferenceSpaceCreateInfo space_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        space_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+        space_info.poseInReferenceSpace.orientation.w = 1.0f;
+        const XrResult r = f.create_reference_space(session, &space_info, &f.view);
+        ++f.space_attempts;
+        if (XR_FAILED(r)) {
+            f.view = XR_NULL_HANDLE;
+            f.next_space_try = 900;
+            log("head pose: VIEW space could not be created (%d); the eye views stand in\n", r);
+        } else {
+            log("head pose: VIEW space created\n");
+        }
+    }
+    head_pose::Sample s;
+    bool have{};
+    if (f.view != XR_NULL_HANDLE && f.locate_space) {
+        XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        location.next = &velocity;
+        const XrResult r = f.locate_space(f.view, info->space, info->displayTime, &location);
+        if (XR_SUCCEEDED(r) && (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+            const XrPosef& p = location.pose;
+            s.orientation[0] = p.orientation.x; s.orientation[1] = p.orientation.y; s.orientation[2] = p.orientation.z; s.orientation[3] = p.orientation.w;
+            s.position[0] = p.position.x; s.position[1] = p.position.y; s.position[2] = p.position.z;
+            s.angular_velocity[0] = velocity.angularVelocity.x; s.angular_velocity[1] = velocity.angularVelocity.y; s.angular_velocity[2] = velocity.angularVelocity.z;
+            s.linear_velocity[0] = velocity.linearVelocity.x; s.linear_velocity[1] = velocity.linearVelocity.y; s.linear_velocity[2] = velocity.linearVelocity.z;
+            namespace ef = dcsvr_headpose::entry_flags;
+            const XrSpaceLocationFlags lf = location.locationFlags;
+            s.flags = ef::orientation_valid | (lf & XR_SPACE_LOCATION_POSITION_VALID_BIT ? ef::position_valid : 0u) |
+                (lf & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT ? ef::orientation_tracked : 0u) |
+                (lf & XR_SPACE_LOCATION_POSITION_TRACKED_BIT ? ef::position_tracked : 0u) |
+                (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT ? ef::angular_velocity_valid : 0u) |
+                (velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT ? ef::linear_velocity_valid : 0u);
+            have = true;
+        } else if (f.locate_failures++ < 3) {
+            log("head pose: VIEW space not located (%d, flags 0x%llx); the eye views stand in\n", r,
+                static_cast<unsigned long long>(XR_SUCCEEDED(r) ? location.locationFlags : 0));
+        }
+    }
+    if (!have && views && count >= 2 && state) {
+        const XrViewStateFlags vf = state->viewStateFlags;
+        const XrPosef& l = views[0].pose;
+        const XrPosef& r = views[1].pose;
+        const float ql[4]{l.orientation.x, l.orientation.y, l.orientation.z, l.orientation.w}, pl[3]{l.position.x, l.position.y, l.position.z};
+        const float qr[4]{r.orientation.x, r.orientation.y, r.orientation.z, r.orientation.w}, pr[3]{r.position.x, r.position.y, r.position.z};
+        have = head_pose::from_views(ql, pl, qr, pr, (vf & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0, (vf & XR_VIEW_STATE_POSITION_VALID_BIT) != 0,
+            (vf & XR_VIEW_STATE_ORIENTATION_TRACKED_BIT) != 0, (vf & XR_VIEW_STATE_POSITION_TRACKED_BIT) != 0, s);
+        if (have && f.fallbacks++ == 0) log("head pose: from the eye views (no VIEW space location)\n");
+    }
+    if (!have) return;
+    const std::int64_t qpc_locate = qpc_now();
+    LARGE_INTEGER display{};
+    const std::int64_t qpc_display = f.to_qpc && XR_SUCCEEDED(f.to_qpc(f.instance, info->displayTime, &display)) ? display.QuadPart : 0;
+    if (!head_publisher.publish(head_block.get(), info->displayTime, qpc_locate, qpc_display,
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(info->space)), s) && f.refused++ < 3)
+        log("head pose: a pose was refused (not a rotation, or older than the last one published)\n");
+}
+
+// Session end: the VIEW space goes (before the runtime destroys the session).
+void head_pose_session_end(XrSession session) {
+    std::lock_guard lock(head_mutex);
+    if (session != head_feed.session) return;
+    if (head_feed.view != XR_NULL_HANDLE && head_feed.destroy_space) head_feed.destroy_space(head_feed.view);
+    head_feed.view = XR_NULL_HANDLE;
+    head_feed.session = XR_NULL_HANDLE;
+}
+
 // ---- OpenXR eye gaze (XR_EXT_eye_gaze_interaction) ------------------------------------------------------------------
 // Without the bundled Quad Views' export (Pimax's native quad views) the focus views cannot tell a real gaze from the
 // fixed spot the runtime shows without one, so the layer reads the runtime's eye gaze itself. DCS does not enable the
@@ -1556,7 +1708,9 @@ std::mutex eye_mutex;  // never nested with the main mutex
 bool xr_was_present{}, focus_warned{};  // under the main mutex
 
 // Whether the runtime (and the layers below) offer the extension, asked before the instance exists.
-Availability probe_eye_gaze(PFN_xrGetInstanceProcAddr gipa) {
+Availability probe_extension(PFN_xrGetInstanceProcAddr gipa, const char* name);
+Availability probe_eye_gaze(PFN_xrGetInstanceProcAddr gipa) { return probe_extension(gipa, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME); }
+Availability probe_extension(PFN_xrGetInstanceProcAddr gipa, const char* name) {
     PFN_xrVoidFunction f{};
     if (XR_FAILED(gipa(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &f)) || f == nullptr) return Availability::unknown;
     const auto enumerate = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(f);
@@ -1565,7 +1719,7 @@ Availability probe_eye_gaze(PFN_xrGetInstanceProcAddr gipa) {
     std::vector<XrExtensionProperties> properties(count, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
     if (count && XR_FAILED(enumerate(nullptr, count, &count, properties.data()))) return Availability::unknown;
     for (std::uint32_t i = 0; i < count && i < properties.size(); ++i)
-        if (std::strcmp(properties[i].extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) == 0) return Availability::present;
+        if (std::strcmp(properties[i].extensionName, name) == 0) return Availability::present;
     return Availability::absent;
 }
 
@@ -1691,6 +1845,8 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_SuggestInteractionProfileBindings(XrInstance
 XRAPI_ATTR XrResult XRAPI_CALL hook_CreateSession(XrInstance instance, const XrSessionCreateInfo* info, XrSession* session) {
     const XrResult result = xrd.create_session(instance, info, session);
     if (XR_FAILED(result) || info == nullptr || session == nullptr) return result;
+    // With Publish=1 the first publish of the session logs "head pose: publishing".
+    if (!head_pose_wanted.load(std::memory_order_relaxed)) log("head pose: off (PupilShift.ini [HeadPose] Publish=0)\n");
     std::lock_guard lock(eye_mutex);
     if (instance != eye_state.instance || eye_state.action == XR_NULL_HANDLE) return result;
     if (eye_state.session != XR_NULL_HANDLE) {
@@ -1735,6 +1891,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_DestroySession(XrSession session) {
             eye_state.absent_reason = "no session";
         }
     }
+    head_pose_session_end(session);
     return xrd.destroy_session(session);
 }
 
@@ -1754,6 +1911,14 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_DestroyInstance(XrInstance instance) {
     {
         std::lock_guard lock(eye_mutex);
         if (instance == eye_state.instance) eye_state = EyeGazeState{};  // the action set goes with the instance
+    }
+    {
+        // The VIEW space goes with the instance; the next instance's display times start over. The block stays.
+        std::lock_guard lock(head_mutex);
+        if (instance == head_feed.instance) {
+            head_feed = HeadPoseFeed{};
+            head_publisher.reset();
+        }
     }
     return xrd.destroy_instance(instance);
 }
@@ -1881,6 +2046,9 @@ void log_gaze_source_locked(GazeSource source, bool xr_present, const char* xr_a
 XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewLocateInfo* info, XrViewState* state,
     uint32_t capacity, uint32_t* count, XrView* views) {
     const XrResult result = next_locate_views(session, info, state, capacity, count, views);
+    // The head pose for binaural audio, from the runtime's own values (before anything here moves a view).
+    if (XR_SUCCEEDED(result) && info && head_pose_wanted.load(std::memory_order_relaxed))
+        publish_head_pose(session, info, state, views && count && *count <= capacity ? *count : 0, views);
     if (XR_FAILED(result) || views == nullptr || capacity == 0 || count == nullptr || *count < 2 || *count > 4 || info == nullptr) return result;
     if (!(state->viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) || !(state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
         // No eye distance is moved on this frame (tracking lost): the engine is told so (scale 1), instead of carrying the
@@ -2181,14 +2349,32 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
     // A runtime whose extension list cannot be read (unknown) is taken as offering it, as for the layer's own request:
     // Quad Views asks for it on its own list, so an unknown here must not leave the fixed focus without a gaze.
     const bool below = wanted && !app_enabled && qv_fixed && availability != Availability::absent;
+    // The head pose feed ([HeadPose] Publish=1 at instance creation): XR_KHR_win32_convert_performance_counter_time for
+    // the display time in QPC, added only when the runtime says it offers it (a pure conversion; nothing else changes).
+    const bool head_pose_at_create = GetPrivateProfileIntW(L"HeadPose", L"Publish", 0, (module_dir + L"PupilShift.ini").c_str()) != 0;
+    bool app_time{};
+    for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i)
+        app_time |= std::strcmp(info->enabledExtensionNames[i], XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0;
+    bool inject_time = head_pose_at_create && !app_time &&
+        probe_extension(next_gipa, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == Availability::present;
     std::vector<const char*> extensions;
-    if (info->enabledExtensionCount && info->enabledExtensionNames)
-        extensions.assign(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);
-    if (inject) extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
-    XrInstanceCreateInfo forwarded = *info;
-    forwarded.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
-    forwarded.enabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
-    XrResult result = layer_info->nextInfo->nextCreateApiLayerInstance(&forwarded, &next_info, instance);
+    const auto forward = [&]() {
+        extensions.clear();
+        if (info->enabledExtensionCount && info->enabledExtensionNames)
+            extensions.assign(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);
+        if (inject) extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+        if (inject_time) extensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+        XrInstanceCreateInfo forwarded = *info;
+        forwarded.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
+        forwarded.enabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
+        return layer_info->nextInfo->nextCreateApiLayerInstance(&forwarded, &next_info, instance);
+    };
+    XrResult result = forward();
+    bool time_refused{};
+    if (inject_time && result == XR_ERROR_EXTENSION_NOT_PRESENT) {  // without the time extension, the rest as before
+        inject_time = false; time_refused = true;
+        result = forward();
+    }
     bool refused{};
     if (inject && result == XR_ERROR_EXTENSION_NOT_PRESENT) {
         inject = false; refused = true;
@@ -2198,6 +2384,24 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
         PFN_xrVoidFunction f{};
         if (XR_SUCCEEDED(next_gipa(*instance, "xrLocateViews", &f))) next_locate_views = reinterpret_cast<PFN_xrLocateViews>(f);
         if (XR_SUCCEEDED(next_gipa(*instance, "xrEndFrame", &f))) next_end_frame = reinterpret_cast<PFN_xrEndFrame>(f);
+        {
+            // The head pose feed's calls below the layer (used only with Publish=1; resolving them calls nothing).
+            std::lock_guard lock(head_mutex);
+            head_feed = HeadPoseFeed{};
+            head_publisher.reset();
+            head_feed.instance = *instance;
+            const auto load = [&](const char* name, auto& fn) {
+                PFN_xrVoidFunction p{};
+                if (XR_SUCCEEDED(next_gipa(*instance, name, &p)) && p) fn = reinterpret_cast<std::decay_t<decltype(fn)>>(p);
+            };
+            load("xrCreateReferenceSpace", head_feed.create_reference_space);
+            load("xrDestroySpace", head_feed.destroy_space);
+            load("xrLocateSpace", head_feed.locate_space);
+            if (app_time || inject_time) load("xrConvertTimeToWin32PerformanceCounterKHR", head_feed.to_qpc);
+            head_feed.qpc_how = head_feed.to_qpc ? (app_time ? "yes, the application's extension" : "yes, extension added by the layer") :
+                time_refused ? "no, the runtime refused the extension" : head_pose_at_create ? "no, the runtime does not offer the extension" :
+                "no, Publish was 0 at instance creation";
+        }
         {
             std::lock_guard lock(mutex);
             log("instance created for %s\n", info->applicationInfo.applicationName);
@@ -2286,6 +2490,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
         stereo_block.close();
         depth_block.close();
         grid_block.close();
+        head_block.close();
         if (log_file) std::fclose(log_file);
     }
     return TRUE;
