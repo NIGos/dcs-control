@@ -199,6 +199,9 @@ public static partial class Diagnostics
                 try { if (Directory.Exists(hooks)) Text("dcs/Scripts/Hooks.txt", hooks, string.Join("\n", Directory.EnumerateFiles(hooks).Select(Path.GetFileName))); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             }
+            // 3D headphone audio: the HRTF sets in the library (names and facts; never a SOFA file or where it was) and the
+            // module's audio lines of the last DCS start. The deployed .dcshrtf files are binary and stay out.
+            if (sources.StateRoot is { } audioState) Text("dcs-control/audio.txt", "DCS Control", learning ? "" : AudioSummary(audioState, savedGamesRoot));
             if (sources.DcsExecutable is { } exe && Path.GetDirectoryName(exe) is { } bin)
             {
                 Folder("dcs/bin/CheekyFoveatedDLSS", Path.Combine(bin, "CheekyFoveatedDLSS"));
@@ -274,6 +277,31 @@ public static partial class Diagnostics
         + (headset?.Line ?? "Headset/runtime: not read") + "\n\n"
         + "In-flight switches (DcsQvCull.prev.log is the DCS session before DcsQvCull.log):\n"
         + (toggles.Count == 0 ? "  none in these logs\n" : string.Concat(toggles.Select(t => "  " + t + "\n")));
+
+    /// <summary>The package's audio.txt: the HRTF library and the "audio:" lines of the module's newest log.</summary>
+    internal static string AudioSummary(string stateRoot, string? savedGamesRoot)
+    {
+        var text = new StringBuilder("3D headphone audio\n\nHRTF sets in the library (the generic KU100 set is inside the engine module):\n");
+        var sets = new HrtfLibrary(stateRoot).List();
+        if (sets.Count == 0) text.Append("  none\n");
+        foreach (var s in sets)
+            text.Append(System.Globalization.CultureInfo.InvariantCulture, $"  {s.Name}: \"{s.Title}\", {s.Directions} directions, {s.SampleRate} Hz, {s.Taps} taps, head radius {s.HeadRadiusMm:0.0} mm, {s.Bytes} bytes{(s.Imported is { } at ? ", imported " + at.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) : "")}{(s.Warnings.Count > 0 ? "; " + string.Join(" ", s.Warnings) : "")}\n");
+        text.Append("\naudio: lines of the module's newest log (DcsQvCull.log):\n");
+        if (savedGamesRoot is not null)
+        {
+            var log = EngineOptimizations.ModuleLog(Path.Combine(savedGamesRoot, "Scripts", EngineOptimizations.ModuleFolder));
+            try
+            {
+                var lines = File.Exists(log) ? LastFlight.ReadLines(log, 8L * 1024 * 1024, l => l.Contains("audio: ", StringComparison.Ordinal) || l.Contains("loader started", StringComparison.Ordinal)) : [];
+                var start = lines.FindLastIndex(l => l.Contains("loader started", StringComparison.Ordinal));
+                var audio = lines.Skip(start + 1).ToList();
+                foreach (var line in audio.Take(40).Concat(audio.Count > 80 ? ["  …"] : []).Concat(audio.Skip(Math.Max(40, audio.Count - 40)))) text.Append("  ").Append(line.Trim()).Append('\n');
+                if (audio.Count == 0) text.Append("  none\n");
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { text.Append("  unreadable: ").Append(e.Message).Append('\n'); }
+        }
+        return text.ToString();
+    }
 
     private static string Readme(IReadOnlyList<DiagnosticEntry> entries) =>
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"

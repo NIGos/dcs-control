@@ -11,7 +11,7 @@ namespace DcsVr.App;
 /// <summary>One serialized command channel. Web content never owns an approved deployment plan.</summary>
 internal sealed class WebBridge(ControlService service, Window? owner = null,
     Func<string?, string?, InventorySnapshot>? capture = null, bool offline = false, Func<string?, string?, FlightSources>? flightSources = null,
-    Updates? updates = null, string? releaseNotesPath = null, string? setupTemp = null)
+    Updates? updates = null, string? releaseNotesPath = null, string? setupTemp = null, IHrtfConverter? hrtfConverter = null)
 {
     private readonly SemaphoreSlim _commands = new(1);
     private volatile string? _writing;
@@ -519,20 +519,31 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     /// lock: a file dialog left open (Save, Import, a diagnostic package) would otherwise time them out.</summary>
     private Task<string>? StatusRequest(string json)
     {
-        if (json.Length > 128 * 1024 || !(json.Contains("\"engineStatus\"", StringComparison.Ordinal) || json.Contains("\"pupilStatus\"", StringComparison.Ordinal))) return null;
+        if (json.Length > 128 * 1024 || !(json.Contains("\"engineStatus\"", StringComparison.Ordinal) || json.Contains("\"pupilStatus\"", StringComparison.Ordinal) || json.Contains("\"audioStatus\"", StringComparison.Ordinal))) return null;
         string? id = null;
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             var action = root.GetProperty("action").GetString();
-            if (action is not ("engineStatus" or "pupilStatus")) return null;
+            if (action is not ("engineStatus" or "pupilStatus" or "audioStatus")) return null;
             id = root.GetProperty("id").GetString();
             return Answer(action == "engineStatus");
             async Task<string> Answer(bool engine)
             {
                 try
                 {
+                    if (action == "audioStatus")
+                    {
+                        // 3D headphone audio in the module's newest log (Audio page status), and the applied profile's state.
+                        var audioOptions = await Task.Run(EngineOptionsPath);
+                        var audioApplied = await Task.Run(service.ReadAppliedProfile);
+                        return Reply(id, new
+                        {
+                            status = audioOptions is null ? null : await Task.Run(() => Binaural.ReadStatus(audioOptions, DcsRunning())),
+                            applied = audioApplied?.Profile.ForLaunch().UsesBinauralAudio == true, dcsRunning = DcsRunning(),
+                        });
+                    }
                     if (engine)
                     {
                         // The DCS engine optimizations' own log, the newest test report and DCS's log.
@@ -607,6 +618,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         }
     }
     private string? _previewFoveaStamp;
+    /// <summary>A SOFA file picked whose name was taken: the page sends another name for it (the path stays here).</summary>
+    private string? _pendingSofa;
+    private readonly IHrtfConverter _hrtfConverter = hrtfConverter ?? new CliHrtfConverter();
     private string? _dcs, _options, _sboys;
     private ApplyPlan? _plan;
     private ReadinessReport? _readiness;
@@ -985,6 +999,46 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (_sboysHashes is null || _sboysHashes.Any(f => !File.Exists(f.Key) || Hashing.FileSha256(f.Key) != f.Value))
                         throw new InvalidDataException("Prepared Sboys files changed. Prepare the official package again before opening it.");
                     using (var process = Process.Start(new ProcessStartInfo(_sboys) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(_sboys)! })) { } break;
+                case "hrtfImport":
+                {
+                    // A personal SOFA file, converted once into the app's HRTF library (never kept itself). The file is
+                    // picked here; a name already taken comes back as needName, and the page sends the new name (the file
+                    // stays on this side). The offline verification gives a fixture path instead of the dialog.
+                    var library = service.Hrtf;
+                    string? sofa;
+                    if (data.TryGetProperty("name", out var chosen) && chosen.ValueKind == JsonValueKind.String) sofa = _pendingSofa;
+                    else if (offline && data.TryGetProperty("fixture", out var fixturePath) && fixturePath.ValueKind == JsonValueKind.String) sofa = fixturePath.GetString();
+                    else
+                    {
+                        EnsureInteractive();
+                        var sofaDialog = new OpenFileDialog { Title = "Import your HRTF (SOFA file)", Filter = "SOFA HRTF|*.sofa" };
+                        sofa = sofaDialog.ShowDialog(owner) == true ? sofaDialog.FileName : null;
+                    }
+                    if (sofa is null) return Reply(id, new { cancelled = true });
+                    var wanted = chosen.ValueKind == JsonValueKind.String ? chosen.GetString()!.Trim() : Binaural.NameFrom(Path.GetFileNameWithoutExtension(sofa));
+                    try
+                    {
+                        var set = await Task.Run(() => library.Import(sofa, wanted, _hrtfConverter));
+                        _pendingSofa = null; Invalidate();
+                        AppLog.Info("HRTF imported: " + set.Name + " (" + set.Directions + " directions, " + set.SampleRate + " Hz)");
+                        return Reply(id, new { imported = set, hrtfSets = library.List(), message = $"Imported \"{set.Name}\": {set.Directions} directions, {set.SampleRate} Hz. It is now selected." });
+                    }
+                    catch (HrtfNameTakenException taken) { _pendingSofa = sofa; return Reply(id, new { needName = true, taken = taken.Name, suggested = taken.Suggested }); }
+                    catch (Exception e) when (e is HrtfConversionException or InvalidDataException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                    { _pendingSofa = null; AppLog.Info("HRTF import refused: " + e.Message); return Reply(id, new { refused = e.Message, hrtfSets = library.List() }); }
+                }
+                case "hrtfDelete":
+                {
+                    var name = data.GetProperty("name").GetString() ?? throw new InvalidDataException("Name the set to remove.");
+                    await Task.Run(() => service.Hrtf.Delete(name)); Invalidate();
+                    return Reply(id, new { hrtfSets = service.Hrtf.List(), message = $"Removed \"{name}\". The next launch takes it out of DCS too." });
+                }
+                case "audioToggle":
+                {
+                    // The kill switch: toggle_audio.flag next to the running module (the same as the in-flight key).
+                    var audioOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");
+                    return Reply(id, new { message = Binaural.ToggleNow(audioOptions, DcsRunning()) });
+                }
                 default: throw new InvalidDataException("Unknown interface command.");
             }
             // Off the UI thread (it hashes dxgi.dll, reads the applied record and probes the headset); the fields it reads
@@ -1173,7 +1227,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = dcsNow, dcsStuck = DcsStuckLast(dcsNow),
             // The settings Live mode writes while DCS runs (LiveSettings): the page tags them.
             liveFields = LiveSettings.AvailableFields(applied?.Profile, applied?.Journal),
-            savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness };
+            savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness,
+            // 3D headphone audio: the pilot's own HRTF sets (the generic one is always there), and whether this build has
+            // the pupil shift layer that publishes the head pose.
+            hrtfSets = service.Hrtf.List(), headPoseLayer = File.Exists(Path.Combine(service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll")) };
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>
     private object? SavedRuntimeView() => service.SavedRuntime.Current() is { } s

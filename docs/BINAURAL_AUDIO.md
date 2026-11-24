@@ -403,3 +403,55 @@ others only append.
 3. Run every native and .NET test.
 4. Run the personal-data check.
 5. Live tests (8.6) only with the user's go, DCS state checked first.
+
+## 10. The app side (task D): what the app writes, reads and calls
+
+Implemented on `feat/hrtf-app` (`src/DcsVr.Core/BinauralAudio.cs`, `HrtfLibrary.cs`; the Audio page in `src/DcsVr.App/ui`).
+Tasks A and B match these when they merge; the integrator checks them against the merged code.
+
+**Profile** (`VrProfile`): `binauralAudio`, `binauralHrtf`, `headCircumferenceCm`, `binauralLateHeadTracking`,
+`binauralNearField`, `binauralMaxObjects`, `binauralLevelTrimDb`, `binauralCpuBudgetPercent`, `binauralExcludeContexts`
+(profile file only), `binauralLogVoices`, `audioToggleKey` (default `117:6`, Alt+Shift+F6). Derived, never saved:
+`UsesBinauralAudio` (also with Optimizations only), `UsesHeadPosePublish` (VR, LateHeadTracking on).
+
+**Files Launch DCS writes** while 3D audio is on:
+- `DcsQvCull.ini`: `[Audio]` with every key of `binaural_config.h` (ExcludeContexts only when set), each clamped to the
+  table's range, and `[Hotkeys] AudioToggle` in the one `[Hotkeys]` section. Off: neither is written. The engine module is
+  installed for 3D audio alone (Perception-only mode when Engine Optimizations are off).
+- `Scripts\DcsQvCull\hrtf\<name>.dcshrtf`: every valid set of the app's library (state folder `hrtf\`), so another set
+  can be picked live. A profile naming a set that is gone gets `Hrtf=default` (Checks: `audio-hrtf-missing`).
+- `PupilShift.ini [HeadPose] Publish=1` in VR with LateHeadTracking; the pupil shift layer is deployed for it, with
+  `OpenXrEyeGaze=0` when nothing else needs the gaze. Without the layer component, 3D audio installs without it.
+- `options.lua sound.main_layout = "stereo"` (owned, restored by Back to stock and when 3D audio is turned off). The
+  `spatial` driver is never written; when `sound.driver_name` is `spatial`, Checks warns (`audio-spatial`).
+- Runtime files removed by Back to stock: `toggle_audio.flag`, `audio_*.csv` (the LogVoices CSV must match this pattern).
+
+**Live:** every field above but `binauralExcludeContexts`, file `DcsQvCull.ini`, only while the installed payload has the
+audio part: the app looks for the UTF-16 resource name `HRTF_DEFAULT` in the installed `DcsQvCullPayload.dll` (task B
+embeds the generic set under that name). `Audio.Hrtf` naming a set not installed at launch waits. `HeadPose.Publish` is
+not a live key (read when DCS starts VR), so turning 3D audio on in VR waits.
+
+**Log lines the app reads** (`Binaural.ParseStatus`; Audio page status, Last flight, Checks), all after the last
+`loader started` of `DcsQvCull.log`, each containing ` audio: `:
+
+| Line | Meaning for the app |
+|---|---|
+| `audio: on (...)` | running; inside, `hrtf <name>` and `head pose on`/`off` are shown when present |
+| `audio: off (<reason>)` | off for the session; the reason is shown as is (Checks `audio-status`) |
+| `audio: <id> not found (<why>)` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
+| `audio: switched off` / `audio: switched on` | the kill switch (key or flag) |
+| `audio: stats ... sounds=<n> ... p99=<x> ms` | sounds rendered in 3D and the p99 cost per block (`owned=` or `voices=` also read) |
+| `audio: budget ... -> <n>` (or `back-off`) | a CPU back-off, down to n sounds (Checks `audio-backoff`) |
+
+**SOFA converter** (task A), called through the CLI contract `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> --name <name>`
+(`CliHrtfConverter`, hidden, below-normal priority, two-minute limit): exit 0 with the file written is a conversion;
+stdout lines `warning: <text>` are shown in the report and `coverage: <percent>%` as the grid coverage. Any other exit
+is a refusal whose reason is the last stderr line. The app validates the result again with a port of
+`hrtf_format.h Validate()` (`HrtfFile.Validate`) and keeps nothing it refuses. `IHrtfConverter` is the seam: task A may
+replace `CliHrtfConverter` with an in-process call. The SOFA file and its folder are never kept; the library keeps the
+`.dcshrtf`, and a sidecar with the SOFA file's name, the import time, the warnings and the coverage.
+
+**Checks codes:** `audio-hrtf`, `audio-head-size`, `audio-max-sounds`, `audio-level`, `audio-cpu` (ranges, errors),
+`audio-contexts`, `audio-hotkey`, `audio-layout` (info), `audio-spatial`, `audio-hrtf-missing`, `audio-head-pose`,
+`audio-status`, `audio-backoff` (readiness, from the log). The diagnostic package adds `dcs-control/audio.txt` (the library's
+sets and the audio log lines; never a SOFA file, its path, or a `.dcshrtf`).

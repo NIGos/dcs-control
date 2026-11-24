@@ -5451,7 +5451,7 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
         new VrProfile(), vr, vr with { Gaze = GazeMode.Fixed }, vr with { QuadViews = QuadProvider.None }, vr with { FrameGen = FrameGeneration.FidelityFx },
         vr with { EngineOptimizations = false }, vr with { PupilShift = false, DepthBoost = false, GazeDof = false, GVisionUseGaze = false }, vr with { Runtime = RuntimeKind.SboysSteamVr },
         // The keys written only for a non-default value that is not a switch (all switches on leaves them out).
-        vr with { EngineDevMode = false, PanelGamut = 1, PeripheryDlssPreset = PeripheryDlssPreset.K, EngineShaderCachePrewarm = false, EngineShaderCompileWorkers = 2, EngineFastShaderPaths = false },
+        vr with { EngineDevMode = false, PanelGamut = 1, PeripheryDlssPreset = PeripheryDlssPreset.K, EngineShaderCachePrewarm = false, EngineShaderCompileWorkers = 2, EngineFastShaderPaths = false, BinauralExcludeContexts = "1" },
     };
     var keys = new SortedSet<string>(StringComparer.Ordinal);
     void Add(string writer, string ini)
@@ -5535,6 +5535,10 @@ Test("Every value the profile checks accept is written inside the range its comp
     Fields(Read("native/dcsqvcull/src/color_grade.h"), @"p\.(\w+) = Ini[DI]\(ini, (s|L""Color""), L""(\w+)""", @"p\.(\w+) = ClampD\(p\.\1, ([-\d.]+), ([-\d.]+)",
         s => s == "s" ? ["DcsQvCull\tColorFix", "DcsQvCull\tColorEnhanced"] : ["DcsQvCull\tColor"]);
     Fields(Read("native/dcsqvcull/src/vrfx.h"), @"p\.(\w+) = ([fi])\(L""(\w+)""", @"p\.(\w+) = c\(p\.\1, ([-\d.]+), ([-\d.]+)", _ => ["DcsQvCull\tVrFx"]);
+    // 3D headphone audio: binaural_config.h's table {L"Key", KeyType::Int|Float, default, min, max, "ui"}, which the module clamps to.
+    if (Read("native/binaural/include/binaural_config.h") is { } audioTable)
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(audioTable, @"\{L""(\w+)"", KeyType::(?:Int|Float), [-\d.]+, ([-\d.]+), ([-\d.]+),"))
+            if (Bound(m.Groups[2].Value) is { } lo && Bound(m.Groups[3].Value) is { } hi) Range("DcsQvCull\tAudio\t" + m.Groups[1].Value, lo, hi);
     // Cheeky: addon.cpp reads "Key" into settings.field, settings.cpp stores std::clamp(settings.field, lo, hi).
     if (Read("external/cheeky/src/addon.cpp") is { } addon && Read("external/cheeky/src/settings.cpp") is { } stored)
     {
@@ -6555,6 +6559,9 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         new() { QuadViews = QuadProvider.None, PupilShift = true, GazeDof = true }, new() { QuadViews = QuadProvider.None, PupilShift = true, Runtime = RuntimeKind.SboysSteamVr },
         new() { Gaze = GazeMode.Fixed, GVision = true, GVisionUseGaze = true }, new() { Gaze = GazeMode.Fixed, GazeDof = true, Runtime = RuntimeKind.SboysSteamVr },
         new() { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.Fixed, PupilShift = true }, new() { QuadViews = QuadProvider.None, PupilShift = true, Desktop = true },
+        // 3D headphone audio: the layer for the head pose in VR only, with Follow the head on; on a monitor too.
+        new() { BinauralAudio = true }, new() { BinauralAudio = true, Desktop = true }, new() { BinauralAudio = true, BinauralLateHeadTracking = false }, new() { BinauralLateHeadTracking = true },
+        eye with { BinauralAudio = true, PupilShift = true }, new() { BinauralAudio = true, Runtime = RuntimeKind.VirtualDesktop, QuadViews = QuadProvider.None },
     ];
     var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
     var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
@@ -6572,7 +6579,8 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
             usesColorKey:usesColorKey(p), colorOn:Boolean(colorOn(p)), usesGazeDof:usesGazeDof(p), gVisionOn:gVisionOn(p), usesVisualRealism:Boolean(usesVisualRealism(p)),
             usesGazePublish:Boolean(usesGazePublish(p)), usesPeripheryDlssPreset:usesPeripheryDlssPreset(p), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
             nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), usesAdaptiveCadence:usesAdaptiveCadence(p), capDivider:capDivider(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter,
-            usesFoveatedFg:usesFoveatedFg(p), usesHudSymbology:usesHudSymbology(p), usesHeadsetPanel:usesHeadsetPanel(p), usesPeripheryStability:usesPeripheryStability(p), usesFarDepth:usesFarDepth(p), usesRecordersEmulatedLists:usesRecordersEmulatedLists(p)};
+            usesFoveatedFg:usesFoveatedFg(p), usesHudSymbology:usesHudSymbology(p), usesHeadsetPanel:usesHeadsetPanel(p), usesPeripheryStability:usesPeripheryStability(p), usesFarDepth:usesFarDepth(p), usesRecordersEmulatedLists:usesRecordersEmulatedLists(p),
+            usesBinauralAudio:usesBinauralAudio(p), usesHeadPosePublish:usesHeadPosePublish(p)};
         })`, {profiles});
         // The slider values of Pimax Play, 1 to 100, through each conversion.
         const pimax = vm.runInNewContext(regions.join('\n') + `
@@ -6621,7 +6629,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
             ["quad"] = p.UsesBundledQuadViews, ["nativeAllowed"] = ProfileValidation.ResolveFeatures(p with { QuadViews = QuadProvider.PimaxNative }).QuadViews == QuadProvider.PimaxNative,
             ["depthMax"] = p.DepthBoostActiveMax, ["usesAdaptiveCadence"] = p.UsesAdaptiveCadence, ["capDivider"] = (double)FramePacing.CapDivider(p), ["resolvedFoveatedDlss"] = resolved.FoveatedDlss, ["resolvedQuadViews"] = resolved.QuadViews.ToString(), ["resolvedQuadFocusAdapter"] = resolved.QuadFocusAdapter,
             ["usesFoveatedFg"] = p.UsesFoveatedFrameGen, ["usesHudSymbology"] = p.UsesHudSymbology, ["usesHeadsetPanel"] = p.UsesHeadsetPanel, ["usesPeripheryStability"] = p.UsesPeripheryStability, ["usesFarDepth"] = p.UsesFarDepth,
-            ["usesRecordersEmulatedLists"] = p.UsesRecordersEmulatedLists,
+            ["usesRecordersEmulatedLists"] = p.UsesRecordersEmulatedLists, ["usesBinauralAudio"] = p.UsesBinauralAudio, ["usesHeadPosePublish"] = p.UsesHeadPosePublish,
         };
         foreach (var (key, value) in expected)
         {
@@ -6636,6 +6644,299 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         }
     }
     Require(mismatches.Count == 0, "app.js differs from C#:\n  " + string.Join("\n  ", mismatches));
+});
+// ---- 3D headphone audio (docs/BINAURAL_AUDIO.md, task D) ------------------------------------------------------------
+VrProfile AudioOn(VrProfile? p = null) => (p ?? new VrProfile()) with { BinauralAudio = true };
+T Throws2<T>(Action action) where T : Exception { try { action(); } catch (T e) { return e; } throw new Exception("Expected " + typeof(T).Name); }
+Test("3D audio: off by default with the generic ears; the profile round-trips every audio setting through JSON", () =>
+{
+    var p = new VrProfile();
+    Require(!p.BinauralAudio && p.BinauralHrtf == "default" && p.HeadCircumferenceCm == 57 && p.BinauralLateHeadTracking && p.BinauralNearField && p.BinauralMaxObjects == 48
+        && p.BinauralLevelTrimDb == 0 && p.BinauralCpuBudgetPercent == 25 && p.BinauralExcludeContexts is null && !p.BinauralLogVoices && p.AudioToggleKey == "117:6", "defaults");
+    Require(!p.UsesBinauralAudio && !p.UsesHeadPosePublish && !p.UsesEngineModule && !p.UsesPerceptionLayer, "off: no module, no layer");
+    var all = p with { BinauralAudio = true, BinauralHrtf = "My ears", HeadCircumferenceCm = 59.5, BinauralLateHeadTracking = false, BinauralNearField = false, BinauralMaxObjects = 32,
+        BinauralLevelTrimDb = -3.5, BinauralCpuBudgetPercent = 40, BinauralExcludeContexts = "3, 1", BinauralLogVoices = true, AudioToggleKey = "119:5" };
+    var json = JsonData.Serialize(all);
+    Require(JsonData.Deserialize<VrProfile>(json) == all, "round trip");
+    foreach (var derived in new[] { "usesBinauralAudio", "usesHeadPosePublish", "usesAudioToggleKey", "perceptionLayerRequired" })
+        Require(!json.Contains("\"" + derived + "\"", StringComparison.Ordinal), "a derived value is not saved (0.6.6 refuses keys it does not know): " + derived);
+    // A profile saved before 3D audio existed loads with it off and the defaults.
+    var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { Id = "old", Name = "Old" }))!.AsObject();
+    foreach (var key in new[] { "binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects", "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey" })
+        Require(node.Remove(key), "saved key " + key);
+    Require(JsonData.Deserialize<VrProfile>(node.ToJsonString()) == new VrProfile { Id = "old", Name = "Old" }, "an older profile loads with 3D audio off");
+});
+Test("3D audio: the engine module is installed for it alone (also on a monitor), and the layer only for the head pose in VR", () =>
+{
+    var vr = AudioOn();
+    Require(vr.UsesEngineModule && vr.EngineModuleRequired && vr.UsesHeadPosePublish && vr.UsesPerceptionLayer && !vr.PerceptionLayerRequired, "VR: module and layer (optional)");
+    var monitor = AudioOn() with { Desktop = true };
+    Require(monitor.ForLaunch().UsesBinauralAudio && monitor.ForLaunch().UsesEngineModule && !monitor.ForLaunch().UsesHeadPosePublish && !monitor.ForLaunch().UsesPerceptionLayer, "monitor: module, no layer");
+    Require(!(vr with { BinauralLateHeadTracking = false }).UsesPerceptionLayer, "no head tracking: no layer");
+    Require((vr with { PupilShift = true, Gaze = GazeMode.EyeTracked, QuadViews = QuadProvider.QuadViewsFoveated }).PerceptionLayerRequired, "with Pupil shift the layer is required as before");
+    var ini = ConfigurationWriters.DcsQvCull(vr);
+    Require(ini.Contains("PerceptionOnly=1\n") && ini.Contains("\n[Audio]\nBinaural=1\n"), "Perception-only mode with [Audio]");
+});
+Test("3D audio: DcsQvCull.ini [Audio] and [Hotkeys] AudioToggle carry every setting, clamped, and nothing while it is off", () =>
+{
+    Dictionary<string, string> Sections(string text) => IniFile.Parse(text.ReplaceLineEndings("\n"));
+    var off = ConfigurationWriters.DcsQvCull(new VrProfile { EngineOptimizations = true });
+    Require(!off.Contains("[Audio]") && !off.Contains("AudioToggle"), "off: the file is as before");
+    var on = AudioOn(new VrProfile { EngineOptimizations = true });
+    var text = ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n");
+    Require(text.Contains("\n[Audio]\nBinaural=1\nHrtf=default\nHeadCircumferenceCm=57\nLateHeadTracking=1\nNearField=1\nMaxObjects=48\nLevelTrimDb=0\nCpuBudgetPercent=25\nLogVoices=0\n"), "defaults:\n" + text);
+    Require(text.Contains("\nToggle=122:6\n; 3D headphone audio off and on in flight (DCS's own panning while off).\nAudioToggle=117:6\n"), "the key in the one [Hotkeys] section");
+    Require(text.IndexOf("[Hotkeys]", StringComparison.Ordinal) == text.LastIndexOf("[Hotkeys]", StringComparison.Ordinal), "one [Hotkeys] section");
+    // Every setting reaches the file and reads back as the profile's value (model → writer → reader).
+    var all = on with { BinauralHrtf = "My ears", HeadCircumferenceCm = 59.5, BinauralLateHeadTracking = false, BinauralNearField = false, BinauralMaxObjects = 32, BinauralLevelTrimDb = -3.5,
+        BinauralCpuBudgetPercent = 40, BinauralExcludeContexts = " 5, 1,3 ", BinauralLogVoices = true, AudioToggleKey = "119:5" };
+    var read = Sections(ConfigurationWriters.DcsQvCull(all));
+    Require(read["Audio.Binaural"] == "1" && read["Audio.Hrtf"] == "My ears" && read["Audio.HeadCircumferenceCm"] == "59.5" && read["Audio.LateHeadTracking"] == "0" && read["Audio.NearField"] == "0"
+        && read["Audio.MaxObjects"] == "32" && read["Audio.LevelTrimDb"] == "-3.5" && read["Audio.CpuBudgetPercent"] == "40" && read["Audio.ExcludeContexts"] == "1,3,5" && read["Audio.LogVoices"] == "1"
+        && read["Hotkeys.AudioToggle"] == "119:5", "read back: " + string.Join(", ", read.Where(k => k.Key.StartsWith("Audio.")).Select(k => k.Key + "=" + k.Value)));
+    // Out of range or not usable: clamped to the module's range, a bad name and bad contexts left to the defaults.
+    var wild = Sections(ConfigurationWriters.DcsQvCull(on with { HeadCircumferenceCm = 100, BinauralMaxObjects = 1, BinauralLevelTrimDb = double.NaN, BinauralCpuBudgetPercent = 99, BinauralHrtf = "..\\evil", BinauralExcludeContexts = "9" }));
+    Require(wild["Audio.HeadCircumferenceCm"] == "66" && wild["Audio.MaxObjects"] == "8" && wild["Audio.LevelTrimDb"] == "0" && wild["Audio.CpuBudgetPercent"] == "50" && wild["Audio.Hrtf"] == "default" && !wild.ContainsKey("Audio.ExcludeContexts"), "clamped");
+    // The plan replaces a set missing from the library with the generic one.
+    Require(Sections(ConfigurationWriters.DcsQvCull(all, null, "default"))["Audio.Hrtf"] == "default", "the plan's replacement");
+    Require(ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = true, EngineDevMode = true }).Split('\n').Count(l => l.Trim() == "[Audio]") == 1, "developer mode keeps one [Audio]");
+});
+Test("3D audio: PupilShift.ini [HeadPose] Publish=1 only for the head pose in VR; the layer alone for it needs no eye gaze", () =>
+{
+    string Layer(VrProfile p) => ConfigurationWriters.PupilShift(p).ReplaceLineEndings("\n");
+    var vr = AudioOn();
+    Require(Layer(vr).TrimEnd().EndsWith("\n\n; 3D headphone audio: the head pose for the engine module, so sounds follow the head between DCS frames.\n[HeadPose]\nPublish=1", StringComparison.Ordinal)
+        && IniFile.Parse(Layer(vr))["HeadPose.Publish"] == "1", Layer(vr));
+    Require(Layer(vr).Contains("\n\n; The layer runs only for 3D audio's head pose: no eye gaze.\nOpenXrEyeGaze=0"), "no gaze for the head pose alone");
+    foreach (var none in new[] { new VrProfile(), vr with { BinauralLateHeadTracking = false }, vr with { Desktop = true } })
+        Require(!Layer(none).Contains("HeadPose") && !Layer(none).Contains("OpenXrEyeGaze"), "nothing without the head pose");
+    var pupil = vr with { PupilShift = true, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
+    Require(Layer(pupil).Contains("[HeadPose]\nPublish=1") && !Layer(pupil).Contains("OpenXrEyeGaze"), "with Pupil shift the gaze stays");
+    var both = vr with { QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = true };
+    Require(Layer(both).Contains("; The layer runs only for the Periphery DLSS preset and 3D audio's head pose: no eye gaze.\nOpenXrEyeGaze=0"), "both");
+    Require(Layer(both with { BinauralAudio = false }).Contains("; The layer runs only for the Periphery DLSS preset: no eye gaze.\nOpenXrEyeGaze=0"), "the preset alone as before");
+});
+Test("3D audio: the app's keys, defaults and ranges are binaural_config.h's (the module reads that table)", () =>
+{
+    var header = Path.Combine(workspace, "native/binaural/include/binaural_config.h");
+    if (!File.Exists(header)) { Skip("native/binaural/include/binaural_config.h is not here"); return; }
+    var text = File.ReadAllText(header);
+    var keys = System.Text.RegularExpressions.Regex.Matches(text, @"\{L""(\w+)"", KeyType::(\w+), ([-\d.]+), ([-\d.]+), ([-\d.]+), ""(\w+)""\}")
+        .ToDictionary(m => m.Groups[1].Value, m => (Type: m.Groups[2].Value, Default: double.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture),
+            Min: double.Parse(m.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture), Max: double.Parse(m.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture)));
+    Require(keys.Count == 10, "the table's ten keys: " + string.Join(", ", keys.Keys));
+    string Const(string name) => System.Text.RegularExpressions.Regex.Match(text, name + @" = L""([^""]*)""").Groups[1].Value;
+    Require(Const("kSection") == Binaural.Section && Const("kKillFlagFile") == Binaural.KillFlag && Const("kHotkeyKey") == "AudioToggle" && Const("kHotkeySection") == "Hotkeys"
+        && Const("kHrtfFolder") == Binaural.HrtfFolder && Const("kDefaultHrtfName") == Binaural.DefaultHrtf && Const("kPosePublishSection") == Binaural.PoseSection && Const("kPosePublishKey") == Binaural.PoseKey, "names");
+    var written = IniFile.Parse(ConfigurationWriters.DcsQvCull(AudioOn() with { BinauralExcludeContexts = "1" }).ReplaceLineEndings("\n")).Keys.Where(k => k.StartsWith("Audio.", StringComparison.Ordinal)).Select(k => k[6..]).ToHashSet();
+    Require(written.SetEquals(keys.Keys), "the app writes exactly the table's keys: " + string.Join(", ", written.Order()));
+    var p = new VrProfile();
+    var expected = new Dictionary<string, (double Default, double Min, double Max)>
+    {
+        ["HeadCircumferenceCm"] = (p.HeadCircumferenceCm, Binaural.HeadCircumferenceMin, Binaural.HeadCircumferenceMax), ["MaxObjects"] = (p.BinauralMaxObjects, Binaural.MaxObjectsMin, Binaural.MaxObjectsMax),
+        ["LevelTrimDb"] = (p.BinauralLevelTrimDb, Binaural.LevelTrimMin, Binaural.LevelTrimMax), ["CpuBudgetPercent"] = (p.BinauralCpuBudgetPercent, Binaural.CpuBudgetMin, Binaural.CpuBudgetMax),
+        ["LateHeadTracking"] = (p.BinauralLateHeadTracking ? 1 : 0, 0, 1), ["NearField"] = (p.BinauralNearField ? 1 : 0, 0, 1), ["LogVoices"] = (p.BinauralLogVoices ? 1 : 0, 0, 1), ["Binaural"] = (0, 0, 1),
+    };
+    foreach (var (key, (def, min, max)) in expected)
+        Require(keys[key].Default == def && keys[key].Min == min && keys[key].Max == max, $"{key}: header {keys[key].Default} {keys[key].Min}..{keys[key].Max}, app {def} {min}..{max}");
+    // The interface's slider ranges are the same (app.js field(...,'number',[min,max,step])).
+    var app = File.ReadAllText(Path.Combine(workspace, "src/DcsVr.App/ui/app.js"));
+    foreach (var (path, key) in new[] { ("headCircumferenceCm", "HeadCircumferenceCm"), ("binauralMaxObjects", "MaxObjects"), ("binauralLevelTrimDb", "LevelTrimDb"), ("binauralCpuBudgetPercent", "CpuBudgetPercent") })
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(app, @"field\([^,()]+,'" + path + @"',.*?'number',\[([-\d.]+),([-\d.]+),");
+        Require(m.Success && double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) == keys[key].Min && double.Parse(m.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture) == keys[key].Max, "slider range of " + path);
+    }
+    // The module and the app derive the same head radius (binaural_config.h HeadRadiusFromCircumferenceCm).
+    Require(Math.Abs(Binaural.HeadRadiusMm(57) - 90.7183) < 1e-3 && Binaural.HeadRadiusMm(10) == Binaural.HeadRadiusMm(48) && Binaural.HeadRadiusMm(double.NaN) == Binaural.HeadRadiusMm(57), "head radius");
+});
+Test("3D audio: Checks refuse values outside the module's ranges, a key in use twice, and say what happens to DCS's speaker layout", () =>
+{
+    string[] Errors(VrProfile p, InventorySnapshot? i = null) => [.. ProfileValidation.Validate(p, i).Where(x => x.Severity == IssueSeverity.Error).Select(x => x.Code)];
+    var on = AudioOn();
+    Require(!Errors(on).Any(c => c.StartsWith("audio", StringComparison.Ordinal)) && !Errors(on).Contains("hotkey-conflict"), "the defaults are valid");
+    Require(Errors(on with { HeadCircumferenceCm = 47.9 }).Contains("audio-head-size") && Errors(on with { BinauralMaxObjects = 65 }).Contains("audio-max-sounds") && Errors(on with { BinauralLevelTrimDb = 6.5 }).Contains("audio-level")
+        && Errors(on with { BinauralCpuBudgetPercent = 4 }).Contains("audio-cpu") && Errors(on with { BinauralHrtf = "a/b" }).Contains("audio-hrtf") && Errors(on with { BinauralExcludeContexts = "1,x" }).Contains("audio-contexts"), "ranges");
+    Require(!Errors(on with { BinauralAudio = false, HeadCircumferenceCm = 10 }).Contains("audio-head-size"), "off: not checked");
+    Require(Errors(on with { AudioToggleKey = "122:6", EngineOptimizations = true }).Contains("hotkey-conflict") && Errors(on with { ColorModeKey = "117:6" }).Contains("hotkey-conflict")
+        && Errors(on with { AudioToggleKey = "122:3", EngineOptimizations = true }).Contains("audio-hotkey") && !Errors(on with { AudioToggleKey = "Off", ColorModeKey = "117:6" }).Contains("hotkey-conflict"), "keys");
+    var inventory = new InventorySnapshot { DcsSettings = new Dictionary<string, string> { ["sound.main_layout"] = "\"suround_7_1\"", ["sound.driver_name"] = "\"spatial\"" } };
+    var issues = ProfileValidation.Validate(on, inventory);
+    Require(issues.Any(i => i.Code == "audio-layout" && i.Severity == IssueSeverity.Info && i.Message.Contains("7.1") && i.Message.Contains("Stereo")) && issues.Any(i => i.Code == "audio-spatial" && i.Severity == IssueSeverity.Warning), "layout and spatial driver");
+    Require(!ProfileValidation.Validate(on, new InventorySnapshot { DcsSettings = new Dictionary<string, string> { ["sound.main_layout"] = "\"stereo\"" } }).Any(i => i.Code.StartsWith("audio-", StringComparison.Ordinal)), "stereo: nothing to say");
+    Require(Binaural.LayoutName("\"\"") == "Auto" && Binaural.LayoutName("suround_5_1") == "5.1" && Binaural.NameFrom("..\\My: ears?") == "_My_ ears_" && Binaural.NameFrom("default") == "default-personal" && Binaural.NameFrom("") == "personal"
+        && Binaural.IsValidHrtfName(Binaural.NameFrom(new string('x', 90))) && Binaural.ExcludeContextsValue("") is null, "names and layouts");
+});
+Test("3D audio: .dcshrtf validation is hrtf_format.h's, check for check", () =>
+{
+    var good = HrtfFile.Synthetic("Test set");
+    var facts = HrtfFile.Validate(good, out var why);
+    Require(facts is { Directions: 145, SampleRate: 48000, Taps: 32, Personal: true, Title: "Test set", Above: true, Below: true } && why is null && Math.Abs(facts.HeadRadiusMm - 87.5) < 0.01 && facts.Warnings().Count == 0, "valid: " + why);
+    // The header's constants and layout are the format's.
+    var format = Path.Combine(workspace, "native/binaural/include/hrtf_format.h");
+    if (File.Exists(format))
+    {
+        var h = File.ReadAllText(format);
+        Require(h.Contains("kMagic = 0x54524844u") && h.Contains("kHeaderBytes = 256") && h.Contains("kMinTaps = 16, kMaxTaps = 512") && h.Contains("kMinDirections = 6, kMaxDirections = 16384")
+            && h.Contains("offsetof(Header, payloadFnv1a) == 48 && offsetof(Header, headerFnv1a) == 56 && offsetof(Header, name) == 64") && h.Contains("offsetof(Header, source) == 128"), "hrtf_format.h's constants");
+    }
+    string? Broken(Action<byte[]> damage, bool fixHeader = true, bool fixPayload = false)
+    {
+        var bytes = (byte[])good.Clone(); damage(bytes);
+        if (fixPayload) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(48), HrtfFile.Fnv1a(bytes.AsSpan(256)));
+        if (fixHeader) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(56), HrtfFile.HeaderChecksum(bytes));
+        HrtfFile.Validate(bytes, out var reason); return reason;
+    }
+    void U32(byte[] b, int o, uint v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o), v);
+    void F32(byte[] b, int o, float v) => System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(o), v);
+    Require(Broken(b => b[0] = 0) == "not an HRTF file (magic)" && Broken(b => b[4] = 2) == "unsupported version" && Broken(b => b[70] ^= 1, fixHeader: false) == "header checksum"
+        && Broken(b => U32(b, 8, 1 | 64)) == "unknown flags" && Broken(b => U32(b, 8, 4)) == "not minimum phase" && Broken(b => U32(b, 12, 8000)) == "sample rate"
+        && Broken(b => F32(b, 28, 0.2f)) == "head radius" && Broken(b => F32(b, 36, float.NaN)) == "front gain" && Broken(b => b.AsSpan(64, 64).Fill((byte)'a')) == "strings"
+        && Broken(b => b[500] ^= 0x10) == "payload checksum" && Broken(b => F32(b, 256, 2f), fixPayload: true) == "direction not unit"
+        && Broken(b => F32(b, 256 + 145 * 16, -1f), fixPayload: true) == "delay" && Broken(b => U32(b, 256 + 145 * 24, 999), fixPayload: true) == "triangle index"
+        && Broken(b => F32(b, b.Length - 4, float.PositiveInfinity), fixPayload: true) == "impulse response value", "each check names its problem");
+    HrtfFile.Validate(good[..^4], out var truncated); HrtfFile.Validate(new byte[100], out var small);
+    Require(truncated == "file size" && small == "too small", "sizes");
+});
+Test("3D audio: SOFA import converts once into the library; a taken name, a refused file or a damaged result keeps nothing", () =>
+{
+    var state = Path.Combine(root, "hrtf-library"); var library = new HrtfLibrary(state); var converter = new FixtureHrtfConverter();
+    var sofa = Make("hrtf-sofa/Measured/ears.sofa", "warn: fixture"); var refused = Make("hrtf-sofa/bad.sofa", "reject: not a SimpleFreeFieldHRIR file"); var damaged = Make("hrtf-sofa/damaged.sofa", "invalid");
+    var set = library.Import(sofa, "ears", converter);
+    Require(set is { Name: "ears", Directions: 145, SampleRate: 48000, FromFile: "ears.sofa" } && set.Warnings.Contains("Fixture warning: the measurement distance was assumed.") && set.Coverage == 0.93 && library.List().Single().Name == "ears" && library.Contains("ears"), "imported");
+    Require(!File.ReadAllText(Path.Combine(library.Folder, "ears.json")).Contains("Measured", StringComparison.Ordinal), "the SOFA file's folder is never kept");
+    var taken = Throws2<HrtfNameTakenException>(() => library.Import(sofa, "EARS", converter));
+    Require(taken.Suggested == "EARS 2" && taken.Name == "EARS" && converter.Calls == 1, "a taken name (in any case) is asked again before converting");
+    foreach (var (file, why) in new[] { (refused, "not a SimpleFreeFieldHRIR file"), (damaged, "not valid") })
+    {
+        var e = Throws2<HrtfConversionException>(() => library.Import(file, "other", converter));
+        Require(e.Message.Contains(why) && library.List().Count == 1 && Directory.GetFiles(library.Folder).Order().SequenceEqual(new[] { Path.Combine(library.Folder, "ears.dcshrtf"), Path.Combine(library.Folder, "ears.json") }.Order()), "nothing kept: " + e.Message);
+    }
+    Throws<InvalidDataException>(() => library.Import(sofa, "default", converter)); Throws<InvalidDataException>(() => library.Import(sofa, "a\\b", converter));
+    Throws<InvalidDataException>(() => library.Import(Make("hrtf-sofa/ears.txt", "x"), "txt", converter));
+    // A set edited or damaged on disk is no longer offered or deployed.
+    var second = library.Import(sofa, "ears 2", converter); var bytes = File.ReadAllBytes(Path.Combine(library.Folder, "ears 2.dcshrtf")); bytes[300] ^= 1; File.WriteAllBytes(Path.Combine(library.Folder, "ears 2.dcshrtf"), bytes);
+    Require(second.Name == "ears 2" && library.List().Select(s => s.Name).SequenceEqual(["ears"]) && library.ForDeployment().Single().Name == "ears" && !library.Contains("ears 2"), "damaged: left out");
+    library.Delete("ears 2"); library.Delete("ears");
+    Require(library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, "deleted");
+    Throws<InvalidDataException>(() => library.Delete("default"));
+    // This installation's converter through its contract interface (DcsVr.Cli hrtf-convert): a file that is no SOFA is
+    // refused with a reason and nothing is kept (before task A's command exists, the reason is that there is none).
+    var cli = System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DcsVrCliPath")?.Value;
+    var missing = Throws2<HrtfConversionException>(() => new CliHrtfConverter(Path.Combine(root, "no-cli")).Convert(sofa, Path.Combine(root, "x.dcshrtf"), "x"));
+    Require(missing.Message.Contains("not found"), missing.Message);
+    if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found"); return; }
+    var real = Throws2<HrtfConversionException>(() => library.Import(sofa, "real", new CliHrtfConverter(Path.GetDirectoryName(cli))));
+    Require(real.Message.StartsWith("The SOFA file was not converted:", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
+});
+Test("3D audio: the module's log gives the Audio page's status, Last flight and Checks (running, off with a reason, switched off, CPU back-off)", () =>
+{
+    var running = Binaural.ParseStatus(["10:00:00.000 DcsQvCull loader started", "10:00:01.000 audio: on (hrtf My ears, head pose on, 48000 Hz)", "10:00:30.000 audio: stats sounds=12 p99=0.18 ms",
+        "10:01:00.000 audio: budget: MaxObjects 48 -> 40", "10:02:00.000 audio: stats sounds=31 p99=0.24 ms"], true, true);
+    Require(running is { State: "running", Sounds: 31, Hrtf: "My ears", HeadTracking: true, Backoffs: 1, MaxObjectsNow: 40 } && running.CostMs == 0.24 && running.Summary == "Running · 31 sounds · 0.24 ms", running.Summary);
+    var off = Binaural.ParseStatus(["audio: on", "x DcsQvCull loader started", "11:00:00.000 audio: off (output is 8 channels, not stereo)"], true, false);
+    Require(off is { State: "off", Reason: "output is 8 channels, not stereo" } && off.Summary == "Off: output is 8 channels, not stereo. DCS's own sound plays.", "only the last DCS start counts: " + off.Summary);
+    var notFound = Binaural.ParseStatus(["12:00:00.000 audio: P4 not found (pattern count 0)"], true, false);
+    Require(notFound.State == "off" && notFound.Reason!.Contains("not the one it was made for") && notFound.Reason.Contains("P4"), notFound.Summary);
+    var key = Binaural.ParseStatus(["audio: on (hrtf default)", "audio: switched off"], true, true);
+    Require(key is { State: "switched-off", SwitchedOff: true } && key.Summary.StartsWith("Switched off in flight", StringComparison.Ordinal), key.Summary);
+    Require(Binaural.ParseStatus(["audio: on", "audio: switched off", "audio: switched on"], true, true).State == "running", "on again");
+    Require(Binaural.ParseStatus([], true, false).State == "waiting" && Binaural.ParseStatus(null, false, false).State == "not-installed", "waiting / not installed");
+    Require(LastFlight.ParseAudio(["perf: fps=1"]) is null && LastFlight.ParseAudio(["audio: off (pan law mismatch)"]) is { State: "off", Reason: "pan law mismatch" }, "Last flight");
+});
+Test("3D audio: Launch DCS installs [Audio], the HRTF sets, the head pose and Stereo; Back to stock DCS removes all of it", () =>
+{
+    var f = E2e("audio"); var lua = E2eLua.Replace("options = {\n", "options = {\n\t[\"sound\"] = {\n\t\t[\"main_layout\"] = \"suround_7_1\",\n\t\t[\"volume\"] = 60,\n\t},\n");
+    File.WriteAllText(f.Options, lua); var baseTree = E2eTree(f, "game", "sg"); var luaBytes = File.ReadAllBytes(f.Options);
+    var sofa = Make("e2e/audio/My ears.sofa", "fixture"); f.Service.Hrtf.Import(sofa, "My ears", new FixtureHrtfConverter()); f.Service.Hrtf.Import(sofa, "Spare", new FixtureHrtfConverter());
+    var profile = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-audio", Name = "Audio", QuadViews = QuadProvider.None, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false,
+        BinauralAudio = true, BinauralHrtf = "My ears", HeadCircumferenceCm = 55 });
+    var owned = new HashSet<string>();
+    Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    E2eCheckApplied(f, profile, "audio", baseTree, owned);
+    var module = Path.Combine(f.Base, "sg", "DCS", "Scripts", "DcsQvCull");
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(Path.Combine(module, "DcsQvCull.ini"))));
+    Require(ini["Audio.Binaural"] == "1" && ini["Audio.Hrtf"] == "My ears" && ini["Audio.HeadCircumferenceCm"] == "55" && ini["General.PerceptionOnly"] == "1", "[Audio] in the Perception-only module");
+    Require(File.ReadAllBytes(Path.Combine(module, "hrtf", "My ears.dcshrtf")).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(f.Service.Hrtf.Folder, "My ears.dcshrtf"))) && File.Exists(Path.Combine(module, "hrtf", "Spare.dcshrtf")),
+        "every set of the library next to the module");
+    var journal = f.Service.Originals.ReadCurrent()!;
+    var pupil = journal.Entries.Single(e => Path.GetFileName(e.Path) == "PupilShift.ini");
+    Require(IniFile.Parse(File.ReadAllText(pupil.Path))["HeadPose.Publish"] == "1" && journal.Entries.Any(e => e.Path.EndsWith("XR_APILAYER_DCSVR_pupil_shift.dll", StringComparison.OrdinalIgnoreCase)), "the layer publishes the head pose");
+    Require(new LuaOptions(File.ReadAllText(f.Options)).Get("sound", "main_layout") == "\"stereo\"" && new LuaOptions(File.ReadAllText(f.Options)).Get("sound", "volume") == "60", "Stereo while 3D audio is on");
+    // The set is gone from the library: the next launch installs the generic one, and the removed set goes from DCS too.
+    f.Service.Hrtf.Delete("My ears");
+    Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    Require(IniFile.Parse(IniFile.Decode(File.ReadAllBytes(Path.Combine(module, "DcsQvCull.ini"))))["Audio.Hrtf"] == "default" && !File.Exists(Path.Combine(module, "hrtf", "My ears.dcshrtf")) && File.Exists(Path.Combine(module, "hrtf", "Spare.dcshrtf")), "generic when missing");
+    var readiness = Readiness.Check(profile, E2eInventory(f), f.Service);
+    Require(readiness.Checks.Any(c => c.Id == "audio-hrtf-missing" && c.State == CheckState.Warning), "Checks says the set is missing");
+    // Turned off: the module's [Audio], the sets, the head pose and the speaker layout go back.
+    var off = profile with { BinauralAudio = false };
+    Require(f.Service.SyncApplied(off, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    Require(!Directory.Exists(Path.Combine(module, "hrtf")) && !File.Exists(Path.Combine(module, "DcsQvCull.ini")) && new LuaOptions(File.ReadAllText(f.Options)).Get("sound", "main_layout") == "\"suround_7_1\"", "off: nothing left");
+    Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    Require(f.Service.RestoreOriginals().Complete);
+    Require(File.ReadAllBytes(f.Options).AsSpan().SequenceEqual(luaBytes), "options.lua is byte for byte the original");
+    var after = E2eTree(f, "game", "sg"); Require(after.SequenceEqual(baseTree), "DCS's folders differ: " + E2eDiff(baseTree, after));
+    E2eCheckClean(f, "Back to stock DCS after 3D audio");
+    Require(f.Service.Hrtf.List().Select(s => s.Name).SequenceEqual(["Spare"]), "the app's library stays");
+});
+Test("3D audio: without the pupil shift layer in the distribution, 3D audio still installs (no head pose) and Checks says so", () =>
+{
+    var f = E2e("audio-nolayer");
+    var layer = Path.Combine(f.Service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll"); File.Delete(layer); File.Delete(layer + ".sha256");
+    var profile = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-audio2", Name = "Audio", QuadViews = QuadProvider.None, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, BinauralAudio = true });
+    var plan = f.Service.Preview(profile, E2eInventory(f));
+    Require(plan.Files.Any(p => p.Path.EndsWith("DcsQvCull.ini", StringComparison.Ordinal)) && !plan.Files.Any(p => p.Path.Contains("pupilshift", StringComparison.OrdinalIgnoreCase)), "module without the layer");
+    Require(Readiness.Check(profile, E2eInventory(f), f.Service).Checks.Any(c => c.Id == "audio-head-pose" && c.State == CheckState.Manual), "Checks says Follow the head needs the layer");
+    // Pupil shift still needs it: refused as before.
+    Throws<InvalidDataException>(() => f.Service.Preview(profile with { PupilShift = true, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked }, E2eInventory(f)));
+});
+Test("3D audio Live: every setting is written at once to a module with the audio part; on a monitor even on and off; in VR turning it on waits for the layer", () =>
+{
+    var f = E2e("audio-live");
+    // A payload with the audio part carries its generic HRTF as the resource HRTF_DEFAULT (the name in UTF-16).
+    var payload = Path.Combine(f.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
+    File.WriteAllBytes(payload, [.. Encoding.ASCII.GetBytes("MZ engine payload (fixture) "), .. Encoding.Unicode.GetBytes("HRTF_DEFAULT")]); File.WriteAllText(payload + ".sha256", Hashing.FileSha256(payload));
+    var monitor = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-audio-live", Name = "Audio live", Desktop = true, EngineOptimizations = true, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false });
+    var inventory = E2eInventory(f);
+    Require(f.Service.SyncApplied(monitor, inventory).Kind == LaunchSyncKind.Applied);
+    var journal = f.Service.Originals.ReadCurrent()!;
+    var available = LiveSettings.AvailableFields(f.Service.ReadAppliedProfile()!.Profile, journal);
+    Require(LiveSettings.AudioInstalled(journal) && new[] { "binauralAudio", "headCircumferenceCm", "binauralHrtf", "audioToggleKey" }.All(available.Contains), "offered live");
+    var on = monitor with { BinauralAudio = true, HeadCircumferenceCm = 60 };
+    var result = WhileDcsRuns(f, () => f.Service.ApplyLive(on, inventory));
+    Require(result.Applied.Order().SequenceEqual(new[] { "binauralAudio", "headCircumferenceCm" }) && result.Waiting.Count == 0 && result.Written.Single().EndsWith("DcsQvCull.ini", StringComparison.Ordinal), result.Message);
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(result.Written.Single())));
+    Require(ini["Audio.Binaural"] == "1" && ini["Audio.HeadCircumferenceCm"] == "60" && ini["Hotkeys.AudioToggle"] == "117:6", "on, live");
+    var trim = WhileDcsRuns(f, () => f.Service.ApplyLive(on with { BinauralLevelTrimDb = -2, AudioToggleKey = "119:6" }, inventory));
+    Require(trim.Applied.Contains("binauralLevelTrimDb") && trim.Applied.Contains("audioToggleKey") && trim.Waiting.Count == 0, trim.Message);
+    // An imported set is a new file next to the module: picking it waits for the next launch.
+    f.Service.Hrtf.Import(Make("e2e/audio-live/new.sofa", "fixture"), "New", new FixtureHrtfConverter());
+    var newSet = WhileDcsRuns(f, () => f.Service.ApplyLive(on with { BinauralLevelTrimDb = -2, AudioToggleKey = "119:6", BinauralHrtf = "New" }, inventory));
+    Require(newSet.Waiting.Contains("binauralHrtf"), newSet.Message);
+    // A module without the audio part (an older payload): nothing about audio is live.
+    var old = journal with { Entries = [.. journal.Entries.Select(e => Path.GetFileName(e.Path) == "DcsQvCullPayload.dll" ? e with { Path = Make("e2e/audio-live/old/DcsQvCullPayload.dll", "MZ older payload") } : e)] };
+    Require(!LiveSettings.AudioInstalled(old) && !LiveSettings.AvailableFields(monitor, old).Contains("binauralAudio") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.MaxObjects", "8", null, audio: false)
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.MaxObjects", "8", null) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Hotkeys.AudioToggle", "0:0", null) && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "HeadPose.Publish", "1", null), "older module");
+    // VR: turning it on also installs the layer's head pose (read when DCS starts VR), so it waits; Launch DCS applies it.
+    var g = E2e("audio-live-vr");
+    File.WriteAllBytes(Path.Combine(g.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll"), File.ReadAllBytes(payload)); File.WriteAllText(Path.Combine(g.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll.sha256"), Hashing.FileSha256(payload));
+    var vr = LiveDraft();
+    Require(g.Service.SyncApplied(vr, E2eInventory(g)).Kind == LaunchSyncKind.Applied);
+    var vrOn = WhileDcsRuns(g, () => g.Service.ApplyLive(vr with { BinauralAudio = true }, E2eInventory(g)));
+    Require(vrOn.Waiting.Contains("binauralAudio"), vrOn.Message);
+});
+Test("3D audio: the diagnostic package lists the HRTF sets and the module's audio lines, never a SOFA file or its folder", () =>
+{
+    var state = Path.Combine(root, "audio-diag", "state"); var sg = Path.Combine(root, "audio-diag", "Saved Games", "DCS");
+    new HrtfLibrary(state).Import(Make("audio-diag/Private folder/ears.sofa", "warn"), "ears", new FixtureHrtfConverter());
+    Make("audio-diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:01.000 audio: on (hrtf ears, head pose on)\n09:00:02.000 perf: fps=80\n09:00:10.000 audio: stats sounds=7 p99=0.12 ms\n");
+    var text = Diagnostics.AudioSummary(state, sg);
+    Require(text.Contains("ears: \"ears\", 145 directions, 48000 Hz") && text.Contains("audio: on (hrtf ears, head pose on)") && text.Contains("audio: stats sounds=7") && !text.Contains("perf:") && !text.Contains("Private folder") && !text.Contains(".sofa"), text);
+    var options = Make("audio-diag/Saved Games/DCS/Config/options.lua", "options = {}");
+    var zip = Path.Combine(root, "audio-diag", "package.zip");
+    var entries = Diagnostics.CreatePackage(new DiagnosticSources(state, null, options, null, RuntimeKind.Pimax), "{}", zip);
+    Require(entries.Any(e => e.Name == "dcs-control/audio.txt") && !entries.Any(e => e.Name.EndsWith(".dcshrtf", StringComparison.Ordinal) || e.Name.EndsWith(".sofa", StringComparison.Ordinal)), string.Join(", ", entries.Select(e => e.Name)));
 });
 Test("E2E: CPU Boost and Free VRAM records left by an ended helper survive a moment when the file cannot be read", () =>
 {
