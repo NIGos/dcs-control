@@ -131,12 +131,14 @@ public static partial class Binaural
     /// <summary>
     /// 3D audio in the module's log (DcsQvCull.log): the "audio:" lines of the last DCS start (after the last "loader
     /// started"). The lines this reads (docs/BINAURAL_AUDIO.md, "Log lines the app reads"):
-    ///   audio: on (...)                     running (hrtf &lt;name&gt; and head pose on/off may be named inside)
-    ///   audio: off (&lt;reason&gt;)               stayed or went off; DCS's own sound plays
-    ///   audio: &lt;id&gt; not found (&lt;why&gt;)        a hook point not found in this DCS build: off
-    ///   audio: switched off | switched on   the kill switch (key or flag)
-    ///   audio: stats ... sounds=N ... p99=X ms   every few seconds while running
-    ///   audio: budget ... MaxObjects A -&gt; B   CPU back-off (fewer 3D sounds to stay in the budget)
+    ///   audio: on (... HRTF &lt;name&gt;: N directions, ...)   running, with that set
+    ///   audio: HRTF &lt;name&gt; (crossfading)                 another set picked live
+    ///   audio: off (&lt;reason&gt;)                             stayed or went off; DCS's own sound plays
+    ///   audio: off (&lt;id&gt; not found (&lt;why&gt;))               a hook point not found in this DCS build
+    ///   audio: kill switch (&lt;by&gt;): binaural OFF ... | ON   the kill switch (key or flag)
+    ///   audio: running, N sounds, p99 X ms per block, ...; head pose on|off|unused   every 10 s while running
+    ///   audio: CPU budget: at most N sounds now (... over budget)   CPU back-off (fewer 3D sounds to stay in the budget)
+    ///   audio: CPU budget: at most N sounds now (10 s under half the budget)   back up
     /// </summary>
     public static AudioStatus ParseStatus(IEnumerable<string>? moduleLines, bool installed, bool dcsRunning)
     {
@@ -151,23 +153,26 @@ public static partial class Binaural
         foreach (var line in lines)
         {
             var text = line[(line.IndexOf("audio: ", StringComparison.Ordinal) + 7)..].Trim();
-            if (NotFoundRegex().Match(text) is { Success: true } nf) { state = "off"; reason = $"this DCS version's sound engine is not the one it was made for ({nf.Groups[1].Value})"; continue; }
-            if (text.StartsWith("off (", StringComparison.Ordinal)) { state = "off"; reason = Inside(text[3..]); continue; }
-            if (text.StartsWith("on", StringComparison.Ordinal) && (text.Length == 2 || text[2] is ' ' or '(' or ':')) { state = "running"; reason = null; switchedOff = false; }
-            if (text.StartsWith("switched off", StringComparison.Ordinal)) switchedOff = true;
-            else if (text.StartsWith("switched on", StringComparison.Ordinal)) switchedOff = false;
-            if (HrtfRegex().Match(text) is { Success: true } h) hrtf = h.Groups[1].Value;
-            if (PoseRegex().Match(text) is { Success: true } p) pose = p.Groups[1].Value is "on" or "yes" or "1";
-            if (text.StartsWith("stats", StringComparison.Ordinal))
+            if (text.StartsWith("off (", StringComparison.Ordinal))
             {
-                if (state is null) state = "running";
-                if (SoundsRegex().Match(text) is { Success: true } s) sounds = int.Parse(s.Groups[1].Value, CultureInfo.InvariantCulture);
-                if (P99Regex().Match(text) is { Success: true } c && double.TryParse(c.Groups[1].Value.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var ms)) cost = ms;
+                state = "off"; reason = Inside(text[3..]);
+                if (NotFoundRegex().Match(reason) is { Success: true } nf) reason = $"this DCS version's sound engine is not the one it was made for ({nf.Groups[1].Value})";
+                continue;
             }
-            if (text.StartsWith("budget", StringComparison.Ordinal) || text.Contains("back-off", StringComparison.Ordinal) || text.Contains("backoff", StringComparison.Ordinal))
+            if (text.StartsWith("on (", StringComparison.Ordinal)) { state = "running"; reason = null; switchedOff = false; }
+            if (KillRegex().Match(text) is { Success: true } k) switchedOff = k.Groups[1].Value == "OFF";
+            if (HrtfRegex().Match(text) is { Success: true } h) hrtf = h.Groups[1].Value;
+            if (text.StartsWith("running,", StringComparison.Ordinal))
             {
-                backoffs++;
-                if (BudgetRegex().Match(text) is { Success: true } b) maxNow = int.Parse(b.Groups[1].Value, CultureInfo.InvariantCulture);
+                state ??= "running";
+                if (SoundsRegex().Match(text) is { Success: true } s) sounds = int.Parse(s.Groups[1].Value, CultureInfo.InvariantCulture);
+                if (P99Regex().Match(text) is { Success: true } c && double.TryParse(c.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var ms)) cost = ms;
+                if (PoseRegex().Match(text) is { Success: true } p) pose = p.Groups[1].Value switch { "on" => true, "off" => false, _ => (bool?)null };
+            }
+            if (BudgetRegex().Match(text) is { Success: true } b)
+            {
+                maxNow = int.Parse(b.Groups[1].Value, CultureInfo.InvariantCulture);
+                if (text.Contains("over budget", StringComparison.Ordinal)) backoffs++;
             }
         }
         var tail = lines.TakeLast(12).Select(l => l.Trim()).ToArray();
@@ -202,12 +207,13 @@ public static partial class Binaural
         return ParseStatus(lines, installed, dcsRunning);
     }
 
-    [GeneratedRegex(@"^([\w.-]+) not found\b")] private static partial Regex NotFoundRegex();
-    [GeneratedRegex(@"\bhrtf[= ]([\w .-]+?)(?=[,;)]|\s{2}|$| \()")] private static partial Regex HrtfRegex();
-    [GeneratedRegex(@"\b(?:head pose|pose)[=: ]+(on|off|yes|no|1|0)\b")] private static partial Regex PoseRegex();
-    [GeneratedRegex(@"\b(?:sounds|owned|voices)=(\d+)")] private static partial Regex SoundsRegex();
-    [GeneratedRegex(@"\bp99=([\d.,]+)\s*ms")] private static partial Regex P99Regex();
-    [GeneratedRegex(@"(?:->|→|MaxObjects=)\s*(\d+)\s*$|(?:->|→)\s*(\d+)\b")] private static partial Regex BudgetRegex();
+    [GeneratedRegex(@"^([\w. -]+?) not found \(")] private static partial Regex NotFoundRegex();
+    [GeneratedRegex(@"^(?:on \(.*?, )?HRTF ([\w .-]+?)(?=: \d+ directions| \(crossfading\))")] private static partial Regex HrtfRegex();
+    [GeneratedRegex(@"; head pose (on|off|unused)\s*$")] private static partial Regex PoseRegex();
+    [GeneratedRegex(@"^running, (\d+) sounds?\b")] private static partial Regex SoundsRegex();
+    [GeneratedRegex(@"\bp99 (\d+(?:\.\d+)?) ms\b")] private static partial Regex P99Regex();
+    [GeneratedRegex(@"^CPU budget: at most (\d+) sounds now\b")] private static partial Regex BudgetRegex();
+    [GeneratedRegex(@"^kill switch \([^)]*\): binaural (ON|OFF)\b")] private static partial Regex KillRegex();
 }
 
 /// <summary>3D audio as the module's log has it (<see cref="Binaural.ParseStatus"/>).</summary>

@@ -48,8 +48,8 @@ internal static class WebVerification
             Local(start.AddSeconds(125), "HH:mm:ss.fff") + " warmup: done after 95 s (cache: 30 hits, 14 compiled in this batch; 30 hits, 14 compiled since start)",
             .. Enumerable.Range(0, 40).Select(i => Local(start.AddSeconds(130 + i * 60), "HH:mm:ss.fff") + " features: 18 of 18 configured on;" + all),
             // 3D headphone audio running with the generic set, rendering 32 sounds at 0.21 ms per block (docs/BINAURAL_AUDIO.md, "Log lines the app reads").
-            Local(start.AddSeconds(21), "HH:mm:ss.fff") + " audio: on (hrtf default, head pose on, 48000 Hz)",
-            Local(start.AddSeconds(2400), "HH:mm:ss.fff") + " audio: stats sounds=32 p99=0.21 ms blocks=230400 overruns=0"]);
+            Local(start.AddSeconds(21), "HH:mm:ss.fff") + " audio: on (48000 Hz stereo, HRTF default: 2562 directions, head radius 9.1 cm, near field on, at most 48 sounds)",
+            Local(start.AddSeconds(2400), "HH:mm:ss.fff") + " audio: running, 32 sounds, p99 0.21 ms per block (budget 25% of a block, about 2.50 ms at 10 ms), limit 48; fades in/out 40/8, fallbacks 0, refused 0, torn 0, pan solves 912 (median 900, mismatch 0), overruns 0; head pose on"]);
         File.SetLastWriteTimeUtc(moduleLog, end.AddSeconds(-30).UtcDateTime);
         var cheeky = Directory.CreateDirectory(Path.Combine(bin, "CheekyFoveatedDLSS")).FullName;
         var standalone = Path.Combine(cheeky, "CheekyFoveatedDLSS-Standalone.log"); var host = Path.Combine(cheeky, "CheekyFoveatedDLSS-Host.log");

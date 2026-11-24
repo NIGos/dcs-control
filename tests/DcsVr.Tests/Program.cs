@@ -6831,18 +6831,34 @@ Test("3D audio: SOFA import converts once into the library; a taken name, a refu
     var real = Throws2<HrtfConversionException>(() => library.Import(sofa, "real", new CliHrtfConverter(Path.GetDirectoryName(cli))));
     Require(real.Message.StartsWith("The SOFA file was not converted:", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
 });
+Test("3D audio: the app's .dcshrtf check and the converter's agree (the converter's fixture passes the app's check, the app's test set passes the converter's)", () =>
+{
+    var fixture = File.ReadAllBytes(Path.Combine(workspace, "native/binaural/test/data/csharp_converter_fixture.dcshrtf"));
+    Require(HrtfFile.Validate(fixture, out var why) is not null, "the app refuses the converter's output: " + why);
+    Require(DcsVr.Core.Hrtf.DcsHrtfFile.Validate(fixture) is null, "the converter refuses its own fixture");
+    var synthetic = HrtfFile.Synthetic("cross check");
+    Require(DcsVr.Core.Hrtf.DcsHrtfFile.Validate(synthetic) is null, "the converter's check refuses the app's test set: " + DcsVr.Core.Hrtf.DcsHrtfFile.Validate(synthetic));
+    var broken = (byte[])fixture.Clone(); broken[^1] ^= 0x5a;
+    Require(HrtfFile.Validate(broken, out _) is null && DcsVr.Core.Hrtf.DcsHrtfFile.Validate(broken) is not null, "both refuse a damaged file");
+});
 Test("3D audio: the module's log gives the Audio page's status, Last flight and Checks (running, off with a reason, switched off, CPU back-off)", () =>
 {
-    var running = Binaural.ParseStatus(["10:00:00.000 DcsQvCull loader started", "10:00:01.000 audio: on (hrtf My ears, head pose on, 48000 Hz)", "10:00:30.000 audio: stats sounds=12 p99=0.18 ms",
-        "10:01:00.000 audio: budget: MaxObjects 48 -> 40", "10:02:00.000 audio: stats sounds=31 p99=0.24 ms"], true, true);
+    // The module's own lines (native/dcsqvcull/src/main/audio.inc; log_phrases / audio Phrases keep them in the source).
+    static string On(string set) => $"audio: on (48000 Hz stereo, HRTF {set}: 2562 directions, head radius 9.1 cm, near field on, at most 48 sounds)";
+    static string Stats(int sounds, string p99, string pose) => $"audio: running, {sounds} sounds, p99 {p99} ms per block (budget 25% of a block, about 2.50 ms at 10 ms), limit 48; fades in/out 3/1, fallbacks 0, refused 0, torn 0, pan solves 40 (median 40, mismatch 0), overruns 0; head pose {pose}";
+    var running = Binaural.ParseStatus(["10:00:00.000 DcsQvCull loader started", "10:00:00.500 audio: hooks in (ed_sound.dll 0x6acb8057, analysed build)", "10:00:01.000 " + On("My ears"), "10:00:30.000 " + Stats(12, "0.18", "off"),
+        "10:01:00.000 audio: CPU budget: at most 40 sounds now (2.5% of the last second's blocks over budget)", "10:02:00.000 " + Stats(31, "0.24", "on")], true, true);
     Require(running is { State: "running", Sounds: 31, Hrtf: "My ears", HeadTracking: true, Backoffs: 1, MaxObjectsNow: 40 } && running.CostMs == 0.24 && running.Summary == "Running · 31 sounds · 0.24 ms", running.Summary);
-    var off = Binaural.ParseStatus(["audio: on", "x DcsQvCull loader started", "11:00:00.000 audio: off (output is 8 channels, not stereo)"], true, false);
-    Require(off is { State: "off", Reason: "output is 8 channels, not stereo" } && off.Summary == "Off: output is 8 channels, not stereo. DCS's own sound plays.", "only the last DCS start counts: " + off.Summary);
-    var notFound = Binaural.ParseStatus(["12:00:00.000 audio: P4 not found (pattern count 0)"], true, false);
+    var up = Binaural.ParseStatus([On("default"), "audio: CPU budget: at most 40 sounds now (2.5% of the last second's blocks over budget)", "audio: CPU budget: at most 48 sounds now (10 s under half the budget)",
+        "audio: HRTF My ears (crossfading)", Stats(2, "0.05", "unused")], true, true);
+    Require(up is { Backoffs: 1, MaxObjectsNow: 48, Hrtf: "My ears", HeadTracking: null, Sounds: 2 }, "back up after a back-off, a set picked live, head pose unused");
+    var off = Binaural.ParseStatus([On("default"), "x DcsQvCull loader started", "11:00:00.000 audio: off (DCS's audio output is not stereo (8 channels); set Headphones or Stereo in DCS)"], true, false);
+    Require(off is { State: "off", Reason: "DCS's audio output is not stereo (8 channels); set Headphones or Stereo in DCS" } && off.Summary == "Off: DCS's audio output is not stereo (8 channels); set Headphones or Stereo in DCS. DCS's own sound plays.", "only the last DCS start counts: " + off.Summary);
+    var notFound = Binaural.ParseStatus(["12:00:00.000 audio: off (P4 not found (pattern not found))"], true, false);
     Require(notFound.State == "off" && notFound.Reason!.Contains("not the one it was made for") && notFound.Reason.Contains("P4"), notFound.Summary);
-    var key = Binaural.ParseStatus(["audio: on (hrtf default)", "audio: switched off"], true, true);
-    Require(key is { State: "switched-off", SwitchedOff: true } && key.Summary.StartsWith("Switched off in flight", StringComparison.Ordinal), key.Summary);
-    Require(Binaural.ParseStatus(["audio: on", "audio: switched off", "audio: switched on"], true, true).State == "running", "on again");
+    var key = Binaural.ParseStatus([On("default"), "audio: kill switch ([Hotkeys] AudioToggle): binaural OFF (DCS's own panning)"], true, true);
+    Require(key is { State: "switched-off", SwitchedOff: true, Hrtf: "default" } && key.Summary.StartsWith("Switched off in flight", StringComparison.Ordinal), key.Summary);
+    Require(Binaural.ParseStatus([On("default"), "audio: kill switch (toggle_audio.flag): binaural OFF (DCS's own panning)", "audio: kill switch (toggle_audio.flag): binaural ON"], true, true).State == "running", "on again");
     Require(Binaural.ParseStatus([], true, false).State == "waiting" && Binaural.ParseStatus(null, false, false).State == "not-installed", "waiting / not installed");
     Require(LastFlight.ParseAudio(["perf: fps=1"]) is null && LastFlight.ParseAudio(["audio: off (pan law mismatch)"]) is { State: "off", Reason: "pan law mismatch" }, "Last flight");
 });
