@@ -87,6 +87,8 @@ internal static class WebVerification
             log("Documentation view: " + path);
         }
         controller.Bounds = new System.Drawing.Rectangle(0, 0, 1320, 920); controller.RasterizationScale = 1;
+        // An RTX 50 card, so the DLSS page shows NVIDIA's original runtime as usable (not "will not apply").
+        GpuInfo.Adapters = () => [new(DemoGpu, "NVIDIA", "32.0.15.0")];
         // Pimax Play running; a new profile's default values with every feature checked on the Pimax route (Engine Optimizations too).
         Readiness.ActiveRouteProvider = () => new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
         if (neural is not null) await Step("window.dcsUi.saveRuntime("+JsonSerializer.Serialize(neural)+")");
@@ -102,6 +104,13 @@ internal static class WebVerification
         await Shot("quad-views-pimax-play", "foveation", "(b=>{if(b)b.scrollIntoView({block:'center'});})(document.getElementById('pimaxFovea'));");
         await Shot("dlss5-runtime-file", "dlss");
         await Shot("framegen-auto-2x-3x", "framegen");
+        // The lower Frame generation page: Image quality, with the Advanced fold open beside it.
+        await Shot("framegen-image-quality", "framegen", CloseFolds("framegen") + OpenFoldOf("frameGenParallelEyes") + "(s=>{s.scrollTop=s.scrollHeight;})(document.getElementById('scrollArea'));");
+        // Quad Views' folds open: Eye-tracking options at the top, then Hide the focus edge's Fine-tune with Shape and edge.
+        await Shot("quad-views-eye-tracking", "foveation", CloseFolds("foveation") + OpenFoldOf("quadLostGazeEase") + ScrollTo("setting-gaze", "start"));
+        await Shot("quad-views-hide-edge", "foveation", CloseFolds("foveation") + OpenFoldOf("quadGazeGlideMs") + OpenFoldOf("quadRoundFocus") + ScrollTo("setting-quadHideFocusEdge", "start"));
+        await Shot("perception", "pupil", "");
+        await Shot("visual-realism", "visual", "");
         await Shot("engine-optimizations", "engine");
         await Shot("cpu-boost-plan", "boost");
         await Step("window.dcsUi.run('checkReadiness')");
@@ -139,7 +148,7 @@ internal static class WebVerification
         async Task Shot(string name, string? page, string prepare = "")
         {
             if (page is not null) await core.ExecuteScriptAsync("window.dcsUi.navigate("+JsonSerializer.Serialize(page)+");");
-            await core.ExecuteScriptAsync("document.getElementById('toast').hidden=true;document.getElementById('pages')?.scrollTo(0,0);" + prepare);
+            await core.ExecuteScriptAsync("document.getElementById('toast').hidden=true;document.getElementById('scrollArea').scrollTop=0;" + prepare);
             await Task.Delay(300);
             // Always 1920 pixels wide, whatever the desktop's display scaling does to the window's own capture.
             var view = JsonSerializer.Deserialize<double[]>(await core.ExecuteScriptAsync("[innerWidth,innerHeight,devicePixelRatio]"))!;
@@ -148,6 +157,8 @@ internal static class WebVerification
             log($"Video view: {path} ({view[0]} × {view[1]} CSS px)");
         }
         const string Edit = "const edit=(path,value)=>{const f=window.dcsUi.fields.find(x=>x.path===path);if(f.type==='toggle')f.input.checked=value;else f.input.value=value;f.input.dispatchEvent(new Event(f.type==='toggle'||f.type==='select'?'change':'input',{bubbles:true}));};";
+        // An RTX 50 card, so the DLSS page shows NVIDIA's original runtime as usable (not "will not apply").
+        GpuInfo.Adapters = () => [new(DemoGpu, "NVIDIA", "32.0.15.0")];
         controller.Bounds = new System.Drawing.Rectangle(0, 0, 1600, 900);
         var scaled = controller as CoreWebView2Controller; scaled.RasterizationScale = 1.2; scaled.ShouldDetectMonitorScaleChanges = false;
         Readiness.ActiveRouteProvider = () => new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
@@ -196,6 +207,7 @@ internal static class WebVerification
         await Shot("v06-visual", "visual");
         await Shot("v06-dlss-periphery", "dlss", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('dlssPresets'));");
         await Step("(()=>{"+Edit+"edit('colorMode','Off');edit('panelGamut',0);edit('gVision',false);edit('peripheryDlssPreset','Off');edit('fpsLimit','Preserve');})()");
+        await Video07(Step, Shot, Edit);
         // The tutorial video (vt-*): DCS & headset with Read settings from this PC, and Guided setup's first step.
         await Shot("vt-setup", "setup");
         await core.ExecuteScriptAsync("window.setupWizard.open(); window.setupWizard.choose({route:'Pimax',features:{quad:true,dlss:true,framegen:true,boost:true}});");
@@ -210,9 +222,88 @@ internal static class WebVerification
         await Step("window.dcsUi.run('refresh',window.dcsUi.draft())");
         await Shot("v-overview-applied", "overview");
         await Shot("v-recovery", "recovery", "(f=>{if(f)f.open=true;})(document.getElementById('originalFiles'));");
+        await Video07Applied(Step, Shot, log);
         await Step("window.dcsUi.run('restore')");
         await Shot("v-recovery-restored", "recovery");
         if (service.Originals.Status() is not { Count: 0, Current: null }) throw new IOException("The video fixture was not restored.");
+    }
+
+    /// <summary>The demo PC's graphics card in the documentation and video views: an RTX 50, where NVIDIA's original DLSS 5
+    /// runtime runs (the smoke itself keeps the verified pipeline's RTX 4090).</summary>
+    private const string DemoGpu = "NVIDIA GeForce RTX 5080";
+    /// <summary>JavaScript: open the folds that hold a setting's row (the setting's own fold first, then any around it).</summary>
+    private static string OpenFoldOf(string path) => "(()=>{const f=window.dcsUi.fields.find(x=>x.path==='"+path+"');for(let b=f.element.closest('details');b;b=b.parentElement.closest('details'))b.open=true;})();";
+    /// <summary>JavaScript: scroll an element into view by id.</summary>
+    private static string ScrollTo(string id, string block = "center") => "(s=>{if(s)s.scrollIntoView({block:'"+block+"'});})(document.getElementById('"+id+"'));";
+    /// <summary>JavaScript: close every fold of a page.</summary>
+    private static string CloseFolds(string page) => "document.querySelectorAll('#page-"+page+" details').forEach(d=>d.open=false);";
+
+    /// <summary>The 0.7 release video's stills (v07-*, artifacts/video/STILLS-TODO.md "0.7 video, round 6"), on the Pimax
+    /// profile with every feature: the new switches and folds, the Quest 3 VD route, then everything put back.</summary>
+    private static async Task Video07(Func<string, Task> step, Func<string, string?, string, Task> shot, string edit)
+    {
+        Task Edits(string calls) => step("(()=>{"+edit+calls+"})()");
+        // Foveated frame generation right under Only when needed, the page scrolled so Method is the first row.
+        await Edits("edit('frameGen','Nvidia');edit('frameGenFactor','Auto');edit('frameGenAdaptiveCadence',true);edit('frameGenFoveated',true);");
+        await shot("v07-framegen-foveated", "framegen", CloseFolds("framegen") + ScrollTo("setting-frameGen", "start"));
+        // Its Advanced fold: Stop generating, Smoothness buffer, Both eyes at once.
+        await shot("v07-framegen-advanced", "framegen", CloseFolds("framegen") + OpenFoldOf("frameGenParallelEyes") + ScrollTo("setting-frameGenParallelEyes"));
+        await Edits("edit('smoothCursor',true);");
+        await shot("v07-framegen-cursor", "framegen", CloseFolds("framegen") + ScrollTo("setting-smoothCursor"));
+        await Edits("edit('smoothCursor',false);");
+        // Quad Views, eye tracked: Hide the focus edge with its Fine-tune fold closed, then open, then Eye-tracking options.
+        await Edits("edit('gaze','EyeTracked');edit('quadHideFocusEdge',true);edit('peripheryStability',true);");
+        await shot("v07-quad-hide-edge", "foveation", CloseFolds("foveation") + ScrollTo("setting-quadHideFocusEdge"));
+        await shot("v07-quad-finetune", "foveation", CloseFolds("foveation") + OpenFoldOf("quadGazeGlideMs") + ScrollTo("setting-quadEdgeMatch"));
+        await shot("v07-quad-eyetracking", "foveation", CloseFolds("foveation") + OpenFoldOf("quadLostGazeEase") + ScrollTo("setting-quadSaccadeTail"));
+        // The Engine page renders again once its status is read: open the fold after that.
+        await step("(()=>{window.dcsUi.navigate('engine');return new Promise(r=>setTimeout(r,900));})()");
+        await shot("v07-engine-gpusavings", null, "setTimeout(()=>{" + OpenFoldOf("engineWaterSkip") + "window.dcsUi.fields.find(x=>x.path==='engineWaterSkip').element.closest('details').scrollIntoView({block:'center'});},120);");
+        await Edits("edit('neuralBrightnessMatch',true);");
+        await shot("v07-dlss-match", "dlss", "(d=>{if(d)d.open=true;})(document.getElementById('neuralAdvanced'));" + ScrollTo("setting-neuralBrightnessMatch"));
+        await Edits("edit('neuralBrightnessMatch',false);edit('foveaSource','Profile');edit('pimaxVerticalOffset',-20);");
+        await shot("v07-quad-vertical-offset", "foveation", CloseFolds("foveation") + ScrollTo("setting-pimaxVerticalOffset"));
+        await Edits("edit('pimaxVerticalOffset',0);edit('foveaSource','PimaxPlay');");
+        // Pimax Play on its Balanced preset (runtime_quadviews_rendering_level 1) for one shot, then the fixture's Custom values again.
+        var pimax = PimaxFovea.SettingsPath; var saved = File.ReadAllText(pimax);
+        File.WriteAllText(pimax, saved.Replace("\"piplay_quadviews_fine_type\":", "\"runtime_quadviews_rendering_level\":1,\"piplay_quadviews_fine_type\":"));
+        await step("window.dcsUi.rereadPimax(false)");
+        await shot("v07-quad-pimax-preset", "foveation", CloseFolds("foveation") + ScrollTo("pimaxFovea"));
+        File.WriteAllText(pimax, saved);
+        await step("window.dcsUi.rereadPimax(false)");
+        // Go back as after an update from 0.6.6 (0.6.7 was never published), without the fixture's newer release.
+        await step("(async()=>{const ui=window.dcsUi;const s=await ui.request('updateStatus',{simulatePrevious:'0.6.6-preview'});ui.updates={...s,update:null};ui.renderUpdates();})()");
+        await shot("v07-support-goback", "support", "window.dcsUi.renderUpdates();");
+        // A DCS stuck in the background, in the top bar of another page.
+        await step("(async()=>{const ui=window.dcsUi;await ui.request('dcsStatus',{simulate:true,stuck:'NoWindow'});await ui.pollDcs();})()");
+        await shot("v07-topbar-end-dcs", "framegen", CloseFolds("framegen"));
+        await step("(async()=>{const ui=window.dcsUi;await ui.request('dcsStatus',{simulate:false});await ui.request('dcsStatus',{stuck:null});await ui.pollDcs();ui.state.dcsRunning=false;ui.refreshWorkflow();})()");
+        // Quest 3 through Virtual Desktop: the route in the top bar, its fixed focus with Hide the focus edge.
+        await step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'VirtualDesktop',features:{engine:true,boost:true,quad:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
+        await shot("v07-vd-overview", "overview", "");
+        await shot("v07-vd-quad", "foveation", CloseFolds("foveation") + ScrollTo("setting-pimaxHorizontalFov"));
+        // Back to the Pimax profile with every feature, as before, for the shots that follow.
+        await step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,boost:true,quad:true,dlss:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
+        await Edits("edit('depthBoost',true);edit('farDepth',true);edit('peripheryStability',true);edit('fpsLimit','Preserve');");
+    }
+
+    /// <summary>The 0.7 video's stills after Launch DCS (offline): Quad Views with its folds closed while DCS "runs" with
+    /// Live on (LIVE tags), and the Checks "DCS version" line from a module log written into the demo root only.</summary>
+    private static async Task Video07Applied(Func<string, Task> step, Func<string, string?, string, Task> shot, Action<string> log)
+    {
+        await step("(async()=>{const ui=window.dcsUi;await ui.request('dcsStatus',{simulate:true});await ui.pollDcs();await ui.run('refresh',ui.draft());ui.refreshWorkflow();})()");
+        await shot("v07-pages-folds", "foveation", CloseFolds("foveation") + ScrollTo("setting-quadHideFocusEdge"));
+        await step("(async()=>{const ui=window.dcsUi;await ui.request('dcsStatus',{simulate:false});await ui.pollDcs();ui.state.dcsRunning=false;ui.refreshWorkflow();})()");
+        if (Environment.GetEnvironmentVariable("DCSVR_SMOKE_DEMO_ROOT") is not { Length: > 0 } demo) return;
+        var module = EngineOptimizations.ModuleDirectory(Path.Combine(Path.GetFullPath(demo), @"Saved Games\DCS\Config\options.lua"));
+        var moduleLog = Path.Combine(module, "DcsQvCull.log");
+        if (!File.Exists(Path.Combine(module, "DcsQvCull.dll"))) { log("Video view v07-checks-dcs-version skipped: the engine module is not installed in the demo root."); return; }
+        // The line format the module writes on a DCS build the helpers do not know; the fixture's own log is put back after.
+        var before = File.Exists(moduleLog) ? File.ReadAllBytes(moduleLog) : null;
+        File.WriteAllLines(moduleLog,["[14:30:02.101] loader: starting payload", "[14:30:02.380] frame start: DCS 2.9.99.1 is not an analysed build; off"]);
+        await step("window.dcsUi.run('checkReadiness')");
+        await shot("v07-checks-dcs-version", "diagnostics", "(e=>{const r=[...document.querySelectorAll('#page-diagnostics *')].find(x=>x.children.length===0&&x.textContent.trim()==='DCS version');if(r)r.scrollIntoView({block:'center'});})();");
+        if (before is null) File.Delete(moduleLog); else File.WriteAllBytes(moduleLog, before);
     }
 
     /// <summary>GitHub's release list as the update check sees it, served without network: a newer pre-release (this

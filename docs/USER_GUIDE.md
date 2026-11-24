@@ -319,6 +319,8 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
   - **Steady focus while looking** (on) — movements under half a degree are ignored, so eye-tracker noise does not make the focus edge shimmer. Real eye movements are followed at once.
   - **Slide back when tracking is lost** (EXPERIMENTAL, on) — when the eye tracker loses your eyes for more than a moment (a long blink, the headset shifting), the focus area slides to the centre and to the fixed focus size over 150 ms instead of jumping. When your eyes are found again it follows them at once.
 
+![Quad Views with the Eye-tracking options open](screenshots/quad-views-eye-tracking.png)
+
 **Focus area** card:
 
 - **Focus area values** — *From Pimax Play (recommended)* (default) or *Set here*.
@@ -342,6 +344,8 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
 - **How bundled Quad Views reproduces this** (folded, under Pimax Play's values) shows the conversion and, once DCS has run, the focus size in pixels per eye.
 - **Coverage preview**: the focus area to scale, and how many pixels DCS renders against normal stereo.
 - **Sharpness** card: **Focus sharpening** (0.7; 0 is off), **Periphery contrast** (0.3; brings back some of the local contrast the periphery loses at its lower resolution; raise it slowly, too much makes the periphery shimmer) and **Sharpening fades at the edge** (on). Almost no GPU cost.
+
+![Hide the focus edge with Fine-tune and Shape and edge open](screenshots/quad-views-hide-edge.png)
 
 On the **Quest 3 VD** route Pimax Play is not read and the focus is fixed in the centre: Focus movement, Focus area values and the Eye-tracking options are hidden, and the focus area starts at Horizontal FOV 55%, Vertical FOV 75% (tall enough to keep the instruments sharp), Peripheral Resolution 40% and Center Resolution 100%, which you can change on the page. Switching back to Pimax or Sboys in the same app session gives you the focus values you had before; a profile that started on Quest 3 VD follows Pimax Play again.
 
@@ -413,6 +417,8 @@ The **DCS frame limit** card sets DCS's own limit at launch; Back to stock DCS p
 - **Desktop VSync off** — stops VSync of the desktop DCS window from holding the frame rate back. Headset sync is unaffected.
 - **Use the headset's refresh rate** (on) — Pimax Play: the rate the headset runs at, or ran at last; Sboys: SteamVR's rate. Otherwise **Headset refresh rate** (90 Hz until the headset software reports one) is used.
 
+![Image quality, and the Advanced fold open](screenshots/framegen-image-quality.png)
+
 The **Image quality** card holds how generated frames look:
 
 - **Sharp HUD** (EXPERIMENTAL, off by default; needs frame generation, not Depth boost or Engine Optimizations) — DCS draws the HUD and helmet symbols into the image, so generated frames blend two positions of them and they smear. On: the engine module hands the symbols over separately, frame generation makes the in-between frame from the world alone and puts the symbols of the nearest real frame back. DCS itself moves HUD symbols 20 times a second, so they keep that rhythm instead of smearing. Measured gain is small (by day the sharpest symbols lose about 2 % instead of 5–6 % in the worst moments); it costs about 0.15 ms of GPU time and 160 MB of video memory.
@@ -425,6 +431,8 @@ The **Image quality** card holds how generated frames look:
 - **Before you fly:** turn off other limiters and smoothing that fight frame generation — NVIDIA *Max Frame Rate* / *Background Application Max Frame Rate*, RTSS, Pimax Smart Smoothing, SteamVR motion smoothing. The app does not change these; Checks reminds you.
 
 ### Perception
+
+![Perception page](screenshots/perception.png)
 
 How deep and steady the world looks: **Eye distance**, then **Pupil shift**, **Depth boost** and **Far depth** (experimental, all off by default), then **Status in DCS** (read from the last flight) and **Check in flight** (each feature's key, to compare off and on). Pupil shift and Depth boost need eye tracking, so they are off on the Quest 3 VD route; Far depth needs the bundled Quad Views. Periphery stability is on the [Quad Views](#periphery-stability-experimental) page.
 
@@ -457,6 +465,8 @@ Details: [PERCEPTION.md](PERCEPTION.md#depth-boost).
 On the **Perception** page. It adds depth to distant scenery (about 50 m to 2 km): aircraft, ships and terrain stand out more, and the cockpit is not touched. It needs the bundled Quad Views, but no eye tracking; the engine module measures the depth DCS draws (with Engine Optimizations off it is installed for this alone, in its Perception-only mode). **Strength**: Subtle, Default or Strong; the strength and the in-flight key (Alt+Shift+F8) can be changed while DCS runs, turning it on or off waits for the next launch. The OSD shows "Far depth: ON", or "waiting for engine" until the depth arrives.
 
 ### Visual realism
+
+![Visual realism page](screenshots/visual-realism.png)
 
 How the image looks in the headset, on its own page. Everything is **off by default**. Changes apply with Launch DCS; the **Color mode** key switches color modes in flight. VR flights only. The effects run inside the engine module: with Engine Optimizations off, turning one on installs the module in its Perception-only mode (none of the optimizations run). Times are GPU time per frame. None of these has been judged in the headset yet: try one at a time.
 
