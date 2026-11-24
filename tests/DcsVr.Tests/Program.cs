@@ -49,6 +49,8 @@ void Test(string name, Action action) => tests.Add((name, action));
 void Require(bool value, string message = "Assertion failed") { if (!value) throw new Exception(message); }
 // Binaural audio: the SOFA -> .dcshrtf converter (HrtfTests.cs).
 DcsVr.Tests.HrtfTests.Register(Test, Require, workspace);
+// SOFA import: the reader, the hrtf-convert command and the generic set (SofaTests.cs).
+DcsVr.Tests.SofaTests.Register(Test, Require, Skip, workspace, root);
 void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new Exception("Expected " + typeof(T).Name); }
 string DeferredOfxr = Path.Combine(workspace, "artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll");
 string Make(string relative, string text) { var path = PathPolicy.UnderRoot(root, relative); AtomicFile.WriteText(path, text); return path; }
@@ -6847,14 +6849,14 @@ Test("3D audio: SOFA import converts once into the library; a taken name, a refu
     Require(library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, "deleted");
     Throws<InvalidDataException>(() => library.Delete("default"));
     // This installation's converter through its contract interface (DcsVr.Cli hrtf-convert): a file that is no SOFA is
-    // refused with a reason and nothing is kept (before task A's command exists, the reason is that there is none).
+    // refused with its reason (not a SOFA file) and nothing is kept.
     var cli = System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
         .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DcsVrCliPath")?.Value;
     var missing = Throws2<HrtfConversionException>(() => new CliHrtfConverter(Path.Combine(root, "no-cli")).Convert(sofa, Path.Combine(root, "x.dcshrtf"), "x"));
     Require(missing.Message.Contains("not found"), missing.Message);
     if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found"); return; }
     var real = Throws2<HrtfConversionException>(() => library.Import(sofa, "real", new CliHrtfConverter(Path.GetDirectoryName(cli))));
-    Require(real.Message.StartsWith("The SOFA file was not converted:", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
+    Require(real.Message.StartsWith("The SOFA file was not converted: This is not a SOFA file", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
 });
 Test("3D audio: the app's .dcshrtf check and the converter's agree (the converter's fixture passes the app's check, the app's test set passes the converter's)", () =>
 {

@@ -1450,9 +1450,11 @@ function renderHrtfOptions() {
 }
 /** What the chosen set is, after an import or for the set selected: the conversion report in plain words. */
 function hrtfReportHtml(s, fresh) {
-  const radius = Number(s.headRadiusMm), around = (2 * Math.PI * radius / 10).toFixed(0);
+  // The fitted radius is a Woodworth fit of the measured onsets (larger than the head itself): shown as the largest
+  // time difference between the ears it stands for, not as a head size.
+  const itd = (Number(s.headRadiusMm) / 1000 / 343 * (Math.PI / 2 + 1) * 1000).toFixed(2);
   return `<p><b>${escape(fresh ? `Imported "${s.name}"` : s.title || s.name)}</b>: ${s.directions} measured directions, ${(s.sampleRate/1000).toLocaleString('en-US')} kHz`
-    + `${s.coverage != null ? `, ${Math.round(s.coverage*100)}% of the sphere covered` : ''}, head ${around} cm around in the file.</p>`
+    + `${s.coverage != null ? `, ${Math.round(s.coverage*100)}% of the sphere covered` : ''}, sound reaches the two ears up to ${itd} ms apart.</p>`
     + (s.warnings?.length ? `<ul>${s.warnings.map(w => `<li>${escape(w)}</li>`).join('')}</ul>` : '<p>No warnings.</p>');
 }
 function renderHrtfReport() {

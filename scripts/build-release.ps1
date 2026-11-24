@@ -222,6 +222,16 @@ $webView2 = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'src/DcsVr
 if (-not $webView2) { throw 'DcsVr.App.csproj does not reference Microsoft.Web.WebView2.' }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/nuget/microsoft.web.webview2/$webView2/LICENSE.txt") -Destination (Join-Path $payloadRoot 'licenses/WebView2-SDK.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/nuget/microsoft.web.webview2/$webView2/NOTICE.txt") -Destination (Join-Path $payloadRoot 'licenses/WebView2-NOTICE.txt') -Force
+# PureHDF (MIT), the SOFA reader DcsVr.Core references (one place: DcsVr.Core.csproj). Its package carries no licence
+# file, so the pinned version's repository texts are kept in src/DcsVr.Core/ThirdParty/PureHDF: its MIT licence and the
+# BSD licence of the C-Blosc2 code it includes.
+$pureHdf = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'src/DcsVr.Core/DcsVr.Core.csproj') -Raw)).SelectSingleNode("//PackageReference[@Include='PureHDF']").Version
+if ($pureHdf -ne '[2.2.0]') { throw "DcsVr.Core.csproj references PureHDF $pureHdf; src/DcsVr.Core/ThirdParty/PureHDF and docs/THIRD_PARTY.md record 2.2.0." }
+if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot 'PureHDF.dll'))) { throw 'The published application lacks PureHDF.dll (the SOFA import).' }
+$pureHdfLicences = Join-Path $workspaceRoot 'src/DcsVr.Core/ThirdParty/PureHDF'
+Copy-Item -LiteralPath (Join-Path $pureHdfLicences 'LICENSE.md') -Destination (Join-Path $payloadRoot 'licenses/PureHDF-MIT.txt') -Force
+Copy-Item -LiteralPath (Join-Path $pureHdfLicences '3rd-party-licenses.md') -Destination (Join-Path $payloadRoot 'licenses/PureHDF-third-party.md') -Force
+Copy-Item -LiteralPath (Join-Path $pureHdfLicences 'C-Blosc2-LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/PureHDF-C-Blosc2-BSD-3-Clause.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/cheeky/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-GPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/ofxr/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-LGPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-djules75-LGPL-3.0.txt') -Force

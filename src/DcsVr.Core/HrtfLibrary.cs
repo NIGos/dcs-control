@@ -150,6 +150,9 @@ public static class HrtfFile
 public sealed record HrtfFacts(string Title, string Source, int SampleRate, int Directions, int Triangles, int Taps, double HeadRadiusMm, double DistanceM,
     bool Personal, bool DiffuseFieldEq, bool FrontNormalised, int Horizontal, bool Above, bool Below)
 {
+    /// <summary>The largest time difference between the ears the fitted radius stands for (Woodworth, 90 degrees), ms.</summary>
+    public double MaxItdMs => HeadRadiusMm / 1000 / 343 * (Math.PI / 2 + 1) * 1000;
+
     /// <summary>The plain warnings the page shows with the conversion report.</summary>
     public IReadOnlyList<string> Warnings()
     {
@@ -157,7 +160,9 @@ public sealed record HrtfFacts(string Title, string Source, int SampleRate, int 
         if (!Above || !Below) list.Add(!Above && !Below ? "The measurements cover little above or below you: height will sound vague." : !Above ? "The measurements cover little above you: sounds overhead will sound vague." : "The measurements cover little below you.");
         if (Directions < 100) list.Add("Few measured directions: directions between them are guessed.");
         if (Horizontal < 12) list.Add("Few measurements around you at ear height: left, right and behind may be less exact.");
-        if (HeadRadiusMm is < 70 or > 110) list.Add($"The head size in the file ({2 * Math.PI * HeadRadiusMm / 10:0} cm around) is unusual. Check that it is your own measurement.");
+        // The radius is a Woodworth fit of the measured onsets, larger than the head itself (SADIE II's KU100: 119 mm, about
+        // 0.9 ms between the ears): unusual below 70 mm or above 140 mm (about 0.52 and 1.05 ms).
+        if (HeadRadiusMm is < 70 or > 140) list.Add($"The time difference between the ears in the file (up to {MaxItdMs:0.00} ms) is unusual. Check that it is your own measurement.");
         return list;
     }
 }

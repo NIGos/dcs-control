@@ -67,7 +67,7 @@ static class HrtfTests
         return new HrirSet { SampleRate = rate, Directions = dirs, Ir = ir, MeasurementDistanceM = 1.2, Name = "Synthetic sphere", Source = "test" };
     }
 
-    static double[][] LatLong(double elStep, double azStep, double minEl = -90 + 1e-9)
+    internal static double[][] LatLong(double elStep, double azStep, double minEl = -90 + 1e-9)
     {
         var dirs = new List<double[]> { HrirSet.DirectionFromSofa(0, 90) };
         for (var el = 90 - elStep; el > minEl; el -= elStep)
@@ -76,7 +76,7 @@ static class HrtfTests
         return dirs.ToArray();
     }
 
-    static double[] BandsDb(ReadOnlySpan<float> ir, int n, double rate, double scale, double[]? eqDb = null, int eqN = 0)
+    internal static double[] BandsDb(ReadOnlySpan<float> ir, int n, double rate, double scale, double[]? eqDb = null, int eqN = 0)
     {
         var mag = HrtfDsp.Magnitude(ir, n);
         var result = new List<double>();

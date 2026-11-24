@@ -13,6 +13,9 @@ try
     // A help flag anywhere only prints the commands: "launch --help" must never start DCS. The boost helper's own
     // arguments are its business.
     if (command != "boost" && args.Any(a => a is "--help" or "-h" or "/?" or "-?")) command = "help";
+    // SOFA -> .dcshrtf (the app's Import SOFA and scripts/fetch-hrtf.ps1): needs no state folder or DCS, so it runs
+    // before either is looked at. Its exit codes and output lines are a contract (DcsVr.Core.Hrtf.SofaConversion).
+    if (command == "hrtf-convert") return DcsVr.Core.Hrtf.SofaConversion.RunCli(args[1..], Console.Out, Console.Error);
     string? Option(string name) { var i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
     // The release folder holds release-manifest.json next to files\, where this program lives.
     string ReleaseFolder() => File.Exists(Path.Combine(AppContext.BaseDirectory, "release-manifest.json")) ? AppContext.BaseDirectory : Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))!;
@@ -154,7 +157,7 @@ try
         default:
             // An unknown command is an error (a typo must not look like success to a script); "help" is not.
             if (command != "help") Console.Error.WriteLine("Unknown command: " + command);
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, end-dcs, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile (with --leftovers also the count of DCS Control files in DCS the record does not list). restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, end-dcs, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall, hrtf-convert\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile (with --leftovers also the count of DCS Control files in DCS the record does not list). restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values). hrtf-convert <in.sofa> <out.dcshrtf> [--name N] [--source S] [--generic] converts a SOFA HRTF file for 3D audio."); if (command != "help") return 1; break;
     }
     return 0;
 }
