@@ -1,0 +1,1253 @@
+Test only (bugfix round 0.7, round 3): the foveated single layer's composer (0099) when a composition is refused.
+xrfg_foveated_composer_tests case 6: a composer not initialized refuses (E_NOT_VALID_STATE, also its timing and wait);
+no queue, no target, a zero size, no view, three views and a view without its focus image are each refused with
+E_INVALIDARG without recording anything (no command list left open, no slot or timestamp used), and the next valid
+composition is still exactly its sources' (compose_foveated_single_layer then sends the refused frame as it came, as
+two layers, and composes the next one). No change to the layer.
+
+--- a/tests/foveated_composer_tests.cpp
++++ b/tests/foveated_composer_tests.cpp
+@@ -1,603 +1,640 @@
+-// DCS Control (0099): the foveated single layer's composition
+-// (D3D12FoveatedComposer, src/d3d12/foveated_compose.hlsl).
+-//
+-// Without arguments, on the WARP device: every output texel of both eyes
+-// against a CPU reference of the runtime's blend (the focus layer over the
+-// periphery by its alpha, on the stored bytes, each layer bilinear within its
+-// sub-image), for the three alpha modes, per eye with each eye's own sources,
+-// fields of view and slices, a rotated focus view, typed sRGB sources and
+-// target, and a run of compositions into a ring of targets (a real frame and
+-// two generated ones per application frame) each checked against its own
+-// sources. The output's alpha must be 255 everywhere.
+-//
+-// XRFG_TEST_FOVEATED_COMPOSE_BENCH=1: on the first hardware adapter, the GPU
+-// time of one composition at the sizes of a Pimax Crystal Super flight
+-// (periphery 1076x1060, focus 1952x1928, output 5424x5356 per eye, two eyes),
+-// and at smaller output scales; printed, nothing required. Exit code 77 without
+-// a hardware adapter.
+-
+-#include "xrfg/d3d12_foveated_composer.hpp"
+-
+-#include <d3d12.h>
+-#include <dxgi1_6.h>
+-#include <wrl/client.h>
+-
+-#include <algorithm>
+-#include <array>
+-#include <chrono>
+-#include <cmath>
+-#include <cstdint>
+-#include <cstdio>
+-#include <cstdlib>
+-#include <cstring>
+-#include <random>
+-#include <span>
+-#include <stdexcept>
+-#include <string>
+-#include <vector>
+-
+-using Microsoft::WRL::ComPtr;
+-
+-namespace {
+-
+-void check(HRESULT result, const char* what) {
+-    if (FAILED(result)) {
+-        char text[256];
+-        std::snprintf(text, sizeof(text), "%s failed (0x%08lX)", what, static_cast<unsigned long>(result));
+-        throw std::runtime_error(text);
+-    }
+-}
+-
+-struct Gpu {
+-    ComPtr<ID3D12Device> device;
+-    ComPtr<ID3D12CommandQueue> queue;
+-    ComPtr<ID3D12CommandAllocator> allocator;
+-    ComPtr<ID3D12GraphicsCommandList> list;
+-    ComPtr<ID3D12Fence> fence;
+-    std::uint64_t value{};
+-    HANDLE event{};
+-
+-    void begin() {
+-        check(allocator->Reset(), "allocator reset");
+-        check(list->Reset(allocator.Get(), nullptr), "list reset");
+-    }
+-    void submit_and_wait() {
+-        check(list->Close(), "list close");
+-        ID3D12CommandList* lists[] = {list.Get()};
+-        queue->ExecuteCommandLists(1, lists);
+-        wait();
+-    }
+-    void wait() {
+-        check(queue->Signal(fence.Get(), ++value), "signal");
+-        if (fence->GetCompletedValue() < value) {
+-            check(fence->SetEventOnCompletion(value, event), "event");
+-            WaitForSingleObject(event, INFINITE);
+-        }
+-    }
+-};
+-
+-Gpu make_gpu(bool hardware) {
+-    Gpu gpu;
+-    ComPtr<IDXGIFactory4> factory;
+-    check(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "factory");
+-    ComPtr<IDXGIAdapter1> adapter;
+-    if (hardware) {
+-        for (UINT i = 0; factory->EnumAdapters1(i, adapter.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; ++i) {
+-            DXGI_ADAPTER_DESC1 desc{};
+-            adapter->GetDesc1(&desc);
+-            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
+-                SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(gpu.device.GetAddressOf())))) {
+-                std::printf("adapter: %ls\n", desc.Description);
+-                break;
+-            }
+-        }
+-        if (!gpu.device) {
+-            return gpu;
+-        }
+-    } else {
+-        check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf())), "warp adapter");
+-        check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(gpu.device.GetAddressOf())), "warp device");
+-    }
+-    D3D12_COMMAND_QUEUE_DESC queue{};
+-    queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+-    check(gpu.device->CreateCommandQueue(&queue, IID_PPV_ARGS(gpu.queue.GetAddressOf())), "queue");
+-    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(gpu.allocator.GetAddressOf())), "allocator");
+-    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, gpu.allocator.Get(), nullptr,
+-              IID_PPV_ARGS(gpu.list.GetAddressOf())), "list");
+-    check(gpu.list->Close(), "list close");
+-    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gpu.fence.GetAddressOf())), "fence");
+-    gpu.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+-    return gpu;
+-}
+-
+-// An RGBA8 image of `slices` slices, texel (x, y, s) at [(s * h + y) * w + x].
+-struct Image {
+-    std::uint32_t width{}, height{}, slices{};
+-    std::vector<std::uint32_t> texels;
+-    [[nodiscard]] std::uint32_t at(std::uint32_t x, std::uint32_t y, std::uint32_t s) const {
+-        return texels[(static_cast<std::size_t>(s) * height + y) * width + x];
+-    }
+-};
+-
+-void barrier(Gpu& gpu, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+-    D3D12_RESOURCE_BARRIER b{};
+-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+-    b.Transition.pResource = resource;
+-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+-    b.Transition.StateBefore = before;
+-    b.Transition.StateAfter = after;
+-    gpu.list->ResourceBarrier(1, &b);
+-}
+-
+-ComPtr<ID3D12Resource> make_texture(Gpu& gpu, std::uint32_t w, std::uint32_t h, std::uint32_t slices, DXGI_FORMAT format) {
+-    D3D12_HEAP_PROPERTIES heap{};
+-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+-    D3D12_RESOURCE_DESC desc{};
+-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+-    desc.Width = w;
+-    desc.Height = h;
+-    desc.DepthOrArraySize = static_cast<UINT16>(slices);
+-    desc.MipLevels = 1;
+-    desc.Format = format;
+-    desc.SampleDesc.Count = 1;
+-    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+-    ComPtr<ID3D12Resource> texture;
+-    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
+-              nullptr, IID_PPV_ARGS(texture.GetAddressOf())), "texture");
+-    return texture;
+-}
+-
+-ComPtr<ID3D12Resource> make_buffer(Gpu& gpu, std::uint64_t bytes, D3D12_HEAP_TYPE type) {
+-    D3D12_HEAP_PROPERTIES heap{};
+-    heap.Type = type;
+-    D3D12_RESOURCE_DESC desc{};
+-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+-    desc.Width = bytes;
+-    desc.Height = 1;
+-    desc.DepthOrArraySize = 1;
+-    desc.MipLevels = 1;
+-    desc.SampleDesc.Count = 1;
+-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-    ComPtr<ID3D12Resource> buffer;
+-    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+-              type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COPY_DEST,
+-              nullptr, IID_PPV_ARGS(buffer.GetAddressOf())), "buffer");
+-    return buffer;
+-}
+-
+-constexpr std::uint32_t kPitchAlign = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+-
+-std::uint32_t pitch_of(std::uint32_t width) { return (width * 4 + kPitchAlign - 1) / kPitchAlign * kPitchAlign; }
+-
+-// The texture's format for the copies (typeless and typed RGBA8 share the bytes).
+-DXGI_FORMAT copy_format(ID3D12Resource* texture) {
+-    const auto format = texture->GetDesc().Format;
+-    return format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM : format;
+-}
+-
+-void upload(Gpu& gpu, ID3D12Resource* texture, const Image& image) {
+-    const std::uint32_t pitch = pitch_of(image.width);
+-    const std::uint64_t slice_bytes = static_cast<std::uint64_t>(pitch) * image.height;
+-    auto staging = make_buffer(gpu, slice_bytes * image.slices, D3D12_HEAP_TYPE_UPLOAD);
+-    std::uint8_t* mapped = nullptr;
+-    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map upload");
+-    for (std::uint32_t s = 0; s < image.slices; ++s)
+-        for (std::uint32_t y = 0; y < image.height; ++y)
+-            std::memcpy(mapped + s * slice_bytes + static_cast<std::size_t>(y) * pitch,
+-                &image.texels[(static_cast<std::size_t>(s) * image.height + y) * image.width], image.width * 4);
+-    staging->Unmap(0, nullptr);
+-    gpu.begin();
+-    barrier(gpu, texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+-    for (std::uint32_t s = 0; s < image.slices; ++s) {
+-        D3D12_TEXTURE_COPY_LOCATION dst{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
+-        dst.SubresourceIndex = s;
+-        D3D12_TEXTURE_COPY_LOCATION src{staging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
+-        src.PlacedFootprint.Offset = s * slice_bytes;
+-        src.PlacedFootprint.Footprint = {copy_format(texture), image.width, image.height, 1, pitch};
+-        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+-    }
+-    barrier(gpu, texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+-    gpu.submit_and_wait();
+-}
+-
+-Image read_back(Gpu& gpu, ID3D12Resource* texture) {
+-    const auto desc = texture->GetDesc();
+-    Image image{static_cast<std::uint32_t>(desc.Width), desc.Height, desc.DepthOrArraySize, {}};
+-    image.texels.resize(static_cast<std::size_t>(image.width) * image.height * image.slices);
+-    const std::uint32_t pitch = pitch_of(image.width);
+-    const std::uint64_t slice_bytes = static_cast<std::uint64_t>(pitch) * image.height;
+-    auto staging = make_buffer(gpu, slice_bytes * image.slices, D3D12_HEAP_TYPE_READBACK);
+-    gpu.begin();
+-    barrier(gpu, texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+-    for (std::uint32_t s = 0; s < image.slices; ++s) {
+-        D3D12_TEXTURE_COPY_LOCATION src{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
+-        src.SubresourceIndex = s;
+-        D3D12_TEXTURE_COPY_LOCATION dst{staging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
+-        dst.PlacedFootprint.Offset = s * slice_bytes;
+-        dst.PlacedFootprint.Footprint = {copy_format(texture), image.width, image.height, 1, pitch};
+-        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+-    }
+-    barrier(gpu, texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+-    gpu.submit_and_wait();
+-    std::uint8_t* mapped = nullptr;
+-    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map readback");
+-    for (std::uint32_t s = 0; s < image.slices; ++s)
+-        for (std::uint32_t y = 0; y < image.height; ++y)
+-            std::memcpy(&image.texels[(static_cast<std::size_t>(s) * image.height + y) * image.width],
+-                mapped + s * slice_bytes + static_cast<std::size_t>(y) * pitch, image.width * 4);
+-    staging->Unmap(0, nullptr);
+-    return image;
+-}
+-
+-// Smooth random content (the bilinear reference is exact only to rounding).
+-Image make_content(std::uint32_t w, std::uint32_t h, std::uint32_t slices, std::uint32_t seed, bool alpha_ramp) {
+-    Image image{w, h, slices, std::vector<std::uint32_t>(static_cast<std::size_t>(w) * h * slices)};
+-    std::mt19937 random(seed);
+-    std::uniform_real_distribution<float> phase(0.f, 6.28f);
+-    for (std::uint32_t s = 0; s < slices; ++s) {
+-        const float p[4]{phase(random), phase(random), phase(random), phase(random)};
+-        for (std::uint32_t y = 0; y < h; ++y)
+-            for (std::uint32_t x = 0; x < w; ++x) {
+-                const float fx = static_cast<float>(x) / w, fy = static_cast<float>(y) / h;
+-                std::uint32_t texel = 0;
+-                for (int ch = 0; ch < 3; ++ch) {
+-                    const float v = 0.5f + 0.45f * std::sin(fx * (5 + ch * 3) + fy * (4 + ch) + p[ch] + s);
+-                    texel |= static_cast<std::uint32_t>(std::lround(v * 255)) << (8 * ch);
+-                }
+-                std::uint32_t alpha = 255;
+-                if (alpha_ramp) {
+-                    // A ramp to 0 at the border over the outer 0.3, like Quad Views' opaque focus.
+-                    const float ox = std::abs((x + 0.5f) / w * 2 - 1), oy = std::abs((y + 0.5f) / h * 2 - 1);
+-                    const float r = std::sqrt(ox * ox + oy * oy) / std::sqrt(2.f) * 1.2f;
+-                    const float t = std::clamp((r - 0.7f) / 0.3f, 0.f, 1.f);
+-                    alpha = static_cast<std::uint32_t>(std::lround((1 - t * t * (3 - 2 * t)) * 255));
+-                }
+-                image.texels[(static_cast<std::size_t>(s) * h + y) * w + x] = texel | (alpha << 24);
+-            }
+-    }
+-    return image;
+-}
+-
+-float srgb_encode(float c) {
+-    c = std::clamp(c, 0.f, 1.f);
+-    return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1 / 2.4f) - 0.055f;
+-}
+-float srgb_decode(float c) {
+-    c = std::clamp(c, 0.f, 1.f);
+-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+-}
+-
+-// Bilinear at texture uv (clamped to the sub-image's half-texel limits first),
+-// channel ch, as 0..1; `linear_view`: the texel read through an sRGB view
+-// (decoded before filtering, encoded after).
+-float sample(const Image& image, std::uint32_t slice, float u, float v, const float* limits, int ch, bool linear_view) {
+-    u = std::clamp(u, limits[0], limits[2]);
+-    v = std::clamp(v, limits[1], limits[3]);
+-    const float x = u * image.width - 0.5f, y = v * image.height - 0.5f;
+-    const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+-    const float fx = x - x0, fy = y - y0;
+-    const auto texel = [&](int tx, int ty) {
+-        tx = std::clamp(tx, 0, static_cast<int>(image.width) - 1);
+-        ty = std::clamp(ty, 0, static_cast<int>(image.height) - 1);
+-        const float value = static_cast<float>((image.at(tx, ty, slice) >> (8 * ch)) & 255U) / 255.f;
+-        return linear_view && ch < 3 ? srgb_decode(value) : value;
+-    };
+-    const float value = (texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx) * (1 - fy) +
+-                        (texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
+-    return linear_view && ch < 3 ? srgb_encode(value) : value;
+-}
+-
+-struct Rotation {
+-    float m[3][3];
+-};
+-Rotation rotation_of(const std::array<float, 4>& q) {
+-    const float x = q[0], y = q[1], z = q[2], w = q[3];
+-    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
+-        {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
+-        {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}}};
+-}
+-
+-// The runtime's two-layer result at output texel (x, y) of one eye, as 0..255 per channel.
+-std::array<float, 3> reference(const Image& periphery, const Image& focus, const xrfg::D3D12FoveatedComposeView& view,
+-    std::uint32_t out_w, std::uint32_t out_h, std::uint32_t x, std::uint32_t y, bool srgb_views) {
+-    const auto c = xrfg::make_foveated_compose_constants(view, periphery.width, periphery.height, focus.width,
+-        focus.height, false, false, false);
+-    const float u = (x + 0.5f) / out_w, v = (y + 0.5f) / out_h;
+-    std::array<float, 3> p{}, out{};
+-    for (int ch = 0; ch < 3; ++ch) {
+-        p[ch] = sample(periphery, view.periphery.array_slice, u * c.periphery_rect[0] + c.periphery_rect[2],
+-            v * c.periphery_rect[1] + c.periphery_rect[3], c.periphery_clamp, ch, srgb_views);
+-        out[ch] = p[ch];
+-    }
+-    const auto& pt = view.periphery.tangents;
+-    const auto& ft = view.focus.tangents;
+-    const float d[3]{pt[0] + (pt[1] - pt[0]) * u, pt[2] + (pt[3] - pt[2]) * v, -1};
+-    const Rotation rp = rotation_of(view.periphery.orientation), rf = rotation_of(view.focus.orientation);
+-    float world[3]{}, local[3]{};
+-    for (int i = 0; i < 3; ++i) world[i] = rp.m[i][0] * d[0] + rp.m[i][1] * d[1] + rp.m[i][2] * d[2];
+-    for (int i = 0; i < 3; ++i) local[i] = rf.m[0][i] * world[0] + rf.m[1][i] * world[1] + rf.m[2][i] * world[2];
+-    if (local[2] < 0) {
+-        const float tx = local[0] / -local[2], ty = local[1] / -local[2];
+-        const float fu = (tx - ft[0]) / (ft[1] - ft[0]), fv = (ty - ft[2]) / (ft[3] - ft[2]);
+-        if (fu >= 0 && fu <= 1 && fv >= 0 && fv <= 1) {
+-            const float su = fu * c.focus_rect[0] + c.focus_rect[2], sv = fv * c.focus_rect[1] + c.focus_rect[3];
+-            const float a = sample(focus, view.focus.array_slice, su, sv, c.focus_clamp, 3, false);
+-            for (int ch = 0; ch < 3; ++ch) {
+-                const float f = sample(focus, view.focus.array_slice, su, sv, c.focus_clamp, ch, srgb_views);
+-                switch (view.alpha) {
+-                case xrfg::D3D12FoveatedFocusAlpha::opaque: out[ch] = f; break;
+-                case xrfg::D3D12FoveatedFocusAlpha::unpremultiplied: out[ch] = f * a + p[ch] * (1 - a); break;
+-                default: out[ch] = f + p[ch] * (1 - a); break;
+-                }
+-            }
+-        }
+-    }
+-    for (auto& value : out) value = std::clamp(value, 0.f, 1.f) * 255.f;
+-    return out;
+-}
+-
+-struct Compared {
+-    float worst{};
+-    std::size_t focus_texels{}, alpha_wrong{}, differing{};
+-};
+-
+-// Every texel of every view of `out` against the reference.
+-Compared compare(const Image& out, const Image& periphery, const Image& focus,
+-    std::span<const xrfg::D3D12FoveatedComposeView> views, bool srgb_views, float tolerance) {
+-    Compared result;
+-    for (const auto& view : views) {
+-        const auto c = xrfg::make_foveated_compose_constants(view, periphery.width, periphery.height, focus.width,
+-            focus.height, false, false, false);
+-        (void)c;
+-        for (std::uint32_t y = 0; y < out.height; ++y)
+-            for (std::uint32_t x = 0; x < out.width; ++x) {
+-                const std::uint32_t texel = out.at(x, y, view.target_slice);
+-                if ((texel >> 24) != 255U) ++result.alpha_wrong;
+-                const auto expected = reference(periphery, focus, view, out.width, out.height, x, y, srgb_views);
+-                float worst = 0;
+-                for (int ch = 0; ch < 3; ++ch)
+-                    worst = std::max(worst, std::abs(static_cast<float>((texel >> (8 * ch)) & 255U) - expected[ch]));
+-                result.worst = std::max(result.worst, worst);
+-                if (worst > tolerance) ++result.differing;
+-                // Focus texels: where the output differs from the periphery alone.
+-                const float u = (x + 0.5f) / out.width, v = (y + 0.5f) / out.height;
+-                const auto& pt = view.periphery.tangents;
+-                const auto& ft = view.focus.tangents;
+-                const float tx = pt[0] + (pt[1] - pt[0]) * u, ty = pt[2] + (pt[3] - pt[2]) * v;
+-                if (tx > ft[0] && tx < ft[1] && ty < ft[2] && ty > ft[3]) ++result.focus_texels;
+-            }
+-    }
+-    return result;
+-}
+-
+-xrfg::D3D12FoveatedComposeView make_view(ID3D12Resource* periphery, ID3D12Resource* focus, std::uint32_t eye,
+-    std::uint32_t pw, std::uint32_t ph, std::uint32_t fw, std::uint32_t fh, xrfg::D3D12FoveatedFocusAlpha alpha) {
+-    xrfg::D3D12FoveatedComposeView view{};
+-    view.periphery = {periphery, eye, 0, 0, pw, ph, {}, {0, 0, 0, 1}};
+-    view.focus = {focus, eye, 0, 0, fw, fh, {}, {0, 0, 0, 1}};
+-    // Each eye its own asymmetric field of view, the focus inside it and off centre.
+-    const float s = eye == 0 ? 1.f : -1.f;
+-    view.periphery.tangents = {eye == 0 ? -1.25f : -0.95f, eye == 0 ? 0.95f : 1.25f, 1.05f, -1.15f};
+-    view.focus.tangents = {-0.42f + 0.05f * s, 0.38f + 0.05f * s, 0.35f, -0.45f};
+-    view.alpha = alpha;
+-    view.target_slice = eye;
+-    return view;
+-}
+-
+-int run_tests() {
+-    Gpu gpu = make_gpu(false);
+-    xrfg::D3D12FoveatedComposer composer;
+-    check(composer.initialize(gpu.device.Get()), "composer initialize");
+-    bool ok = true;
+-    const auto report = [&](const char* name, const Compared& c, float tolerance, std::size_t min_focus) {
+-        const bool pass = c.differing == 0 && c.alpha_wrong == 0 && c.focus_texels >= min_focus;
+-        std::printf("%s: worst %.2f codes (limit %.1f), %zu over, alpha not 255: %zu, focus texels %zu -> %s\n", name,
+-            c.worst, tolerance, c.differing, c.alpha_wrong, c.focus_texels, pass ? "ok" : "FAILED");
+-        ok = ok && pass;
+-    };
+-    constexpr std::uint32_t pw = 72, ph = 64, fw = 96, fh = 88, ow = 200, oh = 176;
+-    const Image periphery = make_content(pw, ph, 2, 1, false);
+-    const Image focus = make_content(fw, fh, 2, 2, true);
+-    auto periphery_texture = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-    auto focus_texture = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-    upload(gpu, periphery_texture.Get(), periphery);
+-    upload(gpu, focus_texture.Get(), focus);
+-
+-    // 1. The three alpha modes, both eyes, typeless (the stored bytes).
+-    for (const auto mode : {xrfg::D3D12FoveatedFocusAlpha::unpremultiplied, xrfg::D3D12FoveatedFocusAlpha::premultiplied,
+-             xrfg::D3D12FoveatedFocusAlpha::opaque}) {
+-        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
+-            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, mode),
+-            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, mode)};
+-        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose");
+-        check(composer.wait_idle(), "wait");
+-        const Image out = read_back(gpu, target.Get());
+-        const char* names[] = {"opaque", "unpremultiplied", "premultiplied"};
+-        char name[96];
+-        std::snprintf(name, sizeof(name), "alpha mode %s, both eyes", names[static_cast<int>(mode)]);
+-        report(name, compare(out, periphery, focus, views, false, 1.5f), 1.5f, 2000);
+-        // Per eye: slice 1 must not equal slice 0 (each eye its own sources and fields of view).
+-        std::size_t same = 0;
+-        for (std::uint32_t y = 0; y < oh; ++y)
+-            for (std::uint32_t x = 0; x < ow; ++x) same += out.at(x, y, 0) == out.at(x, y, 1) ? 1U : 0U;
+-        const bool eyes_apart = same < static_cast<std::size_t>(ow) * oh / 20;
+-        std::printf("  eyes apart: %zu of %u texels equal -> %s\n", same, ow * oh, eyes_apart ? "ok" : "FAILED");
+-        ok = ok && eyes_apart;
+-    }
+-
+-    // 2. Sub-images: each eye's view on a rectangle of one wide non-array texture (side by side).
+-    {
+-        const Image wide_p = make_content(pw * 2 + 6, ph + 4, 1, 3, false);
+-        const Image wide_f = make_content(fw * 2 + 4, fh + 2, 1, 4, true);
+-        auto wp = make_texture(gpu, wide_p.width, wide_p.height, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        auto wf = make_texture(gpu, wide_f.width, wide_f.height, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        upload(gpu, wp.Get(), wide_p);
+-        upload(gpu, wf.Get(), wide_f);
+-        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
+-        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+-            views[eye] = make_view(wp.Get(), wf.Get(), eye, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied);
+-            views[eye].periphery.array_slice = 0;
+-            views[eye].focus.array_slice = 0;
+-            views[eye].periphery.x = static_cast<std::int32_t>(eye * (pw + 6));
+-            views[eye].periphery.y = 3;
+-            views[eye].focus.x = static_cast<std::int32_t>(eye * (fw + 4));
+-            views[eye].focus.y = 1;
+-        }
+-        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose sub-images");
+-        check(composer.wait_idle(), "wait");
+-        report("sub-images of one texture", compare(read_back(gpu, target.Get()), wide_p, wide_f, views, false, 1.5f), 1.5f, 2000);
+-    }
+-
+-    // 3. A focus view rotated against the periphery's (5 degrees of yaw and 3 of roll).
+-    {
+-        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        std::array<xrfg::D3D12FoveatedComposeView, 2> views{
+-            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
+-            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
+-        const float yaw = 5.f * 3.14159265f / 180.f, roll = 3.f * 3.14159265f / 180.f;
+-        // q = yaw (about y) * roll (about z).
+-        const float cy = std::cos(yaw / 2), sy = std::sin(yaw / 2), cr = std::cos(roll / 2), sr = std::sin(roll / 2);
+-        views[0].focus.orientation = {sy * sr, sy * cr, cy * sr, cy * cr};
+-        views[1].periphery.orientation = {0, std::sin(-yaw / 4), 0, std::cos(-yaw / 4)};
+-        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose rotated");
+-        check(composer.wait_idle(), "wait");
+-        report("rotated focus view", compare(read_back(gpu, target.Get()), periphery, focus, views, false, 1.5f), 1.5f, 2000);
+-    }
+-
+-    // 4. Typed sRGB sources and target (the pass encodes what it reads and decodes what it writes): the result
+-    //    is the blend on the encoded values within the round trips' rounding.
+-    {
+-        auto p_srgb = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+-        auto f_srgb = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+-        upload(gpu, p_srgb.Get(), periphery);
+-        upload(gpu, f_srgb.Get(), focus);
+-        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+-        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
+-            make_view(p_srgb.Get(), f_srgb.Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
+-            make_view(p_srgb.Get(), f_srgb.Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
+-        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose srgb");
+-        check(composer.wait_idle(), "wait");
+-        report("typed sRGB sources and target", compare(read_back(gpu, target.Get()), periphery, focus, views, true, 2.5f), 2.5f, 2000);
+-    }
+-
+-    // 5. Frames in a row (a real frame and its two generated ones, 4 application frames, 3 target images in turn,
+-    //    new sources every frame, nothing waited for between them): each output is its own sources' composition.
+-    {
+-        std::array<ComPtr<ID3D12Resource>, 3> targets{};
+-        for (auto& t : targets) t = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        std::array<ComPtr<ID3D12Resource>, 3> ps{}, fs{};
+-        std::array<Image, 3> pi{}, fi{};
+-        bool frames_ok = true;
+-        float worst = 0;
+-        for (int frame = 0; frame < 12; ++frame) {
+-            const std::size_t k = static_cast<std::size_t>(frame % 3);
+-            pi[k] = make_content(pw, ph, 2, 100 + frame, false);
+-            fi[k] = make_content(fw, fh, 2, 200 + frame, true);
+-            if (!ps[k]) {
+-                ps[k] = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-                fs[k] = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-            }
+-            upload(gpu, ps[k].Get(), pi[k]);
+-            upload(gpu, fs[k].Get(), fi[k]);
+-            const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
+-                make_view(ps[k].Get(), fs[k].Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
+-                make_view(ps[k].Get(), fs[k].Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
+-            check(composer.compose(gpu.queue.Get(), {targets[k].Get(), ow, oh}, views), "compose frame");
+-            if (k == 2) {
+-                check(composer.wait_idle(), "wait");
+-                for (std::size_t j = 0; j < 3; ++j) {
+-                    const std::array<xrfg::D3D12FoveatedComposeView, 2> vj{
+-                        make_view(ps[j].Get(), fs[j].Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
+-                        make_view(ps[j].Get(), fs[j].Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
+-                    const Compared c = compare(read_back(gpu, targets[j].Get()), pi[j], fi[j], vj, false, 1.5f);
+-                    worst = std::max(worst, c.worst);
+-                    frames_ok = frames_ok && c.differing == 0 && c.alpha_wrong == 0;
+-                }
+-            }
+-        }
+-        D3D12_RESOURCE_BARRIER none{};
+-        (void)none;
+-        std::size_t timed = 0;
+-        xrfg::D3D12FoveatedComposeTiming timing{};
+-        while (composer.consume_gpu_timing(&timing) == S_OK) ++timed;
+-        std::printf("frames in a row (12, ring of 3 targets): worst %.2f codes, %zu timed -> %s\n", worst, timed,
+-            frames_ok ? "ok" : "FAILED");
+-        ok = ok && frames_ok;
+-    }
+-    std::printf(ok ? "foveated single layer composition: all checks passed\n" : "foveated single layer composition FAILED\n");
+-    return ok ? 0 : 1;
+-}
+-
+-int run_bench() {
+-    Gpu gpu = make_gpu(true);
+-    if (!gpu.device) {
+-        std::printf("no hardware adapter: skipped\n");
+-        return 77;
+-    }
+-    xrfg::D3D12FoveatedComposer composer;
+-    check(composer.initialize(gpu.device.Get()), "composer initialize");
+-    constexpr std::uint32_t pw = 1076, ph = 1060, fw = 1952, fh = 1928;
+-    auto periphery = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-    auto focus = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-    upload(gpu, periphery.Get(), make_content(pw, ph, 2, 7, false));
+-    upload(gpu, focus.Get(), make_content(fw, fh, 2, 8, true));
+-    struct Size {
+-        std::uint32_t w, h;
+-        const char* name;
+-    };
+-    for (const Size size : {Size{5424, 5356, "100 % (runtime recommended)"}, Size{4068, 4017, "75 %"},
+-             Size{3840, 3792, "Crystal Super panel"}, Size{2712, 2678, "50 %"}}) {
+-        auto target = make_texture(gpu, size.w, size.h, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+-        // Quad Views' geometry: the periphery's field of view, the focus a part of it (density 0.198 vs 1.2).
+-        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
+-        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+-            views[eye] = make_view(periphery.Get(), focus.Get(), eye, pw, ph, fw, fh,
+-                xrfg::D3D12FoveatedFocusAlpha::unpremultiplied);
+-            views[eye].periphery.tangents = {-1.6f, 1.6f, 1.6f, -1.6f};
+-            const float half = 3.2f * (fw / 1.2f) / (pw / 0.198f) / 2;
+-            views[eye].focus.tangents = {-half, half, half, -half};
+-        }
+-        std::vector<double> times;
+-        double cpu_us = 0;
+-        for (int i = 0; i < 260; ++i) {
+-            const auto start = std::chrono::steady_clock::now();
+-            check(composer.compose(gpu.queue.Get(), {target.Get(), size.w, size.h}, views), "compose");
+-            cpu_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+-            if (i % 4 == 3) check(composer.wait_idle(), "wait");
+-            xrfg::D3D12FoveatedComposeTiming timing{};
+-            while (composer.consume_gpu_timing(&timing) == S_OK)
+-                if (timing.sequence >= 20) times.push_back(static_cast<double>(timing.microseconds));
+-        }
+-        check(composer.wait_idle(), "wait");
+-        xrfg::D3D12FoveatedComposeTiming timing{};
+-        while (composer.consume_gpu_timing(&timing) == S_OK) times.push_back(static_cast<double>(timing.microseconds));
+-        std::sort(times.begin(), times.end());
+-        double sum = 0;
+-        for (double t : times) sum += t;
+-        const double vram_mb = 3.0 * 2 * size.w * size.h * 4 / (1024.0 * 1024.0);
+-        std::printf("output %ux%u x2 (%s): GPU mean %.3f ms, p50 %.3f, p95 %.3f, max %.3f over %zu; CPU record %.1f us; "
+-                    "3-image ring %.0f MiB\n",
+-            size.w, size.h, size.name, sum / std::max<std::size_t>(times.size(), 1) / 1000.0,
+-            times.empty() ? 0 : times[times.size() / 2] / 1000.0, times.empty() ? 0 : times[times.size() * 95 / 100] / 1000.0,
+-            times.empty() ? 0 : times.back() / 1000.0, times.size(), cpu_us / 260, vram_mb);
+-    }
+-    return 0;
+-}
+-
+-} // namespace
+-
+-int main() {
+-    try {
+-        char* bench = nullptr;
+-        std::size_t length = 0;
+-        const bool want_bench = _dupenv_s(&bench, &length, "XRFG_TEST_FOVEATED_COMPOSE_BENCH") == 0 && bench != nullptr &&
+-            std::string(bench) == "1";
+-        std::free(bench);
+-        return want_bench ? run_bench() : run_tests();
+-    } catch (const std::exception& error) {
+-        std::printf("error: %s\n", error.what());
+-        return 2;
+-    }
+-}
++// DCS Control (0099): the foveated single layer's composition
++// (D3D12FoveatedComposer, src/d3d12/foveated_compose.hlsl).
++//
++// Without arguments, on the WARP device: every output texel of both eyes
++// against a CPU reference of the runtime's blend (the focus layer over the
++// periphery by its alpha, on the stored bytes, each layer bilinear within its
++// sub-image), for the three alpha modes, per eye with each eye's own sources,
++// fields of view and slices, a rotated focus view, typed sRGB sources and
++// target, and a run of compositions into a ring of targets (a real frame and
++// two generated ones per application frame) each checked against its own
++// sources. The output's alpha must be 255 everywhere.
++//
++// XRFG_TEST_FOVEATED_COMPOSE_BENCH=1: on the first hardware adapter, the GPU
++// time of one composition at the sizes of a Pimax Crystal Super flight
++// (periphery 1076x1060, focus 1952x1928, output 5424x5356 per eye, two eyes),
++// and at smaller output scales; printed, nothing required. Exit code 77 without
++// a hardware adapter.
++
++#include "xrfg/d3d12_foveated_composer.hpp"
++
++#include <d3d12.h>
++#include <dxgi1_6.h>
++#include <wrl/client.h>
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <span>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++
++namespace {
++
++void check(HRESULT result, const char* what) {
++    if (FAILED(result)) {
++        char text[256];
++        std::snprintf(text, sizeof(text), "%s failed (0x%08lX)", what, static_cast<unsigned long>(result));
++        throw std::runtime_error(text);
++    }
++}
++
++struct Gpu {
++    ComPtr<ID3D12Device> device;
++    ComPtr<ID3D12CommandQueue> queue;
++    ComPtr<ID3D12CommandAllocator> allocator;
++    ComPtr<ID3D12GraphicsCommandList> list;
++    ComPtr<ID3D12Fence> fence;
++    std::uint64_t value{};
++    HANDLE event{};
++
++    void begin() {
++        check(allocator->Reset(), "allocator reset");
++        check(list->Reset(allocator.Get(), nullptr), "list reset");
++    }
++    void submit_and_wait() {
++        check(list->Close(), "list close");
++        ID3D12CommandList* lists[] = {list.Get()};
++        queue->ExecuteCommandLists(1, lists);
++        wait();
++    }
++    void wait() {
++        check(queue->Signal(fence.Get(), ++value), "signal");
++        if (fence->GetCompletedValue() < value) {
++            check(fence->SetEventOnCompletion(value, event), "event");
++            WaitForSingleObject(event, INFINITE);
++        }
++    }
++};
++
++Gpu make_gpu(bool hardware) {
++    Gpu gpu;
++    ComPtr<IDXGIFactory4> factory;
++    check(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "factory");
++    ComPtr<IDXGIAdapter1> adapter;
++    if (hardware) {
++        for (UINT i = 0; factory->EnumAdapters1(i, adapter.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; ++i) {
++            DXGI_ADAPTER_DESC1 desc{};
++            adapter->GetDesc1(&desc);
++            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
++                SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(gpu.device.GetAddressOf())))) {
++                std::printf("adapter: %ls\n", desc.Description);
++                break;
++            }
++        }
++        if (!gpu.device) {
++            return gpu;
++        }
++    } else {
++        check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf())), "warp adapter");
++        check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(gpu.device.GetAddressOf())), "warp device");
++    }
++    D3D12_COMMAND_QUEUE_DESC queue{};
++    queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
++    check(gpu.device->CreateCommandQueue(&queue, IID_PPV_ARGS(gpu.queue.GetAddressOf())), "queue");
++    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(gpu.allocator.GetAddressOf())), "allocator");
++    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, gpu.allocator.Get(), nullptr,
++              IID_PPV_ARGS(gpu.list.GetAddressOf())), "list");
++    check(gpu.list->Close(), "list close");
++    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gpu.fence.GetAddressOf())), "fence");
++    gpu.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++    return gpu;
++}
++
++// An RGBA8 image of `slices` slices, texel (x, y, s) at [(s * h + y) * w + x].
++struct Image {
++    std::uint32_t width{}, height{}, slices{};
++    std::vector<std::uint32_t> texels;
++    [[nodiscard]] std::uint32_t at(std::uint32_t x, std::uint32_t y, std::uint32_t s) const {
++        return texels[(static_cast<std::size_t>(s) * height + y) * width + x];
++    }
++};
++
++void barrier(Gpu& gpu, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
++    D3D12_RESOURCE_BARRIER b{};
++    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = resource;
++    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = before;
++    b.Transition.StateAfter = after;
++    gpu.list->ResourceBarrier(1, &b);
++}
++
++ComPtr<ID3D12Resource> make_texture(Gpu& gpu, std::uint32_t w, std::uint32_t h, std::uint32_t slices, DXGI_FORMAT format) {
++    D3D12_HEAP_PROPERTIES heap{};
++    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++    D3D12_RESOURCE_DESC desc{};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    desc.Width = w;
++    desc.Height = h;
++    desc.DepthOrArraySize = static_cast<UINT16>(slices);
++    desc.MipLevels = 1;
++    desc.Format = format;
++    desc.SampleDesc.Count = 1;
++    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++    ComPtr<ID3D12Resource> texture;
++    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
++              nullptr, IID_PPV_ARGS(texture.GetAddressOf())), "texture");
++    return texture;
++}
++
++ComPtr<ID3D12Resource> make_buffer(Gpu& gpu, std::uint64_t bytes, D3D12_HEAP_TYPE type) {
++    D3D12_HEAP_PROPERTIES heap{};
++    heap.Type = type;
++    D3D12_RESOURCE_DESC desc{};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    desc.Width = bytes;
++    desc.Height = 1;
++    desc.DepthOrArraySize = 1;
++    desc.MipLevels = 1;
++    desc.SampleDesc.Count = 1;
++    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    ComPtr<ID3D12Resource> buffer;
++    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
++              type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COPY_DEST,
++              nullptr, IID_PPV_ARGS(buffer.GetAddressOf())), "buffer");
++    return buffer;
++}
++
++constexpr std::uint32_t kPitchAlign = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
++
++std::uint32_t pitch_of(std::uint32_t width) { return (width * 4 + kPitchAlign - 1) / kPitchAlign * kPitchAlign; }
++
++// The texture's format for the copies (typeless and typed RGBA8 share the bytes).
++DXGI_FORMAT copy_format(ID3D12Resource* texture) {
++    const auto format = texture->GetDesc().Format;
++    return format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM : format;
++}
++
++void upload(Gpu& gpu, ID3D12Resource* texture, const Image& image) {
++    const std::uint32_t pitch = pitch_of(image.width);
++    const std::uint64_t slice_bytes = static_cast<std::uint64_t>(pitch) * image.height;
++    auto staging = make_buffer(gpu, slice_bytes * image.slices, D3D12_HEAP_TYPE_UPLOAD);
++    std::uint8_t* mapped = nullptr;
++    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map upload");
++    for (std::uint32_t s = 0; s < image.slices; ++s)
++        for (std::uint32_t y = 0; y < image.height; ++y)
++            std::memcpy(mapped + s * slice_bytes + static_cast<std::size_t>(y) * pitch,
++                &image.texels[(static_cast<std::size_t>(s) * image.height + y) * image.width], image.width * 4);
++    staging->Unmap(0, nullptr);
++    gpu.begin();
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
++    for (std::uint32_t s = 0; s < image.slices; ++s) {
++        D3D12_TEXTURE_COPY_LOCATION dst{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
++        dst.SubresourceIndex = s;
++        D3D12_TEXTURE_COPY_LOCATION src{staging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
++        src.PlacedFootprint.Offset = s * slice_bytes;
++        src.PlacedFootprint.Footprint = {copy_format(texture), image.width, image.height, 1, pitch};
++        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++    }
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    gpu.submit_and_wait();
++}
++
++Image read_back(Gpu& gpu, ID3D12Resource* texture) {
++    const auto desc = texture->GetDesc();
++    Image image{static_cast<std::uint32_t>(desc.Width), desc.Height, desc.DepthOrArraySize, {}};
++    image.texels.resize(static_cast<std::size_t>(image.width) * image.height * image.slices);
++    const std::uint32_t pitch = pitch_of(image.width);
++    const std::uint64_t slice_bytes = static_cast<std::uint64_t>(pitch) * image.height;
++    auto staging = make_buffer(gpu, slice_bytes * image.slices, D3D12_HEAP_TYPE_READBACK);
++    gpu.begin();
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    for (std::uint32_t s = 0; s < image.slices; ++s) {
++        D3D12_TEXTURE_COPY_LOCATION src{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
++        src.SubresourceIndex = s;
++        D3D12_TEXTURE_COPY_LOCATION dst{staging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
++        dst.PlacedFootprint.Offset = s * slice_bytes;
++        dst.PlacedFootprint.Footprint = {copy_format(texture), image.width, image.height, 1, pitch};
++        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++    }
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    gpu.submit_and_wait();
++    std::uint8_t* mapped = nullptr;
++    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map readback");
++    for (std::uint32_t s = 0; s < image.slices; ++s)
++        for (std::uint32_t y = 0; y < image.height; ++y)
++            std::memcpy(&image.texels[(static_cast<std::size_t>(s) * image.height + y) * image.width],
++                mapped + s * slice_bytes + static_cast<std::size_t>(y) * pitch, image.width * 4);
++    staging->Unmap(0, nullptr);
++    return image;
++}
++
++// Smooth random content (the bilinear reference is exact only to rounding).
++Image make_content(std::uint32_t w, std::uint32_t h, std::uint32_t slices, std::uint32_t seed, bool alpha_ramp) {
++    Image image{w, h, slices, std::vector<std::uint32_t>(static_cast<std::size_t>(w) * h * slices)};
++    std::mt19937 random(seed);
++    std::uniform_real_distribution<float> phase(0.f, 6.28f);
++    for (std::uint32_t s = 0; s < slices; ++s) {
++        const float p[4]{phase(random), phase(random), phase(random), phase(random)};
++        for (std::uint32_t y = 0; y < h; ++y)
++            for (std::uint32_t x = 0; x < w; ++x) {
++                const float fx = static_cast<float>(x) / w, fy = static_cast<float>(y) / h;
++                std::uint32_t texel = 0;
++                for (int ch = 0; ch < 3; ++ch) {
++                    const float v = 0.5f + 0.45f * std::sin(fx * (5 + ch * 3) + fy * (4 + ch) + p[ch] + s);
++                    texel |= static_cast<std::uint32_t>(std::lround(v * 255)) << (8 * ch);
++                }
++                std::uint32_t alpha = 255;
++                if (alpha_ramp) {
++                    // A ramp to 0 at the border over the outer 0.3, like Quad Views' opaque focus.
++                    const float ox = std::abs((x + 0.5f) / w * 2 - 1), oy = std::abs((y + 0.5f) / h * 2 - 1);
++                    const float r = std::sqrt(ox * ox + oy * oy) / std::sqrt(2.f) * 1.2f;
++                    const float t = std::clamp((r - 0.7f) / 0.3f, 0.f, 1.f);
++                    alpha = static_cast<std::uint32_t>(std::lround((1 - t * t * (3 - 2 * t)) * 255));
++                }
++                image.texels[(static_cast<std::size_t>(s) * h + y) * w + x] = texel | (alpha << 24);
++            }
++    }
++    return image;
++}
++
++float srgb_encode(float c) {
++    c = std::clamp(c, 0.f, 1.f);
++    return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1 / 2.4f) - 0.055f;
++}
++float srgb_decode(float c) {
++    c = std::clamp(c, 0.f, 1.f);
++    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++}
++
++// Bilinear at texture uv (clamped to the sub-image's half-texel limits first),
++// channel ch, as 0..1; `linear_view`: the texel read through an sRGB view
++// (decoded before filtering, encoded after).
++float sample(const Image& image, std::uint32_t slice, float u, float v, const float* limits, int ch, bool linear_view) {
++    u = std::clamp(u, limits[0], limits[2]);
++    v = std::clamp(v, limits[1], limits[3]);
++    const float x = u * image.width - 0.5f, y = v * image.height - 0.5f;
++    const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
++    const float fx = x - x0, fy = y - y0;
++    const auto texel = [&](int tx, int ty) {
++        tx = std::clamp(tx, 0, static_cast<int>(image.width) - 1);
++        ty = std::clamp(ty, 0, static_cast<int>(image.height) - 1);
++        const float value = static_cast<float>((image.at(tx, ty, slice) >> (8 * ch)) & 255U) / 255.f;
++        return linear_view && ch < 3 ? srgb_decode(value) : value;
++    };
++    const float value = (texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx) * (1 - fy) +
++                        (texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
++    return linear_view && ch < 3 ? srgb_encode(value) : value;
++}
++
++struct Rotation {
++    float m[3][3];
++};
++Rotation rotation_of(const std::array<float, 4>& q) {
++    const float x = q[0], y = q[1], z = q[2], w = q[3];
++    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
++        {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
++        {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}}};
++}
++
++// The runtime's two-layer result at output texel (x, y) of one eye, as 0..255 per channel.
++std::array<float, 3> reference(const Image& periphery, const Image& focus, const xrfg::D3D12FoveatedComposeView& view,
++    std::uint32_t out_w, std::uint32_t out_h, std::uint32_t x, std::uint32_t y, bool srgb_views) {
++    const auto c = xrfg::make_foveated_compose_constants(view, periphery.width, periphery.height, focus.width,
++        focus.height, false, false, false);
++    const float u = (x + 0.5f) / out_w, v = (y + 0.5f) / out_h;
++    std::array<float, 3> p{}, out{};
++    for (int ch = 0; ch < 3; ++ch) {
++        p[ch] = sample(periphery, view.periphery.array_slice, u * c.periphery_rect[0] + c.periphery_rect[2],
++            v * c.periphery_rect[1] + c.periphery_rect[3], c.periphery_clamp, ch, srgb_views);
++        out[ch] = p[ch];
++    }
++    const auto& pt = view.periphery.tangents;
++    const auto& ft = view.focus.tangents;
++    const float d[3]{pt[0] + (pt[1] - pt[0]) * u, pt[2] + (pt[3] - pt[2]) * v, -1};
++    const Rotation rp = rotation_of(view.periphery.orientation), rf = rotation_of(view.focus.orientation);
++    float world[3]{}, local[3]{};
++    for (int i = 0; i < 3; ++i) world[i] = rp.m[i][0] * d[0] + rp.m[i][1] * d[1] + rp.m[i][2] * d[2];
++    for (int i = 0; i < 3; ++i) local[i] = rf.m[0][i] * world[0] + rf.m[1][i] * world[1] + rf.m[2][i] * world[2];
++    if (local[2] < 0) {
++        const float tx = local[0] / -local[2], ty = local[1] / -local[2];
++        const float fu = (tx - ft[0]) / (ft[1] - ft[0]), fv = (ty - ft[2]) / (ft[3] - ft[2]);
++        if (fu >= 0 && fu <= 1 && fv >= 0 && fv <= 1) {
++            const float su = fu * c.focus_rect[0] + c.focus_rect[2], sv = fv * c.focus_rect[1] + c.focus_rect[3];
++            const float a = sample(focus, view.focus.array_slice, su, sv, c.focus_clamp, 3, false);
++            for (int ch = 0; ch < 3; ++ch) {
++                const float f = sample(focus, view.focus.array_slice, su, sv, c.focus_clamp, ch, srgb_views);
++                switch (view.alpha) {
++                case xrfg::D3D12FoveatedFocusAlpha::opaque: out[ch] = f; break;
++                case xrfg::D3D12FoveatedFocusAlpha::unpremultiplied: out[ch] = f * a + p[ch] * (1 - a); break;
++                default: out[ch] = f + p[ch] * (1 - a); break;
++                }
++            }
++        }
++    }
++    for (auto& value : out) value = std::clamp(value, 0.f, 1.f) * 255.f;
++    return out;
++}
++
++struct Compared {
++    float worst{};
++    std::size_t focus_texels{}, alpha_wrong{}, differing{};
++};
++
++// Every texel of every view of `out` against the reference.
++Compared compare(const Image& out, const Image& periphery, const Image& focus,
++    std::span<const xrfg::D3D12FoveatedComposeView> views, bool srgb_views, float tolerance) {
++    Compared result;
++    for (const auto& view : views) {
++        const auto c = xrfg::make_foveated_compose_constants(view, periphery.width, periphery.height, focus.width,
++            focus.height, false, false, false);
++        (void)c;
++        for (std::uint32_t y = 0; y < out.height; ++y)
++            for (std::uint32_t x = 0; x < out.width; ++x) {
++                const std::uint32_t texel = out.at(x, y, view.target_slice);
++                if ((texel >> 24) != 255U) ++result.alpha_wrong;
++                const auto expected = reference(periphery, focus, view, out.width, out.height, x, y, srgb_views);
++                float worst = 0;
++                for (int ch = 0; ch < 3; ++ch)
++                    worst = std::max(worst, std::abs(static_cast<float>((texel >> (8 * ch)) & 255U) - expected[ch]));
++                result.worst = std::max(result.worst, worst);
++                if (worst > tolerance) ++result.differing;
++                // Focus texels: where the output differs from the periphery alone.
++                const float u = (x + 0.5f) / out.width, v = (y + 0.5f) / out.height;
++                const auto& pt = view.periphery.tangents;
++                const auto& ft = view.focus.tangents;
++                const float tx = pt[0] + (pt[1] - pt[0]) * u, ty = pt[2] + (pt[3] - pt[2]) * v;
++                if (tx > ft[0] && tx < ft[1] && ty < ft[2] && ty > ft[3]) ++result.focus_texels;
++            }
++    }
++    return result;
++}
++
++xrfg::D3D12FoveatedComposeView make_view(ID3D12Resource* periphery, ID3D12Resource* focus, std::uint32_t eye,
++    std::uint32_t pw, std::uint32_t ph, std::uint32_t fw, std::uint32_t fh, xrfg::D3D12FoveatedFocusAlpha alpha) {
++    xrfg::D3D12FoveatedComposeView view{};
++    view.periphery = {periphery, eye, 0, 0, pw, ph, {}, {0, 0, 0, 1}};
++    view.focus = {focus, eye, 0, 0, fw, fh, {}, {0, 0, 0, 1}};
++    // Each eye its own asymmetric field of view, the focus inside it and off centre.
++    const float s = eye == 0 ? 1.f : -1.f;
++    view.periphery.tangents = {eye == 0 ? -1.25f : -0.95f, eye == 0 ? 0.95f : 1.25f, 1.05f, -1.15f};
++    view.focus.tangents = {-0.42f + 0.05f * s, 0.38f + 0.05f * s, 0.35f, -0.45f};
++    view.alpha = alpha;
++    view.target_slice = eye;
++    return view;
++}
++
++int run_tests() {
++    Gpu gpu = make_gpu(false);
++    xrfg::D3D12FoveatedComposer composer;
++    check(composer.initialize(gpu.device.Get()), "composer initialize");
++    bool ok = true;
++    const auto report = [&](const char* name, const Compared& c, float tolerance, std::size_t min_focus) {
++        const bool pass = c.differing == 0 && c.alpha_wrong == 0 && c.focus_texels >= min_focus;
++        std::printf("%s: worst %.2f codes (limit %.1f), %zu over, alpha not 255: %zu, focus texels %zu -> %s\n", name,
++            c.worst, tolerance, c.differing, c.alpha_wrong, c.focus_texels, pass ? "ok" : "FAILED");
++        ok = ok && pass;
++    };
++    constexpr std::uint32_t pw = 72, ph = 64, fw = 96, fh = 88, ow = 200, oh = 176;
++    const Image periphery = make_content(pw, ph, 2, 1, false);
++    const Image focus = make_content(fw, fh, 2, 2, true);
++    auto periphery_texture = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    auto focus_texture = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    upload(gpu, periphery_texture.Get(), periphery);
++    upload(gpu, focus_texture.Get(), focus);
++
++    // 1. The three alpha modes, both eyes, typeless (the stored bytes).
++    for (const auto mode : {xrfg::D3D12FoveatedFocusAlpha::unpremultiplied, xrfg::D3D12FoveatedFocusAlpha::premultiplied,
++             xrfg::D3D12FoveatedFocusAlpha::opaque}) {
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, mode),
++            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, mode)};
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose");
++        check(composer.wait_idle(), "wait");
++        const Image out = read_back(gpu, target.Get());
++        const char* names[] = {"opaque", "unpremultiplied", "premultiplied"};
++        char name[96];
++        std::snprintf(name, sizeof(name), "alpha mode %s, both eyes", names[static_cast<int>(mode)]);
++        report(name, compare(out, periphery, focus, views, false, 1.5f), 1.5f, 2000);
++        // Per eye: slice 1 must not equal slice 0 (each eye its own sources and fields of view).
++        std::size_t same = 0;
++        for (std::uint32_t y = 0; y < oh; ++y)
++            for (std::uint32_t x = 0; x < ow; ++x) same += out.at(x, y, 0) == out.at(x, y, 1) ? 1U : 0U;
++        const bool eyes_apart = same < static_cast<std::size_t>(ow) * oh / 20;
++        std::printf("  eyes apart: %zu of %u texels equal -> %s\n", same, ow * oh, eyes_apart ? "ok" : "FAILED");
++        ok = ok && eyes_apart;
++    }
++
++    // 2. Sub-images: each eye's view on a rectangle of one wide non-array texture (side by side).
++    {
++        const Image wide_p = make_content(pw * 2 + 6, ph + 4, 1, 3, false);
++        const Image wide_f = make_content(fw * 2 + 4, fh + 2, 1, 4, true);
++        auto wp = make_texture(gpu, wide_p.width, wide_p.height, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        auto wf = make_texture(gpu, wide_f.width, wide_f.height, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        upload(gpu, wp.Get(), wide_p);
++        upload(gpu, wf.Get(), wide_f);
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
++        for (std::uint32_t eye = 0; eye < 2; ++eye) {
++            views[eye] = make_view(wp.Get(), wf.Get(), eye, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied);
++            views[eye].periphery.array_slice = 0;
++            views[eye].focus.array_slice = 0;
++            views[eye].periphery.x = static_cast<std::int32_t>(eye * (pw + 6));
++            views[eye].periphery.y = 3;
++            views[eye].focus.x = static_cast<std::int32_t>(eye * (fw + 4));
++            views[eye].focus.y = 1;
++        }
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose sub-images");
++        check(composer.wait_idle(), "wait");
++        report("sub-images of one texture", compare(read_back(gpu, target.Get()), wide_p, wide_f, views, false, 1.5f), 1.5f, 2000);
++    }
++
++    // 3. A focus view rotated against the periphery's (5 degrees of yaw and 3 of roll).
++    {
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++        const float yaw = 5.f * 3.14159265f / 180.f, roll = 3.f * 3.14159265f / 180.f;
++        // q = yaw (about y) * roll (about z).
++        const float cy = std::cos(yaw / 2), sy = std::sin(yaw / 2), cr = std::cos(roll / 2), sr = std::sin(roll / 2);
++        views[0].focus.orientation = {sy * sr, sy * cr, cy * sr, cy * cr};
++        views[1].periphery.orientation = {0, std::sin(-yaw / 4), 0, std::cos(-yaw / 4)};
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose rotated");
++        check(composer.wait_idle(), "wait");
++        report("rotated focus view", compare(read_back(gpu, target.Get()), periphery, focus, views, false, 1.5f), 1.5f, 2000);
++    }
++
++    // 4. Typed sRGB sources and target (the pass encodes what it reads and decodes what it writes): the result
++    //    is the blend on the encoded values within the round trips' rounding.
++    {
++        auto p_srgb = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++        auto f_srgb = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++        upload(gpu, p_srgb.Get(), periphery);
++        upload(gpu, f_srgb.Get(), focus);
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(p_srgb.Get(), f_srgb.Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++            make_view(p_srgb.Get(), f_srgb.Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose srgb");
++        check(composer.wait_idle(), "wait");
++        report("typed sRGB sources and target", compare(read_back(gpu, target.Get()), periphery, focus, views, true, 2.5f), 2.5f, 2000);
++    }
++
++    // 5. Frames in a row (a real frame and its two generated ones, 4 application frames, 3 target images in turn,
++    //    new sources every frame, nothing waited for between them): each output is its own sources' composition.
++    {
++        std::array<ComPtr<ID3D12Resource>, 3> targets{};
++        for (auto& t : targets) t = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        std::array<ComPtr<ID3D12Resource>, 3> ps{}, fs{};
++        std::array<Image, 3> pi{}, fi{};
++        bool frames_ok = true;
++        float worst = 0;
++        for (int frame = 0; frame < 12; ++frame) {
++            const std::size_t k = static_cast<std::size_t>(frame % 3);
++            pi[k] = make_content(pw, ph, 2, 100 + frame, false);
++            fi[k] = make_content(fw, fh, 2, 200 + frame, true);
++            if (!ps[k]) {
++                ps[k] = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++                fs[k] = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++            }
++            upload(gpu, ps[k].Get(), pi[k]);
++            upload(gpu, fs[k].Get(), fi[k]);
++            const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++                make_view(ps[k].Get(), fs[k].Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++                make_view(ps[k].Get(), fs[k].Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++            check(composer.compose(gpu.queue.Get(), {targets[k].Get(), ow, oh}, views), "compose frame");
++            if (k == 2) {
++                check(composer.wait_idle(), "wait");
++                for (std::size_t j = 0; j < 3; ++j) {
++                    const std::array<xrfg::D3D12FoveatedComposeView, 2> vj{
++                        make_view(ps[j].Get(), fs[j].Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++                        make_view(ps[j].Get(), fs[j].Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++                    const Compared c = compare(read_back(gpu, targets[j].Get()), pi[j], fi[j], vj, false, 1.5f);
++                    worst = std::max(worst, c.worst);
++                    frames_ok = frames_ok && c.differing == 0 && c.alpha_wrong == 0;
++                }
++            }
++        }
++        D3D12_RESOURCE_BARRIER none{};
++        (void)none;
++        std::size_t timed = 0;
++        xrfg::D3D12FoveatedComposeTiming timing{};
++        while (composer.consume_gpu_timing(&timing) == S_OK) ++timed;
++        std::printf("frames in a row (12, ring of 3 targets): worst %.2f codes, %zu timed -> %s\n", worst, timed,
++            frames_ok ? "ok" : "FAILED");
++        ok = ok && frames_ok;
++    }
++
++    // 6. DCS Control (0100): what the layer's frame path counts on when a composition is refused. Nothing initialized
++    //    refuses; every invalid call is refused without recording anything (no command list left open, no slot used),
++    //    and the next valid composition is still exactly its sources' (the layer then sends that frame as it came).
++    {
++        xrfg::D3D12FoveatedComposer fresh;
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        const auto mode = xrfg::D3D12FoveatedFocusAlpha::unpremultiplied;
++        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, mode),
++            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, mode)};
++        const std::array<xrfg::D3D12FoveatedComposeView, 3> three{views[0], views[1], views[0]};
++        auto no_focus = views;
++        no_focus[1].focus.resource = nullptr;
++        xrfg::D3D12FoveatedComposeTiming timing{};
++        const bool refused = fresh.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views) == E_NOT_VALID_STATE &&
++            fresh.consume_gpu_timing(&timing) == E_INVALIDARG && fresh.wait_idle() == E_NOT_VALID_STATE &&
++            composer.compose(nullptr, {target.Get(), ow, oh}, views) == E_INVALIDARG &&
++            composer.compose(gpu.queue.Get(), {nullptr, ow, oh}, views) == E_INVALIDARG &&
++            composer.compose(gpu.queue.Get(), {target.Get(), 0, oh}, views) == E_INVALIDARG &&
++            composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, std::span<const xrfg::D3D12FoveatedComposeView>{}) ==
++                E_INVALIDARG &&
++            composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, three) == E_INVALIDARG &&
++            composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, no_focus) == E_INVALIDARG;
++        while (composer.consume_gpu_timing(&timing) == S_OK) {
++        }
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose after refusals");
++        check(composer.wait_idle(), "wait");
++        std::size_t after = 0;
++        while (composer.consume_gpu_timing(&timing) == S_OK) ++after;
++        const Compared c = compare(read_back(gpu, target.Get()), periphery, focus, views, false, 1.5f);
++        const bool pass = refused && c.differing == 0 && c.alpha_wrong == 0 && after <= 1; // none on a device without timestamps
++        std::printf("refused calls (not initialized, no queue, no target, zero size, no view, three views, a view "
++                    "without its focus image): %s; the next composition worst %.2f codes, %zu timed -> %s\n",
++            refused ? "all refused" : "NOT ALL REFUSED", c.worst, after, pass ? "ok" : "FAILED");
++        ok = ok && pass;
++    }
++    std::printf(ok ? "foveated single layer composition: all checks passed\n" : "foveated single layer composition FAILED\n");
++    return ok ? 0 : 1;
++}
++
++int run_bench() {
++    Gpu gpu = make_gpu(true);
++    if (!gpu.device) {
++        std::printf("no hardware adapter: skipped\n");
++        return 77;
++    }
++    xrfg::D3D12FoveatedComposer composer;
++    check(composer.initialize(gpu.device.Get()), "composer initialize");
++    constexpr std::uint32_t pw = 1076, ph = 1060, fw = 1952, fh = 1928;
++    auto periphery = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    auto focus = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    upload(gpu, periphery.Get(), make_content(pw, ph, 2, 7, false));
++    upload(gpu, focus.Get(), make_content(fw, fh, 2, 8, true));
++    struct Size {
++        std::uint32_t w, h;
++        const char* name;
++    };
++    for (const Size size : {Size{5424, 5356, "100 % (runtime recommended)"}, Size{4068, 4017, "75 %"},
++             Size{3840, 3792, "Crystal Super panel"}, Size{2712, 2678, "50 %"}}) {
++        auto target = make_texture(gpu, size.w, size.h, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        // Quad Views' geometry: the periphery's field of view, the focus a part of it (density 0.198 vs 1.2).
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
++        for (std::uint32_t eye = 0; eye < 2; ++eye) {
++            views[eye] = make_view(periphery.Get(), focus.Get(), eye, pw, ph, fw, fh,
++                xrfg::D3D12FoveatedFocusAlpha::unpremultiplied);
++            views[eye].periphery.tangents = {-1.6f, 1.6f, 1.6f, -1.6f};
++            const float half = 3.2f * (fw / 1.2f) / (pw / 0.198f) / 2;
++            views[eye].focus.tangents = {-half, half, half, -half};
++        }
++        std::vector<double> times;
++        double cpu_us = 0;
++        for (int i = 0; i < 260; ++i) {
++            const auto start = std::chrono::steady_clock::now();
++            check(composer.compose(gpu.queue.Get(), {target.Get(), size.w, size.h}, views), "compose");
++            cpu_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
++            if (i % 4 == 3) check(composer.wait_idle(), "wait");
++            xrfg::D3D12FoveatedComposeTiming timing{};
++            while (composer.consume_gpu_timing(&timing) == S_OK)
++                if (timing.sequence >= 20) times.push_back(static_cast<double>(timing.microseconds));
++        }
++        check(composer.wait_idle(), "wait");
++        xrfg::D3D12FoveatedComposeTiming timing{};
++        while (composer.consume_gpu_timing(&timing) == S_OK) times.push_back(static_cast<double>(timing.microseconds));
++        std::sort(times.begin(), times.end());
++        double sum = 0;
++        for (double t : times) sum += t;
++        const double vram_mb = 3.0 * 2 * size.w * size.h * 4 / (1024.0 * 1024.0);
++        std::printf("output %ux%u x2 (%s): GPU mean %.3f ms, p50 %.3f, p95 %.3f, max %.3f over %zu; CPU record %.1f us; "
++                    "3-image ring %.0f MiB\n",
++            size.w, size.h, size.name, sum / std::max<std::size_t>(times.size(), 1) / 1000.0,
++            times.empty() ? 0 : times[times.size() / 2] / 1000.0, times.empty() ? 0 : times[times.size() * 95 / 100] / 1000.0,
++            times.empty() ? 0 : times.back() / 1000.0, times.size(), cpu_us / 260, vram_mb);
++    }
++    return 0;
++}
++
++} // namespace
++
++int main() {
++    try {
++        char* bench = nullptr;
++        std::size_t length = 0;
++        const bool want_bench = _dupenv_s(&bench, &length, "XRFG_TEST_FOVEATED_COMPOSE_BENCH") == 0 && bench != nullptr &&
++            std::string(bench) == "1";
++        std::free(bench);
++        return want_bench ? run_bench() : run_tests();
++    } catch (const std::exception& error) {
++        std::printf("error: %s\n", error.what());
++        return 2;
++    }
++}
