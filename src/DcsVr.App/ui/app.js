@@ -720,10 +720,10 @@ function buildFields() {
   const hiding = p => quad(p) && p.quadHideFocusEdge;
   more = disclosure(c,'Fine-tune','How the focus edge is hidden.',p => !hiding(p) ? 'Off' : 'On');
   field(more,'quadGazeGlideMs','Smooth small moves',['Small moves of the focus area are spread over a few frames.','Only the small corrections while you look at something. Eye jumps are never delayed, so the focus area is always where you look. 0 is off.'],'number',[0,100,5],p => hiding(p) && tracked(p),'ms',vdRoute);
-  field(more,'quadFocusFadeIn','Fade in',['New parts of the focus area fade in instead of popping in.','Over this many frames. 0 is off.'],'number',[0,3,.5],hiding,'frames');
+  field(more,'quadFocusFadeIn','Fade in',['New parts of the focus area fade in instead of popping in.','Over this many frames. 0 is off. Works with foveated frame generation.'],'number',[0,3,.5],p => hiding(p) && usesFoveatedFg(p),'frames');
   field(more,'quadKeepHistoryOnSaccade','Steady periphery through eye jumps','Periphery stability carries on when your eyes jump, instead of starting over.','toggle',null,p => hiding(p) && usesPeripheryStability(p));
-  field(more,'quadBandMatch','Match brightness at the edge',['Evens out the brightness where the focus area meets the periphery.','Helps when the focus area looks brighter or darker than around it, as DLSS 5 can make it. 0 is off.'],'number',[0,1,.05],hiding,'ratio');
-  field(more,'quadBandMatchColor','Match color too','Also evens out the color at the edge.','toggle',null,p => hiding(p) && p.quadBandMatch > 0);
+  field(more,'quadBandMatch','Match brightness at the edge',['Evens out the brightness where the focus area meets the periphery.','Helps when the focus area looks brighter or darker than around it, as DLSS 5 can make it. 0 is off. Works with foveated frame generation.'],'number',[0,1,.05],p => hiding(p) && usesFoveatedFg(p),'ratio');
+  field(more,'quadBandMatchColor','Match color too','Also evens out the color at the edge.','toggle',null,p => hiding(p) && usesFoveatedFg(p) && p.quadBandMatch > 0);
   c = card('sharpnessControls','Sharpness','Detail in and around the focus area. Almost no GPU cost.');
   field(c,'quadSharpening','Focus sharpening','Extra sharpening inside the focus area. 0 is off.','number',[0,1,.01],quad,'ratio');
   field(c,'quadSharpenTaper','Sharpening fades at the edge',['Fades the sharpening toward the focus edge, so the edge is harder to see.','Detail steps down gradually. Almost no GPU cost.'],'toggle',null,quad);
@@ -1020,6 +1020,7 @@ function buildFields() {
   because(at('quadTurbo'),p => !quad(p) ? qvWhy(p) : 'Off while frame generation is on: the two fight over frame timing.');
   because(at('quadSaccadeLead','quadGazeStabilize'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
   because(at('quadLostGazeEase'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
+  for (const k of ['quadFocusFadeIn','quadBandMatch','quadBandMatchColor']) because(at(k),p => !quad(p) ? qvWhy(p) : !p.quadHideFocusEdge ? 'Turn on Hide the focus edge to use this.' : !usesFoveatedFg(p) ? 'Needs foveated frame generation.' : 'Set Match brightness at the edge above 0.');
   because(at('quadEdgeMatch'),p => !quad(p) ? qvWhy(p) : 'Needs Focus edge blending above 0.');
   because(at('quadSaccadeTail'),p => !quad(p) ? qvWhy(p) : p.gaze !== 'EyeTracked' ? 'Needs Focus movement: Eye tracked.' : 'Turn on Focus ahead of fast eye movements to use this.');
   because(f => f.condition === quad,qvWhy);
