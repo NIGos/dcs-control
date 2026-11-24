@@ -133,12 +133,16 @@ public:
     bool Init(const Config& config, char* error, std::size_t errorCapacity);
 
     // Control thread, any time after Init. The new set must be built for this Renderer's sampleRate. Each active
-    // source crossfades from the old set to the new one over its next Render call. The old set becomes "retired"
-    // once the audio thread no longer uses it; the control thread frees it after TakeRetiredHrtf.
+    // source crossfades from the old set to the new one over 10 ms. The old set becomes "retired" once the audio thread
+    // no longer uses it (its filters are copied per source); the control thread frees it after TakeRetiredHrtf.
+    // The ITD radius follows the set: a new set keeps the head size (the radius as a scale of the set's fitted radius),
+    // so a set and its radius are never paired wrongly.
     void SetHrtf(const HrtfSet* set);
     const HrtfSet* TakeRetiredHrtf();    // null when nothing is retired yet
 
-    void SetHeadRadius(float metres);    // kMinItdRadiusM .. kMaxItdRadiusM; ITDs ramp to the new scale over the next call per source
+    // The ITD radius for the set given last to SetHrtf (Config.headRadiusM before the first), kMinItdRadiusM ..
+    // kMaxItdRadiusM; kept as a scale of that set's fitted radius, which later sets keep. ITDs ramp to it per source.
+    void SetHeadRadius(float metres);
     void SetEarRadius(float metres);     // kMinEarRadiusM .. kMaxEarRadiusM; near sources crossfade to the new ear positions
     void SetNearField(bool on);
 
@@ -151,13 +155,15 @@ public:
     // Crossfade rules:
     //   - direction/position: interpolated per kSubBlockFrames from the previous call's state; when an ear's filter
     //     direction moves more than 0.5 degrees of arc from the one its current filter was built for, the new filter
-    //     runs over the sub-block and the old one over its first 64 frames, crossfaded linearly over those 64 frames
+    //     runs from then on and the old one over the next 64 frames, crossfaded linearly over those 64 frames (counted
+    //     across sub-blocks and calls, so a short call never shortens it; the next update waits for its end)
     //     (barycentric weights are continuous across triangle edges, so a triangle change alone needs no crossfade);
     //   - ITD: the fractional delays change per sample (no step), at most 1 sample per 16 output samples (faster
     //     changes are spread over later calls); a change of at most 0.1 sample within a sub-block is rendered as a
     //     per-sample blend of the delays at its two ends (within 0.05 dB of exact at 16 kHz);
     //   - gain and the near-field shelf: linear ramps across the call;
-    //   - a new HRTF set: full-call crossfade old -> new;
+    //   - a new HRTF set: 10 ms crossfade old -> new per source, carried across calls (a set given during it follows
+    //     once it ends);
     //   - kReset: no interpolation (a new sound starts where it is).
     // Returns false and adds nothing when the call is rejected (see Stats::rejected).
     bool Render(std::uint32_t slot, const SourceUpdate& update, const MonoInput& input, std::uint32_t frames, float w0,

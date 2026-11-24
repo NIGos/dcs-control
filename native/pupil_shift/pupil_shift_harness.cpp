@@ -214,6 +214,7 @@ struct Fake {
     unsigned end_frames{}, checked_views{}, foreign_views{};
     // OpenXR eye gaze (XR_EXT_eye_gaze_interaction) and the action system, as the runtime sees them.
     bool xr_offered{};                        // the runtime lists the extension
+    bool xr_refused{};                        // ... but refuses it at instance creation (XR_ERROR_EXTENSION_NOT_PRESENT)
     bool qv_fixed{};                          // the fake Quad Views has a fixed focus (no gaze) and requests the extension
     bool enumerate_fails{};                   // the runtime's extension list cannot be read (the layer's probe: unknown)
     bool xr_never_valid{};                    // nobody wearing the headset: the gaze is never valid
@@ -651,7 +652,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_instance(const XrInstanceCreateInfo* 
     // The bundled Quad Views sits between the layer and the runtime and requests the extension itself when offered.
     if (fake.qv_fixed && fake.xr_offered && !std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
         enabled.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
-    if (!fake.xr_offered && std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
+    if ((!fake.xr_offered || fake.xr_refused) && std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
         return XR_ERROR_EXTENSION_NOT_PRESENT;
     if (!fake.time_offered && std::count(enabled.begin(), enabled.end(), std::string(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME)))
         return XR_ERROR_EXTENSION_NOT_PRESENT;
@@ -2272,8 +2273,10 @@ struct HpRun {
     fs::path folder;
     std::wstring suffix;
 };
+bool hp_eye_gaze = false;  // OpenXrEyeGaze=1 in the next hp_start's ini
 std::string hp_ini(int publish) {
-    std::string s = "[PupilShift]\r\nEnabled=0\r\nOpenXrEyeGaze=0\r\n[DepthBoost]\r\nEnabled=0\r\n";
+    std::string s = std::string("[PupilShift]\r\nEnabled=0\r\nOpenXrEyeGaze=") + (hp_eye_gaze ? "1" : "0") +
+                    "\r\n[DepthBoost]\r\nEnabled=0\r\n";
     if (publish >= 0) s += "[HeadPose]\r\nPublish=" + std::to_string(publish) + "\r\n";
     return s;
 }
@@ -2367,6 +2370,28 @@ void head_pose_scenarios(const fs::path& dll, const fs::path& out) {
             const std::string log = hp_finish(r);
             CHECK(contains(log, "head pose: off (PupilShift.ini [HeadPose] Publish=0)") && !contains(log, "head pose: publishing"), "off: log line", 0, 0, -1);
         }
+    }
+
+    // A runtime that lists the eye gaze but refuses it at instance creation, with the time extension offered and
+    // asked for: the refusal does not say which extension it was; only the eye gaze is dropped, the head pose keeps its
+    // display time in QPC.
+    {
+        fake = Fake{};
+        fake.pose = pose_slow;
+        fake.time_offered = true;
+        fake.xr_offered = true;
+        fake.xr_refused = true;
+        hp_eye_gaze = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_gaze_refused", 1, r)) {
+            CHECK(time_enabled() && !gaze_enabled(), "gaze refused: the instance keeps the time extension, without the eye gaze",
+                time_enabled(), gaze_enabled(), -1);
+            for (int i = 1; i <= 3; ++i) hp_locate(r, t0 + i * frame_ns, views, n);
+            const std::string log = hp_finish(r);
+            CHECK(contains(log, "head pose: publishing (display time in QPC: yes, extension added by the layer)"),
+                "gaze refused: the head pose publishes with the display time in QPC", 0, 0, -1);
+        }
+        hp_eye_gaze = false;
     }
 
     // On: one entry per new display time (a repeated or older time adds none), the VIEW space's pose and velocities,

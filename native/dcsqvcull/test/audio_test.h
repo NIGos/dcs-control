@@ -826,8 +826,17 @@ void Config() {
   Check(audiofake::g_setHrtf.load() == hr0 + 1 && audiofake::g_setRadius.load() == rad0 + 1 &&
             audiofake::g_setNear.load() == nf0 + 1 && std::fabs(audiofake::g_lastRadius - 0.0875f * 54.0f / 57.0f) < 1e-5 &&
             std::fabs(audiofake::g_lastEarRadius - binaural_config::HeadRadiusFromCircumferenceCm(54.0f)) < 1e-6 &&
-            std::fabs(rt.trim - 0.5011872f) < 1e-5 && !rt.nearField && rt.maxObjects == 8 && audio::g_hrtfName == L"personal",
+            std::fabs(rt.trim - 0.5011872f) < 1e-5 && !audio::g_cfgRead.cfg.nearField && rt.maxObjects == 8 &&
+            audio::g_hrtfName == L"personal",
         "audio Live: a changed ini reaches the module at once (HRTF set crossfaded, head size, near field, trim, MaxObjects)");
+  // Near field off is the core's own fade (Renderer::SetNearField, 20 ms): the module never cuts it per source.
+  audiofake::g_lastFlags = 0xffffffffu;
+  for (int i = 0; i < 3; ++i) {
+    SimFrame(q);
+    Block(q, a.data(), b.data(), 480);
+  }
+  Check(audiofake::g_lastFlags.load() != 0xffffffffu && !(audiofake::g_lastFlags.load() & binaural::source_flags::kNoNearField),
+        "audio Live: NearField=0 leaves the fade to the core (no per-source near-field cut)");
   WriteIni(q.dir, "[Audio]\r\nBinaural=1\r\nHrtf=missing\r\nLateHeadTracking=0\r\n");
   Tick();
   Check(audio::g_hrtfName == L"default", "audio Live: a personal HRTF that cannot be loaded falls back to the default set");
@@ -884,16 +893,41 @@ void LateHead() {
   now.q = dcsvr_headpose::AxisAngle({0, 1, 0}, 90.0 * 3.14159265358979 / 180.0);
   audr::CorrectedPosition(m, now, true, p, &g);
   const bool tooFar = p[0] == 10 && p[2] == 0;
-  m.flags |= audv::meta_flags::kNear;
+  m.flags |= audv::meta_flags::kNear | audv::meta_flags::kPosValid;
   m.pos[0] = 0.5f;
   m.dist = 0.5f;
   now.q = {0, 0, 0, 1};
+  now.posValid = true;
   now.t = {0, 0, -0.3};  // OpenXR -z forward: the head moved 30 cm towards the source
   audr::CorrectedPosition(m, now, true, p, &g);
   const bool trans = std::fabs(p[0] - 0.2f) < 1e-5 && std::fabs(g - audr::kTransMax) < 1e-6;
   Check(rot && otherSpace && tooFar && trans,
         "audio late head tracking: a 30 deg left turn puts a frontal source 30 deg right; other base space or a turn "
         "over 60 deg is not applied; the near-field translation gain is clamped to +3 dB");
+  // A pose without a position (stored as zero) against one with it (the head 1.6 m above the floor origin): no
+  // translation at all, either way round; with both, a jump of more than 30 cm is clamped to 30 cm.
+  m.flags &= ~audv::meta_flags::kNear;
+  m.pos[0] = 2.0f;
+  m.dist = 2.0f;
+  m.tUsed[1] = 1.6f;
+  now.t = {0, 0, 0};
+  now.posValid = false;
+  audr::CorrectedPosition(m, now, true, p, &g);
+  const bool nowMissing = std::fabs(p[0] - 2.0f) < 1e-6f && std::fabs(p[1]) < 1e-6f && std::fabs(p[2]) < 1e-6f;
+  m.flags &= ~audv::meta_flags::kPosValid;
+  m.tUsed[1] = 0.0f;
+  now.posValid = true;
+  now.t = {0, 1.6, 0};
+  audr::CorrectedPosition(m, now, true, p, &g);
+  const bool usedMissing = std::fabs(p[0] - 2.0f) < 1e-6f && std::fabs(p[1]) < 1e-6f && std::fabs(p[2]) < 1e-6f;
+  m.flags |= audv::meta_flags::kPosValid;
+  now.t = {0, 0, -1.2};  // a 1.2 m "move" towards the source within one DCS frame: a tracking glitch
+  audr::CorrectedPosition(m, now, true, p, &g);
+  const bool clamped = std::fabs(p[0] - (2.0f - static_cast<float>(audr::kMaxLateTransM))) < 1e-5;
+  printf("     late translation: missing position now %s, missing in DCS's pose %s, 1.2 m jump -> x %.3f m\n",
+         nowMissing ? "ignored" : "APPLIED", usedMissing ? "ignored" : "APPLIED", p[0]);
+  Check(nowMissing && usedMissing && clamped,
+        "audio late head tracking: no translation unless both poses have a position; a jump over 30 cm is clamped to 30 cm");
   // End to end: the pose ring under a test suffix.
   SetEnvironmentVariableW(L"DCSVR_PERCEPTION_SHM_SUFFIX", L"_audiotest");
   Rig r;
@@ -1205,6 +1239,206 @@ void Phrases() {
         "audio config: [Audio] is not an engine section (a Live write keeps the engine kill switch)");
 }
 
+// A rig with one owned 0 dBFS DC source at hard right (DCS's pan and the stand-in's differ most), in steady state.
+void DcRig(Rig& r, const char* ini = kIniOn) {
+  RigUp(r, ini);
+  AddBoth(r, 0, true, 1, kDc, 1.0f, 0, 1.0f);
+  PosBoth(r, 0, 0, 0, 10);
+  CreateVoice(r, 0);
+  Bind(r);
+  std::vector<float> a(2 * 480), b(2 * 480);
+  for (int i = 0; i < 6; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+}
+double MaxStep(const std::vector<float>& all) {
+  double m = 0;
+  for (size_t i = 2; i < all.size(); ++i) m = std::max(m, static_cast<double>(std::fabs(all[i] - all[i - 2])));
+  return m;
+}
+
+// A torn snapshot: the render thread snapshots DCS's own gains between DCS's panner store and the tag store (no lock
+// between them). The voice stays binaural (no fade out and in): its mono signal is recovered from the known gain ramp.
+void TornSnapshot() {
+  Rig r;
+  DcRig(r);
+  std::vector<float> a(2 * 480), b(2 * 480), steady(2 * 480);
+  Block(r, steady.data(), b.data(), 480);  // steady output (DC: constant)
+  const uint64_t ins0 = audio::g_cnt.fadeIns.load(), outs0 = audio::g_cnt.fadeOuts.load();
+  uint8_t* v = r.w.voices[0];
+  uint8_t tag[16];
+  memcpy(tag, v + 0x48, 16);
+  memcpy(v + 0x48, r.ref.voices[0] + 0x48, 16);  // DCS's panner stored its gains; the tag store not yet
+  double worst = 0;
+  Block(r, a.data(), b.data(), 480);  // snapshots DCS's gains
+  for (int i = 0; i < 960; ++i) worst = std::max(worst, static_cast<double>(std::fabs(a[i] - steady[i])));
+  memcpy(v + 0x48, tag, 16);  // the tag store
+  Block(r, a.data(), b.data(), 480);  // ramps back to the tag
+  for (int i = 0; i < 960; ++i) worst = std::max(worst, static_cast<double>(std::fabs(a[i] - steady[i])));
+  SimFrame(r);
+  Block(r, a.data(), b.data(), 480);
+  printf("     torn snapshot: %llu counted, fades in/out +%llu/+%llu, largest deviation from the steady output %.2e\n",
+         static_cast<unsigned long long>(audio::g_cnt.tornSnaps.load()),
+         static_cast<unsigned long long>(audio::g_cnt.fadeIns.load() - ins0),
+         static_cast<unsigned long long>(audio::g_cnt.fadeOuts.load() - outs0), worst);
+  Check(audio::g_cnt.tornSnaps.load() == 1 && audio::g_cnt.fadeIns.load() == ins0 && audio::g_cnt.fadeOuts.load() == outs0 &&
+            worst < 1e-5 && audio::g_cnt.ownedNow.load() == 1,
+        "audio torn snapshot: DCS's gains snapshotted between the panner's store and the tag keep the voice binaural "
+        "(no fade out and in; the output stays the steady one within 1e-5)");
+  RigDown(r);
+}
+
+// The core skipped for some blocks (HRTF share 0 while still tagged, e.g. off for the session decided on the render
+// side): its slot state is stale; the next call starts afresh (kReset), never from that old history.
+void CoreSkipThenResume() {
+  Rig r;
+  DcRig(r);
+  std::vector<float> a(2 * 480), b(2 * 480);
+  audio::g_offReason = audio::kOffOverruns;
+  for (int k = 0; k < 3; ++k) Block(r, a.data(), b.data(), 480);  // h 1 -> 0, then the core is not called
+  audio::g_offReason = audio::kOffNone;
+  audiofake::g_lastFlags = 0;
+  const uint64_t renders0 = audiofake::g_renders.load();
+  Block(r, a.data(), b.data(), 480);  // h 0 -> 1
+  Check(audiofake::g_renders.load() == renders0 + 1 && (audiofake::g_lastFlags.load() & binaural::source_flags::kReset),
+        "audio: after blocks without a core call, the voice's next core call starts afresh (kReset, no stale history)");
+  RigDown(r);
+}
+
+// The bound output's blocks pass through (longer than the core takes): the owned voices go back to DCS's panning (the
+// sim releases them instead of leaving them tagged and centred), an audio: off line says why, and it comes back.
+void LongBlocks() {
+  Rig r;
+  OwnedRig(r, kIniOn);
+  std::vector<float> a(2 * 9000), b(2 * 9000);
+  for (int i = 0; i < 4; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+  const bool ownedBefore = audio::g_cnt.ownedNow.load() == 3;
+  for (int i = 0; i < 4; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 9000);
+  }
+  Tick();
+  const bool released = audio::g_cnt.ownedNow.load() == 0 && audio::g_passFrames.load() == 9000;
+  const bool said = audio::g_offText.find("9000 frames") != std::string::npos;
+  for (int i = 0; i < 6; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+  Tick();
+  printf("     long blocks: owned %s -> %u -> %u; off text while long: %s\n", ownedBefore ? "3" : "?",
+         released ? 0u : 99u, audio::g_cnt.ownedNow.load(), said ? "yes" : "no");
+  Check(ownedBefore && released && said && audio::g_cnt.ownedNow.load() == 3 && audio::g_offText.empty(),
+        "audio: blocks too long for the core release the owned voices to DCS's panning (an audio: off line), and "
+        "binaural comes back with normal blocks");
+  RigDown(r);
+}
+
+// The binding moves to another live output while the bound one renders owned voices: they fade back to DCS's panning
+// on the old output first (no centred voices, no step), then the binding moves (DC source: no step above -60 dBFS).
+void Handover() {
+  Rig r;
+  DcRig(r);
+  World hp;
+  hp.Init();
+  std::vector<float> a(2 * 2048), b(2 * 2048), c(2 * 480), all;  // 2048-frame blocks (as Fades)
+  auto hpBlock = [&]() {
+    memset(c.data(), 0, sizeof(float) * 960);
+    reinterpret_cast<DrvP5>(r.im.base + kDrvP5)(hp.wasapi, c.data(), 480);
+  };
+  const bool ownedBefore = audio::g_cnt.ownedNow.load() == 1;
+  const uint64_t outs0 = audio::g_cnt.fadeOuts.load();
+  audio::g_worldRenderer = hp.Renderer();  // the world's 3D sounds moved to the other output
+  audio::g_newRenderer = hp.Renderer();
+  Tick();
+  const bool waited = audio::g_handover.load() && audio::g_binding.load()->renderer == r.w.Renderer();
+  int moved = -1;
+  for (int i = 0; i < 12; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 2048);
+    all.insert(all.end(), a.begin(), a.end());
+    hpBlock();
+    Tick();
+    if (moved < 0 && audio::g_binding.load()->renderer == hp.Renderer()) moved = i;
+  }
+  const bool same = memcmp(a.data(), b.data(), sizeof(float) * 2 * 2048) == 0;
+  printf("     handover: waited %s, moved after %d block(s), fade-outs +%llu, largest step %.2e, old output now DCS's %s\n",
+         waited ? "yes" : "no", moved + 1, static_cast<unsigned long long>(audio::g_cnt.fadeOuts.load() - outs0),
+         MaxStep(all), same ? "bit for bit" : "DIFFERS");
+  Check(ownedBefore && waited && moved >= 0 && audio::g_cnt.fadeOuts.load() > outs0 && MaxStep(all) < 1e-3 && same &&
+            !audio::g_handover.load(),
+        "audio two outputs: when the binding moves, the old output's binaural voices fade back to DCS's panning first "
+        "(no step), then the binding moves");
+  RigDown(r);
+  hp.Destroy();
+}
+
+// ed_sound loaded but its engine not started (state 0): nothing is locked or patched until it is.
+void EngineNotStarted() {
+  Rig r;
+  RigUp(r, "[Audio]\r\nBinaural=0\r\n");
+  W<int32_t>(r.im.base, kEngineState, 0);
+  WriteIni(r.dir, kIniOn);
+  audio::g_loop.lastInstall = 0;
+  Tick();
+  const bool waited = !audio::g_installed.load() && audio::g_hookState.load() == 0 &&
+                      memcmp(r.textBefore.data(), r.im.base + kTextBegin, r.textBefore.size()) == 0;
+  W<int32_t>(r.im.base, kEngineState, 3);
+  audio::g_loop.lastInstall = 0;
+  Tick();
+  Check(waited && audio::g_installed.load(), "audio hooks: not installed while ed_sound's engine state is 0, installed once it runs");
+  RigDown(r);
+}
+
+// The thunk page cannot be made executable: nothing is patched (a site calling a non-executable page would crash DCS).
+BOOL WINAPI NoProtect(LPVOID, SIZE_T, DWORD, PDWORD) { return FALSE; }
+void ThunksNotExecutable() {
+  audhk::g_thunkProtect = &NoProtect;
+  Rig r;
+  RigUp(r, kIniOn);
+  const bool untouched = memcmp(r.textBefore.data(), r.im.base + kTextBegin, r.textBefore.size()) == 0;
+  Check(!audio::g_installed.load() && audio::g_hookState.load() == -1 && untouched &&
+            audio::g_offText == "the call thunks could not be made executable",
+        "audio hooks: a thunk page that cannot be made executable patches nothing (an audio: off line)");
+  audhk::g_thunkProtect = &VirtualProtect;
+  RigDown(r);
+}
+
+// Stop: a wrapper call that passed a call site just before it was restored counts itself only once inside; the
+// bindings are freed only after a quiet grace period, never under it.
+std::thread* g_lateCall = nullptr;
+std::atomic<void*> g_lateSaw{nullptr};
+void StopGrace() {
+  Rig r;
+  DcRig(r);
+  void* const want = r.w.Renderer();
+  g_lateSaw = nullptr;
+  audio::g_stopGraceMs = 300;
+  audio::g_testAfterRestore = [] {
+    g_lateCall = new std::thread([] {
+      Sleep(20);  // still between the call site and the wrapper's g_inflight increment
+      audio::g_inflight.fetch_add(1);
+      if (audr::Binding* b = audio::g_binding.load()) g_lateSaw = b->renderer;
+      Sleep(100);
+      audio::g_inflight.fetch_sub(1);
+    });
+  };
+  audio::Stop();
+  if (g_lateCall) {
+    g_lateCall->join();
+    delete g_lateCall;
+    g_lateCall = nullptr;
+  }
+  audio::g_testAfterRestore = nullptr;
+  audio::g_stopGraceMs = 50;
+  Check(g_lateSaw.load() == want && audio::g_binding.load() == nullptr,
+        "audio stop: a wrapper call starting just after the sites were restored still finds its binding; it is freed after");
+  RigDown(r);
+}
+
 inline void Run() {
   printf("---- binaural audio module\n");
   g_rigHrtf = &TestHrtf;
@@ -1221,6 +1455,13 @@ inline void Run() {
   Config();
   LateHead();
   TwoOutputs();
+  TornSnapshot();
+  CoreSkipThenResume();
+  LongBlocks();
+  Handover();
+  EngineNotStarted();
+  ThunksNotExecutable();
+  StopGrace();
   NoSetNoHooks();
   NoAlloc();
   Phrases();

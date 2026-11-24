@@ -19,6 +19,7 @@ extern float g_lastMono[binaural::kMaxFramesPerCall];       // its mono input
 extern float g_lastRadius;
 extern float g_lastEarRadius;  // the last Config.earRadiusM or SetEarRadius
 extern float g_lastInitRadius;                 // Config::headRadiusM of the last Init
+extern std::atomic<uint32_t> g_lastFlags;      // SourceUpdate::flags of the last Render call that was not refused
 }  // namespace audiofake
 
 namespace binaural {

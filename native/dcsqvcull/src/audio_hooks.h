@@ -105,8 +105,16 @@ inline void* ThunkOriginal(const uint8_t* target, int k) {
   return h.original[k];
 }
 
-// Allocates the page (within rel32 reach of `near`), writes the header and four thunks, makes it execute-read.
-inline uint8_t* MakeThunks(uint8_t* nearAddr, void* const original[kSiteCount], void* const wrapper[kSiteCount]) {
+// The page protection call (tests substitute a failing one).
+using ProtectFn = BOOL(WINAPI*)(LPVOID, SIZE_T, DWORD, PDWORD);
+inline ProtectFn g_thunkProtect = &VirtualProtect;
+
+// Allocates the page (within rel32 reach of `near`), writes the header and four thunks, makes it execute-read. Null
+// with a reason when there is no page in reach or it cannot be made executable (a site pointing at a non-executable
+// page would crash DCS at its next call: DEP).
+inline uint8_t* MakeThunks(uint8_t* nearAddr, void* const original[kSiteCount], void* const wrapper[kSiteCount],
+                           const char** why = nullptr) {
+  if (why) *why = "no memory within reach of ed_sound.dll";
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   const uintptr_t gran = si.dwAllocationGranularity, start = reinterpret_cast<uintptr_t>(nearAddr);
@@ -132,7 +140,11 @@ inline uint8_t* MakeThunks(uint8_t* nearAddr, void* const original[kSiteCount], 
   }
   memcpy(page, &h, sizeof(h));
   DWORD old;
-  VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old);
+  if (!g_thunkProtect(page, 4096, PAGE_EXECUTE_READ, &old)) {
+    VirtualFree(page, 0, MEM_RELEASE);  // nothing points at it yet
+    if (why) *why = "the call thunks could not be made executable";
+    return nullptr;
+  }
   FlushInstructionCache(GetCurrentProcess(), page, 4096);
   return page;
 }

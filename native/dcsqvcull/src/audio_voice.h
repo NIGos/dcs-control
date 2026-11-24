@@ -178,6 +178,7 @@ constexpr uint32_t kOwned = 1;      // render binaurally (else: fade back to DCS
 constexpr uint32_t kInitial = 2;    // owned from the voice's creation (P3b): no fade-in, the onset is binaural
 constexpr uint32_t kPoseValid = 4;  // qUsed / tUsed hold the head pose DCS used for this frame (pose ring entry)
 constexpr uint32_t kNear = 8;       // under 1.5 m: the late-translation gain applies
+constexpr uint32_t kPosValid = 16;  // tUsed is a tracked position (the pose entry had one; else it is zero)
 }  // namespace meta_flags
 
 struct MetaData {

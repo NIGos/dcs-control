@@ -2369,16 +2369,27 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
         forwarded.enabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
         return layer_info->nextInfo->nextCreateApiLayerInstance(&forwarded, &next_info, instance);
     };
+    // A refusal (XR_ERROR_EXTENSION_NOT_PRESENT) does not say which added extension it was: the eye gaze is dropped
+    // first (it may be added on an unknown availability; the time extension only when listed), then the time
+    // extension with the gaze back, then both.
     XrResult result = forward();
-    bool time_refused{};
-    if (inject_time && result == XR_ERROR_EXTENSION_NOT_PRESENT) {  // without the time extension, the rest as before
-        inject_time = false; time_refused = true;
-        result = forward();
-    }
-    bool refused{};
-    if (inject && result == XR_ERROR_EXTENSION_NOT_PRESENT) {
-        inject = false; refused = true;
-        result = layer_info->nextInfo->nextCreateApiLayerInstance(info, &next_info, instance);
+    bool time_refused{}, refused{};
+    if ((inject || inject_time) && result == XR_ERROR_EXTENSION_NOT_PRESENT) {
+        const bool gaze0 = inject, time0 = inject_time;
+        if (gaze0) {  // without the eye gaze, the time extension kept
+            inject = false;
+            result = forward();
+        }
+        if (time0 && result == XR_ERROR_EXTENSION_NOT_PRESENT) {  // without the time extension, the eye gaze back
+            inject = gaze0; inject_time = false;
+            result = forward();
+            if (gaze0 && result == XR_ERROR_EXTENSION_NOT_PRESENT) {  // both refused: the instance as the application asked
+                inject = false;
+                result = forward();
+            }
+        }
+        refused = gaze0 && !inject;
+        time_refused = time0 && !inject_time;
     }
     if (XR_SUCCEEDED(result)) {
         PFN_xrVoidFunction f{};

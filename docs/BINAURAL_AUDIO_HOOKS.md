@@ -182,9 +182,11 @@ and calls `sub_1a750(sound, pending+0x20)` (a velocity/direction-dependent filte
   | 0 | 1 | 1 / 0 | `0x12dd0` / `0x16aa0` |
   | 0 | 2 | 1 / 0 | `0x14de0` / `0x183e0` |
 
-- **Kernels only add [V]** (`addss xmm0, [r10-8]; movss [r10-8], xmm0` in `0x16aa0`): `out[i*ch + c] += ...`. So
-  rendering into a zeroed scratch buffer and adding it to `out` gives bit-identical output (`0 + x == x`, then the same
-  single addition into `out`).
+- **Kernels only add [V]** (`addss xmm0, [r10-8]; movss [r10-8], xmm0` in `0x16aa0`): `out[i*ch + c] += ...`. For
+  the float kernels, rendering into a zeroed scratch buffer and adding it to `out` gives bit-identical output (`0 + x
+  == x`, then the same single addition into `out`). The SIMD mono 3D kernel `0x12dd0` adds in double [V]
+  (`cvtps2pd` of `out`, `addsd`, `cvtsd2ss` back, `0x13abb..0x13aca`): `out = float(double(out) + v)`, where the
+  scratch path rounds `v` to float first. There the scratch path is within 1 ulp of stock, not always bit-identical.
 - **Mono kernels use the sum of the pair [V]** (`0x16aa0`, `0x16ff0..0x17166`): for a mono wave, output channel `ch`
   gets `s * (rampA[ch] + rampB[ch])`, where `s` is the resampled and filtered sample. Stereo kernels use `a` for the
   wave's left channel and `b` for its right channel.
@@ -369,7 +371,7 @@ Runs on the render thread (MMCSS). No allocation, locks, logging or file I/O.
 
   | previous block | this block | output into `out` |
   |---|---|---|
-  | not tagged | not tagged | `out += scratch` (bit-identical to stock) |
+  | not tagged | not tagged | `out += scratch` (stock within 1 ulp: §2.2, the double-accumulating SIMD kernel) |
   | not tagged | tagged | fade in: `out += (1−w)·scratch + w·HRTF(½(L+R))`, `w` 0 → 1 over the block |
   | tagged | tagged | `out += HRTF(L)` (L == R == mono·m) |
   | tagged | not tagged | fade out: `w` 1 → 0 |
@@ -473,10 +475,27 @@ Where the implementation differs from or adds to the sections above:
   creation (P3b) skips the fade: its first block is the core's. A core refusal in the middle of a voice switches to
   RePan without a crossfade (the contract refuses only on misuse: frames > 8192, slot out of range, no set).
 - **Binding (§5.3, §6 item 6).** Also requires the 3D weights (1, 0) / (0, 1) of the stereo pair. Channels and rate are
-  re-checked every block (a change re-binds). Blocks over 8192 frames pass through.
+  re-checked every block (a change re-binds). Blocks over 8192 frames pass through. While the bound output's blocks
+  pass through, the sim releases every voice (a tagged voice that is not rendered would play centred) and, for blocks
+  too long, the module logs `audio: off (DCS's audio blocks are N frames, ...)`, and `audio: on (DCS's audio blocks fit
+  again, ...)` once they do. Test: `LongBlocks`.
+- **Torn snapshot (§5.2).** DCS's panner stores its gains and the sim overwrites them with the tag right after; the
+  render thread does not take ED's mutex, so a voice render in between snapshots DCS's stereo gains for one block (and
+  ramps back to the tag in the next). For an owned voice that is not a release: the block stays tagged, the mono signal
+  is recovered from the known ramp of the gain sum (tag 2m to gL + gR and back), counted as `torn (snapshots N)` in
+  the 10 s line. Test: `TornSnapshot`.
+- **Late translation.** Only when both poses (DCS's frame and now) have a tracked position (`meta_flags::kPosValid`,
+  `PoseNow::posValid`; a missing one is stored as zero), clamped to 30 cm.
+- **Install** waits for ed_sound's engine state >= 1 (nothing locked or patched before its engine started), and refuses
+  if the thunk page cannot be made executable. **Stop** frees the bindings only after a 50 ms grace period with no
+  wrapper call in flight (a call that passed a site just before it was restored counts itself only inside the
+  wrapper); otherwise it leaves them in place.
 - **Two outputs.** ed_sound makes one or two outputs (`num_outputs` 1-2 at `0x1ed44`; the second is options.lua
   `sound.hp_output`), each an `SND_Wasapi` with its own thread calling P5. One renderer is bound at a time: while it
-  delivered a block within 200 ms another renderer is bound only when the world's 3D sounds play on it. The sim counts,
+  delivered a block within 200 ms another renderer is bound only when the world's 3D sounds play on it, and then only
+  after the voices the bound one renders binaurally faded back to DCS's panning there (the sim releases them; at most
+  500 ms), so the old output never plays a tagged voice centred. Each binding logs `audio: output <address> bound
+  (<why>)`, so the two outputs can be told apart in the log (test: `Handover`). The sim counts,
   per panner call, the renderer of every 3D sound in a non-2D context (`audsim::Sim::world`); the control thread adopts
   the busiest one after it led two seconds in a row (`WorldTick`) and binds it once. The other output's blocks then pass
   through without waking the control thread. Test: `TwoOutputs` (main bound first, and the headphones output first).

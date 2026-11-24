@@ -22,7 +22,8 @@ constexpr std::uint32_t kMaxDeviceTaps = 512;
 constexpr float kMaxDelayStep = 1.0f / 16.0f;      // delay change per output sample (binaural_core.h)
 constexpr float kFdBlendMax = 0.1f;                // sub-block delay change rendered as a blend of its two ends
 constexpr float kFilterUpdateCos = 0.99996192f;     // cos(0.5 degree): a filter direction change past it crossfades
-constexpr std::uint32_t kFilterFadeFrames = 64;     // that crossfade's length (from the start of the sub-block)
+constexpr std::uint32_t kFilterFadeFrames = 64;     // that crossfade's length (carried into the next sub-block or call)
+constexpr float kSwapFadeS = 0.01f;                 // a new HRTF set's crossfade, per source (carried across calls)
 constexpr float kShelfCornerHz = 1000.0f;           // near-field ILD low shelf corner
 // Near field switched on or off: the parallax and the shelf fade in or out over this long, so the per-ear delays of a
 // close source glide instead of jumping within one call (on the KU100 set at 0.3 m a jump within a 480-frame call
@@ -95,6 +96,11 @@ namespace detail {
 // Harness hooks (never used by the audio module).
 // 0: choose at Init (AVX2/FMA when present), 1: force SSE2, 2: force AVX2 (ignored without the CPU feature).
 void ForceKernels(int which);
+// The set handshake between SetHrtf / TakeRetiredHrtf and BeginBlock, for interleaving tests: called with point 0 in
+// BeginBlock after the second pending read matched (before inUse is stored), and with point 1 in TakeRetiredHrtf for a
+// set that passed the pending and trying checks (before inUse is read). Null (the default): nothing is called.
+using HandshakeHook = void (*)(int point, const HrtfSet* set);
+void SetHandshakeHook(HandshakeHook hook);
 const char* KernelName(const Renderer& r);
 // The renderer's current total delay (samples, incl. kFdLatency) of a slot's ear, and its filter weights' triangle.
 float SourceDelay(const Renderer& r, std::uint32_t slot, int ear);
