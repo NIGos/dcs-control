@@ -113,21 +113,42 @@ off or in perception-only mode, since audio is not an engine optimization.
     additional bundled profiles.
   - SADIE II D2 (KEMAR) is in the same database and licence. Task A may add it as a second bundled set when the harness
     and the listening test justify it.
-- **Pinning:** task A downloads the ZIP only from the Zenodo record above. It records the ZIP's SHA-256 and the SOFA's
-  SHA-256 in `docs/THIRD_PARTY.md` and in the fetch script, and keeps the licence text and attribution next to the
-  generated `.dcshrtf`. The generated file is committed (`native/binaural/data/`, about 2 MB) and embedded in the
-  payload as the RCDATA resource `HRTF_DEFAULT`. The original SOFA is not committed; the fetch script rebuilds it
-  bit-identically.
+- **Pinning:** `scripts/fetch-hrtf.ps1` downloads the ZIP only from the Zenodo record above (or reuses the copy in
+  `.cache/hrtf`) and checks its size, MD5 and SHA-256 and the 48 kHz SOFA's SHA-256 (all in `docs/THIRD_PARTY.md`); the
+  licence text and attribution stay next to the generated `.dcshrtf`. The generated file is committed
+  (`native/binaural/data/sadie2_ku100.dcshrtf`, 9,329,824 bytes: 8,703 directions x 2 ears x 128 taps; SHA-256
+  `45bd65499526b51b47ddc7e2614c27eee7db9bbc5a5f29a6aefaddb88edd9f09`) and embedded in the payload as the RCDATA
+  resource `HRTF_DEFAULT`. The original SOFA is not committed; the fetch script rebuilds the set bit-identically (checked
+  twice, and by the C# test below whenever `.cache/hrtf` holds the archive).
+- **What the conversion found** (`hrtf-convert` on the 48 kHz file): 8,802 measurements, 99 of them repeats of a
+  direction already measured (merged, the first kept), so 8,703 directions; elevation -90 to 90 degrees, 100 % of the
+  sphere within 15 degrees of a measurement; fitted head radius 0.1194 m. That fit is Woodworth's ITD model on the
+  converter's onset delays (largest ITD about 0.89 ms; the broadband interaural cross-correlation gives about 0.80 ms):
+  larger than the KU100's geometric radius, as a fit of measured onsets is. The head size is relative to it (57 cm plays
+  the set's own timing), and the renderer's ITD radius range is 0.04-0.15 m (`kMinItdRadiusM`, `kMaxItdRadiusM`) so that
+  48-66 cm scale it unclamped (the earlier 0.06-0.12 m stopped every size above 57 cm).
 
 ### 4.2 Personal SOFA files
 - **Accepted input:** AES69 SOFA `SimpleFreeFieldHRIR`, any sample rate from 44.1 to 96 kHz, any grid with at least 100
   directions, `Data.Delay` either 0 or per-measurement.
 - **Conversion:** the app converts with the same C# converter as the default set (`src/DcsVr.Core/Hrtf`). It reads
-  HDF5 with **PureHDF** (MIT; task A pins the version and records it in `docs/THIRD_PARTY.md`). The result is written
-  to `Saved Games\DCS\Scripts\DcsQvCull\hrtf\<name>.dcshrtf`, through the deployment planner so that Back to stock
-  removes it.
-- **Before it is offered:** the app shows the conversion report (directions, rate, fitted head radius, grid coverage,
-  warnings). A file the converter rejects is never deployed.
+  HDF5 with **PureHDF 2.2.0** (MIT, managed code only, pinned `[2.2.0]`; `docs/THIRD_PARTY.md`). `SofaReader` takes:
+  - Data.IR `[M R N]` (or `[M R N 1]` of FIR-E files), float or double, two receivers;
+  - Data.SamplingRate `[I]` or `[M]` (all equal; hertz, kHz understood);
+  - Data.Delay `[I R]`, `[M R]` or `[R]` in samples, or none;
+  - SourcePosition `[I C]`/`[M C]`, spherical (degree or radian, distance in metre, cm or mm) or cartesian, relative to
+    ListenerPosition / ListenerView / ListenerUp when the file has them;
+  - ReceiverPosition to tell the left ear (larger y), receiver 0 = left without it.
+  GeneralFIR and FreeFieldHRIR files of the same shape are read with a warning. Missing optional attributes are assumed
+  with a warning (no convention, no coordinate type or units, no distance: 1.2 m). Anything else is refused with the
+  reason in plain words: not HDF5, netCDF-3, transfer functions or SOS instead of impulse responses, another
+  convention, not two ears, no or mixed sample rates, negative delays, unknown units, positions that do not match the
+  measurements. PureHDF's default chunk cache is replaced by one that decodes each chunk once (SADIE II's file: a minute
+  -> 0.1 s); a whole conversion takes about 2 s. The result is written to
+  `Saved Games\DCS\Scripts\DcsQvCull\hrtf\<name>.dcshrtf`, through the deployment planner so that Back to stock removes it.
+- **Before it is offered:** the app shows the conversion report (directions, rate, grid coverage, the largest time
+  difference between the ears that the fitted radius stands for, warnings). A file the converter rejects is never
+  deployed.
 - The DCS process never sees SOFA.
 
 ## 5. Threading and real-time rules
@@ -221,12 +242,19 @@ Pass: `0 failure(s)`.
 | A11 | Robustness | NaN/Inf input: source reset, output finite, `nonFinite` counted; denormal input: no slowdown (block time within 2× of normal input); frames > 8192 rejected |
 | A12 | Real-time | 64 sources × 480 frames at 48 kHz: p99 block time < 0.5 ms, p50 < 0.3 ms (Release, AVX2; SSE fallback reported, budget 2×); zero heap allocations after Init (counting allocator hook) |
 | A13 | Rates | 44.1, 48, 96 kHz: A1, A5, A8 pass at each |
-| A14 | Default data | the embedded set validates; 8,802 directions; fitted head radius 0.08-0.095 m |
+| A14 | Default data | the embedded set validates; 8,703 directions (8,802 measured, 99 repeats merged); fitted head radius 0.10-0.13 m (it is 0.1194 m, section 4.1), scaled by 48-66 cm unclamped; A5 on measured ears: their mean 0 ± 0.5 dB, each ear ± 1 dB, the rendered difference between the ears the set's own front IRs' ± 0.2 dB (the KU100's right ear is 1 dB louder at the front); A6 ≥ 2 dB (the KU100's own 2-8 kHz front/back difference is 2.4 dB) and the set's ± 1 dB; A8 |
 
 **C# converter tests** (`tests/DcsVr.Tests`):
 - **SOFA conversion:** the default set converts bit-identically twice. Against the source SOFA's HRIRs, the magnitude
   error per 1/3 octave (200 Hz-16 kHz) is ≤ 1 dB at every direction (minimum phase keeps the magnitude) and the onset
-  ITD error is ≤ 10 µs.
+  ITD error is ≤ 10 µs. (On SADIE II: worst 0.48 dB over all 8,703 directions; the ITD check runs on the synthetic set,
+  whose true delays are known.)
+- **SOFA reader and `hrtf-convert`** (`SofaTests.cs`, SOFA files written in the test with PureHDF): spherical
+  degrees/radians, cartesian cm, float and double, chunked + deflated and contiguous, Data.Delay `[I R]` and `[M R]`,
+  swapped receivers, a turned and a moved listener, FIR-E, missing optional attributes; every refusal of section 4.2;
+  the command in process (exit codes, `warning:`/`coverage:` lines, deterministic, `--generic`) and as DcsVr.Cli.exe
+  through the app's `HrtfLibrary.Import`; SADIE II from the cached archive gives the committed file byte for byte
+  (skipped without `.cache/hrtf`).
 - **Triangulation:** closed, every triangle counter-clockwise, `t = 2n − 4`.
 - **Bad inputs:** wrong convention, NaN data, fewer than 100 directions or an unsupported rate are rejected with a clear
   reason.
@@ -234,8 +262,8 @@ Pass: `0 failure(s)`.
 
 **Task A as built** (`native/binaural`, `binaural_core_test`; numbers from the run in the commit message):
 - The harness runs on a synthetic spherical-head set (an icosphere of 2,562 directions, Brown-Duda head shadow per ear,
-  a back shelf, Woodworth delays), so A1-A13 need no downloaded data. A14 runs as its own ctest (`--default-data`)
-  and prints `SKIP A14` until `native/binaural/data/sadie2_ku100.dcshrtf` is generated.
+  a back shelf, Woodworth delays), so A1-A13 need no downloaded data. A14 runs as its own ctest (`--default-data`) on
+  the committed `native/binaural/data/sadie2_ku100.dcshrtf` (it would print `SKIP A14` without the file).
 - Measured against the criteria above, with these readings of them:
   - A2/A3: octave bands up to the 16 kHz band, whose top edge is cut at 20 kHz (no fractional delay is flat to
     Nyquist; 20 kHz is the limit of hearing).
@@ -254,13 +282,25 @@ Pass: `0 failure(s)`.
   0.42 x the rate; a 4-tap Lagrange loses 3 dB at 16 kHz); a direction crossfade lasts the first 64 frames of the
   sub-block; a triangle change alone does not crossfade (the weights are continuous across edges).
 - The converter's onsets use the minimum-phase cross-correlation, not a -20 dB threshold (hrtf_format.h explains).
-- **Pending, each waiting for the user's go to download:**
-  - `D1_HRIR_SOFA.zip` from Zenodo record 12092466 (38,151,804 bytes; `scripts/fetch-hrtf.ps1` pins size and MD5);
-  - the PureHDF NuGet package (MIT; still 1.0.0-beta.x) for `SofaReader` (SOFA/HDF5 -> `HrirSet`) and the
-    `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> [--name] [--source] [--generic]` command.
-  Everything after the reader (`HrtfConverter`, `DcsHrtfFile`, `SphereHull`) is built and tested on synthetic HRIRs;
-  then `scripts/fetch-hrtf.ps1` generates `native/binaural/data/sadie2_ku100.dcshrtf`, A14 runs on it, and the
-  SADIE licence text joins `native/binaural/data/NOTICE`.
+- **Data and reader (done 2026-11-24, with the user's go for both downloads):**
+  - `D1_HRIR_SOFA.zip` from Zenodo record 12092466, pinned by size, MD5 and SHA-256 (`scripts/fetch-hrtf.ps1`,
+    `docs/THIRD_PARTY.md`); `native/binaural/data/sadie2_ku100.dcshrtf` generated from it and committed with
+    `SADIE_II_LICENSE.txt` and `NOTICE` (the archive has no licence file of its own); A14 runs on it.
+  - PureHDF 2.2.0 (NuGet, MIT) for `SofaReader` (SOFA/HDF5 -> `HrirSet`, section 4.2) and the
+    `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> [--name] [--source] [--generic]` command (`SofaConversion`).
+  - The real data changed two expectations of the harness, both written in A14 above: the repeats merged (8,703
+    directions, not 8,802) and the fitted radius (0.119 m, not 0.08-0.095 m); and one limit of the renderer, the ITD
+    radius range (0.04-0.15 m, section 4.1). The set's base delay (`delayBase`) covers a 0.12 m head as before and at
+    least the head-size maximum 66 / 57 (`kMaxHeadSizeScale`), so the synthetic harness is unchanged.
+  - Two radii: the ITD radius (`Config.headRadiusM`, `SetHeadRadius`: the set's fit x C / 57 cm) only scales the
+    delays; the near-field ear positions use the head's real radius (`Config.earRadiusM`, `SetEarRadius`:
+    `HeadRadiusFromCircumferenceCm`, 0.06-0.12 m), which the module sets from the same circumference. On the KU100 the
+    ears sat at 0.119 m before (the fit), now at 0.0907 m for 57 cm.
+  - Near field switched on or off fades over 20 ms (`kNearFieldFadeS`): on the KU100 at 0.3 m, switching inside one
+    480-frame call let the per-ear delays jump by several samples (A10 step 1.05e-3 at 57 cm, 1.20e-3 at 66 cm, limit
+    1e-3); faded, 3.2e-4 to 4.0e-4.
+  - A14 adds, on the real set at 48, 57 and 66 cm: the near-field off -> on crossfade (A10 limit), a live head-size
+    change from 57 cm (A10 limit) and the parallax angles from the real ear positions (A7, +-0.5 degrees).
 
 ### 8.3 Audio module (task B, `native/dcsqvcull/test`)
 1. **Fake ed_sound:**
@@ -446,12 +486,12 @@ Done on `feat/hrtf-audio`: the payload compiles and links the real core (`DcsQvB
 `DcsQvCullAudioE2ETests` drives the module with the real core (docs/BINAURAL_AUDIO_HOOKS.md, "Tests"). The release
 build also runs `scripts/build-binaural.ps1`. The app's status reader parses the module's own lines (section 10), the
 module's LogVoices file is `audio_voices.csv`, and the invariant test reads back every `[Audio]` key the app writes.
-Still open: the generic set itself (`native/binaural/data/sadie2_ku100.dcshrtf`, from SADIE II through
-`scripts/fetch-hrtf.ps1`) and the SOFA reader for `DcsVr.Cli hrtf-convert`, both waiting for the go to download the
-dataset and PureHDF. Until then the payload has no `HRTF_DEFAULT` resource: with 3D audio on, the module stays off
-(`audio: off (no HRTF set: this build has no default HRTF set)`, shown on the Audio page), and Import SOFA answers
-"this DCS Control has no SOFA converter yet". `Binaural.PayloadHasAudio` (Live) finds the resource name in the module's
-code either way, so it tells "this payload has the audio module", not "this payload has the set".
+The generic set (`native/binaural/data/sadie2_ku100.dcshrtf`, SADIE II through `scripts/fetch-hrtf.ps1`) is committed
+and embedded as `HRTF_DEFAULT`, and `DcsVr.Cli hrtf-convert` converts SOFA files (PureHDF), so a release has 3D audio
+with the generic ears and Import SOFA. A build without the set (only a `-LocalOnly` package can be one) keeps the
+behaviour below: with 3D audio on, the module stays off (`audio: off (no HRTF set: this build has no default HRTF set)`).
+`Binaural.PayloadHasAudio` (Live) finds the resource name in the module's code either way, so it tells "this payload
+has the audio module", not "this payload has the set".
 
 Review fixes (`fix/hrtf-audio-review`, on `feat/hrtf-audio`):
 - **No set, nothing deployed.** `Binaural.PayloadHasDefaultHrtf` reads the payload's PE resource table (`PeResource`):
@@ -520,10 +560,15 @@ after a live off is live.
 These are the module's own lines (`native/dcsqvcull/src/main/audio.inc`); the module's `Phrases` test keeps them in the
 source and the app's status test parses them verbatim.
 
-**SOFA converter** (task A), called through the CLI contract `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> --name <name>`
-(`CliHrtfConverter`, hidden, below-normal priority, two-minute limit): exit 0 with the file written is a conversion;
-stdout lines `warning: <text>` are shown in the report and `coverage: <percent>%` as the grid coverage. Any other exit
-is a refusal whose reason is the last stderr line. `DcsVr.Cli hrtf-convert --check` exits 0 when the converter is there
+**SOFA converter** (task A, `src/DcsVr.Core/Hrtf/SofaConversion.cs`), called through the CLI contract
+`DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> --name <name>` (`CliHrtfConverter`, hidden, below-normal priority,
+two-minute limit; a conversion takes about 2 s): exit 0 with the file written is a conversion (written beside the
+target, then moved over it; the target needs no `.dcshrtf` extension, the app passes a `.tmp`); stdout lines
+`warning: <text>` are shown in the report and `coverage: <percent>%` as the grid coverage (the share of 4,000 evenly
+spread directions with a measurement within 15 degrees). Any other exit is a refusal whose reason is the last stderr
+line: 2 for a file the reader or converter refuses, 1 for wrong arguments or a file that cannot be read or written.
+`--source` defaults to the database, subject and organisation the file names (never its path), `--name` to the file's
+name; without `--generic` the set is marked personal. `DcsVr.Cli hrtf-convert --check` exits 0 when the converter is there
 (the app greys Import SOFA out otherwise). The app validates the result again with a port of
 `hrtf_format.h Validate()` (`HrtfFile.Validate`) and keeps nothing it refuses. `IHrtfConverter` is the seam: task A may
 replace `CliHrtfConverter` with an in-process call. The SOFA file and its folder are never kept; the library keeps the
