@@ -551,6 +551,47 @@ int main() {
             Check(stepOff >= 0.5f && stepOn <= 0.5f * stepOff, "glide: drift steps the focus by at most half of the deadzone's step per frame");
             Check(lagOn <= lagOff + 0.6f, "glide: the focus lags the drifting gaze by at most 0.6 degrees more");
         }
+        // Smooth pursuit (round 3): at 30, 60 and 80 deg/s and 45 FPS (after a fixation), with the deadzone, the glide
+        // never steps the focus by more than the glide-0 filter does plus the 0.1-degree catch-up (it used to lag, then
+        // jump: 1.55 against 0.67 degrees at 30 deg/s), and once in pursuit it is the glide-0 focus exactly.
+        {
+            const auto pursuit = [&](const dcsvr::GazeSettings& s, float v, float& largest, float& lagEnd) {
+                dcsvr::GazeFilter f;
+                int64_t t = 1'000'000'000;
+                const int64_t step = 22'222'222;
+                float last = 0.f;
+                largest = lagEnd = 0.f;
+                const int n = (int)(60.f / v * 45.f);
+                for (int i = -10; i < n; ++i) {
+                    const float deg = i < 0 ? -30.f : -30.f + v * i / 45.f;
+                    const float shown = std::atan(Locate(f, s, t, deg).gaze.x * HalfTan) / Rad;
+                    if (i > 0) largest = std::fmax(largest, std::fabs(shown - last));
+                    lagEnd = std::fabs(deg - shown);
+                    last = shown;
+                    t += step;
+                }
+            };
+            dcsvr::GazeSettings plain = on;
+            plain.deadzoneDeg = g.deadzoneDeg = 0.5f;
+            bool ok = true;
+            for (const float v : {30.f, 60.f, 80.f}) {
+                float stepOff, lagOff, stepOn, lagOn;
+                pursuit(plain, v, stepOff, lagOff);
+                pursuit(g, v, stepOn, lagOn);
+                std::printf("     pursuit %.0f deg/s at 45 FPS: largest focus step %.2f deg without the glide, %.2f with it; lag at the end %.2f / %.2f\n",
+                            v, stepOff, stepOn, lagOff, lagOn);
+                ok = ok && stepOn <= stepOff + 0.1f + 1e-3f && std::fabs(lagOn - lagOff) < 1e-3f;
+            }
+            Check(ok, "glide: smooth pursuit steps the focus no more than without the glide (+0.1 degree) and ends on the same focus");
+            // Fixation micro-steps still glide: one 0.8-degree step out of the deadzone, then rest.
+            dcsvr::GazeFilter f;
+            int64_t t = 1'000'000'000;
+            for (int i = 0; i < 5; ++i) Locate(f, g, t += dt, 5.f);
+            const Frame first = Locate(f, g, t += dt, 5.8f);
+            const Frame second = Locate(f, g, t += dt, 5.8f);
+            Check(first.gaze.x > Ndc(5.f) && first.gaze.x < Ndc(5.8f) && second.gaze.x > first.gaze.x && second.gaze.x < Ndc(5.8f),
+                  "glide: an isolated step at fixation still glides (not taken for pursuit)");
+        }
         // A glide time that is not a number (settings.cfg "nan": the start parse's std::stof keeps it) is off: the
         // focus is the one without the glide, never NaN.
         {
