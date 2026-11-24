@@ -86,7 +86,8 @@ Engine Optimizations then stay on whenever DCS starts. The VR features and CPU B
 
 - **[User Guide](docs/USER_GUIDE.md)**: every page of the app in order, what each feature costs, the in-flight keys, and what to do when something goes wrong.
 - **[Release notes](docs/RELEASE_NOTES.md)**: what changed in each version.
-- From 0.6 (the pages have changed since): the **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.5-preview/DcsControl-0.6.5-User-Manual.pdf)** for 0.6.5, the [5-minute video tour](https://youtu.be/hPQD7im2VKc) and [What's new in 0.6](https://youtu.be/m8BVXMIsXN8) on YouTube.
+- **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf)**: the printable book for 0.7, with a Quick Start and numbered screenshots.
+- From 0.6 (the pages have changed since): the [5-minute video tour](https://youtu.be/hPQD7im2VKc) and [What's new in 0.6](https://youtu.be/m8BVXMIsXN8) on YouTube.
 
 ## Good to know
 
