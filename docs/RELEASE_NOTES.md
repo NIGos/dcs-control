@@ -2,96 +2,100 @@
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.
 
-**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. The focus area and the rest of the view get their generated frames separately: about half the GPU time for generated frames, and 4 GB less video memory on the test PC. The two are joined into one image before the headset gets it, so there is no line or flicker at the edge of the focus area (about 0.13 ms of GPU per frame). It helps most with a small focus area; with a very large one it can cost more than it saves. It needs bundled Quad Views, NVIDIA frame generation and the Pimax or Quest 3 VD route. It gets ready on the loading screen, which pauses once for half a second, so the flight starts with only a short hitch.
+**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. The focus area and the rest of the view get their generated frames separately: about half the GPU time for generated frames, and 4 GB less video memory on the test PC.
+- The two are joined into one image before the headset gets it, so there is no line or flicker at the edge of the focus area (about 0.13 ms of GPU per frame).
+- It helps most with a small focus area; with a very large one it can cost more than it saves.
+- It needs bundled Quad Views, NVIDIA frame generation and the Pimax or Quest 3 VD route. It gets ready on the loading screen, which pauses once for half a second.
 
-**Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop (VDXR). Contributed by @Mav87th (GitHub PR #29), who flew it with an RTX 5070 Ti. The Quest 3 has no eye tracking, so Quad Views uses a fixed focus in the centre, 55% × 75% of the view to start with, which keeps the instruments sharp. Frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off. The refresh rate is 72, 80, 90 or 120 Hz, as set in Virtual Desktop. Keep Synchronous Spacewarp off in Virtual Desktop; Checks reminds you. DLSS 5 and foveated frame generation are offered but not yet flown on this route. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
+**Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop (VDXR), contributed in GitHub PR #29 and flown with an RTX 5070 Ti.
+- Quad Views uses a fixed focus in the centre (the Quest 3 has no eye tracking), 55% × 75% of the view to start with, so the instruments stay sharp.
+- Frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off.
+- Refresh rate 72, 80, 90 or 120 Hz, as set in Virtual Desktop. Keep Synchronous Spacewarp off there; Checks reminds you.
+- DLSS 5 and foveated frame generation are offered but not yet flown on this route. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
 
-**Hide the focus edge.** On by default, in the Focus area card of the Quad Views page, and it applies in flight. When you look somewhere else, the short flash at the edge of the focus area is much smaller. Its parts are under Fine-tune: smooth small moves (eye jumps are never delayed), soft focus edge, fade in, steady periphery through eye jumps, and match brightness (and color) at the edge; fade in and the matching work with foveated frame generation. With DLSS 5, Local tone 0 removes most of what is left, at the cost of some local contrast.
+**Hide the focus edge.** On by default, in the Focus area card of the Quad Views page, and it applies in flight. When you look somewhere else, the short flash at the edge of the focus area is much smaller.
+- Its parts are under **Fine-tune**: Smooth small moves (eye jumps are never delayed), Soft focus edge, Fade in, Steady periphery through eye jumps, and Match brightness (and color) at the edge. Fade in and the matching work with foveated frame generation.
+- With DLSS 5, Local tone 0 removes most of what is left, at the cost of some local contrast.
 
 **Eye-tracking options from @Heartbreak-1 (GitHub PR #26).**
-- **Soft focus edge** (experimental, off by default): in the edge band the focus area first drops to the periphery's resolution, then fades out, so the ring around where you look is harder to see. It works with foveated frame generation too.
-- Soft focus edge is now under Focus area > Hide the focus edge > Fine-tune, and is off while Hide the focus edge is off.
+- **Soft focus edge** (experimental, off by default; under Hide the focus edge > Fine-tune): in the edge band the focus area first drops to the periphery's resolution, then fades out, so the ring around where you look is harder to see. It works with foveated frame generation too.
 - **Stay ahead until your eyes land** (experimental, on by default): during a fast eye movement the focus area stays ahead of your eyes until they land.
 - **Slide back when tracking is lost** (experimental, on by default): when the eye tracker loses your eyes for more than a moment, the focus area slides to the centre over 150 ms instead of jumping.
 - These two join Focus ahead of fast eye movements and Steady focus while looking in a new **Eye-tracking options** fold. All four work with frame generation.
 
-**Go back to the previous version.** If an update gives you trouble, **Go back** (Help & support, under Updates) puts DCS back to stock, installs the version you had before from its own signed setup, and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again on its own; **Check now** still shows it.
-- From 0.7 on, the previous setup stays on your PC for a month after an update. Going back to 0.6.6 or earlier downloads its setup again, and that version shows its own update banner again after a few hours.
-- An earlier version cannot open a profile or preset saved by 0.7, because it refuses the new settings. Go back gives it the copy taken when 0.7 was installed, or its defaults if there is none. A file exported from 0.7 cannot be imported into an earlier version.
-- Uninstalling also removes the setups kept for Go back.
+**Go back to the previous version.** If an update gives you trouble, **Go back** (Help & support, under Updates) puts DCS back to stock, installs the version you had before from its own signed setup, and restarts.
+- Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets saved since come back when you update again.
+- One step back only, and not to versions before 0.6.3. The update you left is not offered again on its own; **Check now** still shows it.
+- From 0.7 on, the previous setup stays on your PC for a month. Going back to 0.6.6 or earlier downloads its setup again.
+- An earlier version cannot open a profile or preset saved by 0.7. Go back gives it the copy taken when 0.7 was installed, or its defaults. A file exported from 0.7 cannot be imported into an earlier version.
 
-**Less CPU from the terrain prefetch fix.** With the fix on, DCS's terrain threads could spin on the skipped calls. In a sparse scene (Germany at low level, no mod) that cost the render thread about 1.3 ms per frame. A thread that keeps hitting skips now pauses for 1 ms every 600 of them, and the render thread never does. In the release test flights (Germany and Caucasus, with and without ATMOSX), against the fix's count-only mode: the render thread was 6 to 11% faster instead of up to 18% slower, and DCS used about 45% less CPU.
+**Less CPU from the terrain prefetch fix.** With the fix on, DCS's terrain threads could spin on the skipped calls. A thread that keeps hitting skips now pauses for 1 ms every 600 of them; the render thread never does. In the release test flights (Germany and Caucasus, with and without ATMOSX) the render thread was 6 to 11% faster instead of up to 18% slower, and DCS used about 45% less CPU.
 
-**Smooth mouse cursor works in the cockpit.** It rarely recognised DCS's yellow cockpit cursor, so generated frames still showed it faded between two places. It now follows the mouse to find it. In test flights the cursor was redrawn in nearly every generated frame over the sky and the HUD, less often over bright panels. It works with foveated frame generation too.
+**Smooth mouse cursor works in the cockpit.** It rarely found DCS's yellow cockpit cursor, so generated frames still showed it faded between two places. It now follows the mouse to find it. It works with foveated frame generation too.
 
-**Pimax's Quad View presets with bundled Quad Views.** With **Focus area values** on *From Pimax Play* and Pimax Play on a preset (Performance, Balanced, Quality or Extreme), bundled Quad Views now renders that preset at its centre and peripheral resolution. Before, a preset fell back to the profile's own values.
-- With eye tracking the focus area is 27% × 30% of the view (Performance), 31% × 32% (Balanced), 33% × 33% (Quality) or 39% × 33% (Extreme); with a fixed focus, 46% × 45% for all four. The fixed size was measured on Pimax's own Quad Views. The eye-tracked sizes come from what Pimax's runtime logs and have not been checked in a worn headset yet.
-- If Pimax Play is on a preset, the first Launch DCS after the update writes the new values and says so. The GPU load changes with them.
-- With Pimax Play on Custom nothing changes: the focus area is the number Pimax Play shows (30 is 30% of the view).
-- With *From Pimax Play*, the Quad Views page and the Coverage preview now show the focus size in percent of the view. With a preset they name it, and so does the Overview.
+**Pimax's Quad View presets with bundled Quad Views.** With Focus area values on *From Pimax Play* and Pimax Play on a preset (Performance, Balanced, Quality or Extreme), bundled Quad Views now renders that preset at its centre and peripheral resolution. Before, a preset fell back to the profile's own values.
+- Eye tracked: 27% × 30% of the view (Performance), 31% × 32% (Balanced), 33% × 33% (Quality), 39% × 33% (Extreme). Fixed focus: 46% × 45% for all four. The eye-tracked sizes come from Pimax's runtime logs and have not been checked in a worn headset yet.
+- If Pimax Play is on a preset, the first Launch DCS after the update writes the new values and says so. With Custom nothing changes.
+- The Quad Views page, the Coverage preview and the Overview show the focus size in percent of the view.
 
-**Vertical offset for the focus area (GitHub #24).** With **Focus area values** on *Set here*, the Quad Views page has a **Vertical offset** next to Horizontal and Vertical FOV. Negative moves the focus area below where you look, positive above. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. It uses Pimax Play's Vertical Offset scale (100 is a quarter of the view's height) and works with an eye-tracked or a fixed focus. The Coverage preview shows the shift. The default, 0, changes nothing.
+**Vertical offset for the focus area (GitHub #24).** With Focus area values on *Set here*, **Vertical offset** moves the focus area below (negative) or above where you look. About -10 to -20 keeps the gauges sharp while you look outside. It uses Pimax Play's scale (100 is a quarter of the view's height).
 
-**A stuck DCS shows on every page (GitHub #21).** 0.6.6 showed a DCS left in the background on the Overview only. Now the status at the top of every page says **DCS has no window**, **DCS is not responding** or **DCS has crashed** (its crash window is still open), with **End DCS** next to it. A crashed DCS used to count as running and kept the app waiting. The app keeps watching while it is minimised, so you are told as soon as you open it. A DCS without a window is now pointed out after a minute instead of half a minute, so one that is only slow to close is left alone.
+**A stuck DCS shows on every page (GitHub #21).** The status at the top of every page says **DCS has no window**, **DCS is not responding** or **DCS has crashed** (its crash window is still open), with **End DCS** next to it. End DCS also works on a DCS running with administrator rights: it asks Windows once.
 
-**GPU savings on the Engine Optimizations page.** A new fold with Cache distant shadows, Faster terrain and shader paths and two new experimental switches, both off by default:
+**GPU savings on the Engine Optimizations page.** A new fold with Faster terrain and shader paths, Cache distant shadows and two new experimental switches, both off by default:
 - **Skip hidden water**: DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late.
 - **Skip unused effects**: skips water shading that changes nothing, and the heat-haze passes when nothing is hot. Same image, small saving (about 0.2 ms over open sea).
-- **Faster terrain and shader paths** stays on by default and gives the same image. It can now be turned off, so a problem like GitHub #28 can be ruled in or out.
+- **Faster terrain and shader paths** stays on and gives the same image. It can now be turned off, to rule a problem like GitHub #28 in or out.
 
-**Both eyes at once (experimental).** Off by default, under Advanced on the Frame generation page. Each eye's generated frame is made on its own GPU queue, so generated frames are ready about 1 ms sooner, with the same image. Not flown yet.
+**Lighter pages.** Each card shows its main settings; the rest are in folds whose closed line says what is set ("14 of 14 on", "Defaults"). Texts are shorter and plainer on every page, and experimental settings carry an **EXPERIMENTAL** tag.
 
-**Match brightness for DLSS 5.** Off by default, in Advanced image controls on the DLSS page. It keeps the DLSS 5 area as bright as the view around it, for the slightly darker disc some setups show there. In a test flight the disc became much fainter but did not go away: part of it is DLSS 5 softening fine cloud detail, which brightness cannot change.
+**Both eyes at once (experimental).** Off by default, under Advanced on the Frame generation page. Each eye's generated frame is made on its own GPU queue, so it is ready about 1 ms sooner, with the same image. Not flown yet.
 
-**Shaders are prepared with one thread while you fly.** After a DCS or app update the engine module prepares its shaders again. It now uses one thread in flight and all of them in the main menu and on loading screens, so the first flights after an update cost DCS's render thread less. The engine's test suite pauses it while it measures.
+**Match brightness for DLSS 5.** Off by default, in Advanced image controls on the DLSS page. It keeps the DLSS 5 area as bright as the view around it. In a test flight the darker disc some setups show became much fainter but did not go away.
 
-**Clearer settings.** Shorter, plainer texts on every page. Each card shows its main switches; the rest is in folds that say what is set.
+**Shaders are prepared with one thread while you fly.** After a DCS or app update the engine module prepares its shaders again: now with one thread in flight and all of them in the main menu and on loading screens. The engine's test suite pauses it while it measures.
 
-**More settings apply in flight.** With Live on, these now change while DCS runs: Hide the focus edge and its parts, the four eye-tracking options, Far depth's strength and key, the headset panel's position, the FPS and VRAM counters, Faster terrain and shader paths (its full gain comes within a few minutes of flying), Skip hidden water and Skip unused effects. Another Focus or Periphery DLSS preset chosen in flight is used from the next mission start. The Quad Views settings, Far depth and the headset panel apply live once the profile has been launched from 0.7.
+**More settings apply in flight.** With Live on: Hide the focus edge and its parts (not Soft focus edge), the four eye-tracking options, Far depth's strength and key, the headset panel's position, the FPS and VRAM counters, Faster terrain and shader paths, Skip hidden water and Skip unused effects. Another Focus or Periphery DLSS preset is used from the next mission start. The Quad Views settings, Far depth and the headset panel apply live once the profile has been launched from 0.7.
 
 **Fewer requirements.**
 - **Sharp HUD** no longer needs Depth boost.
 - Sharp HUD, **Far depth** and frame generation's use of DCS's cockpit outline, depth and motion also work with Engine Optimizations off. The engine module is then installed for them alone, with none of the optimizations running.
 - **Pupil shift** and **Eye-focus blur** also work on Pimax with a fixed focus area or without Quad Views, from the headset's own eye tracking. Not flown yet.
-- Eye-focus blur is now off in DCS's main menu.
+- Eye-focus blur is off in DCS's main menu.
 
 **Fewer options.**
-- **Free unused DLSS memory** is gone from the Engine page: on DCS 2.9.31 it frees nothing. A profile that has it still loads.
-- Settings for working on DCS Control itself are hidden: Turbo mode, the Alternative Quad Views provider, DLSS 5's Depth convention and Motion scale, the terrain prefetch fix's Observe choice and the Engine page's Developer options. A profile with one of them changed loads it at its safe value (Turbo off, bundled Quad Views, Observe as Off, Developer mode off).
-- **Periphery DLSS preset** offers Off, E and F. K and M cost more than E, and the periphery preset is there to save GPU time; a profile saved with one uses E.
+- **Free unused DLSS memory** is gone: on DCS 2.9.31 it frees nothing. A profile that has it still loads.
+- Settings for working on DCS Control itself are hidden: Turbo mode, the Alternative Quad Views provider, DLSS 5's Depth convention and Motion scale, the terrain prefetch fix's Observe choice and the Engine page's Developer options. A profile with one of them changed loads it at its safe value.
+- **Periphery DLSS preset** offers Off, E and F. A profile saved with K or M uses E.
 
 **Fixes:**
-- **End DCS** works on a DCS running with administrator rights: it asks Windows once, and says why if you decline. Such a DCS is also no longer taken for "not responding" (GitHub #21, reported by @whitedear).
-- The engine module's GPU-bound guard no longer takes a steady frame rate near half or a third of the refresh rate for a frame-rate cap and holds back for seconds (GitHub #27, reported by @deamonesque).
-- A GPU-bound guard step taken without a measured gain (loading, the menu, too few frames) is undone when a mission loads, you change slot or the mission ends, instead of carrying over.
-- With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, say) could hold DCS at about 41 FPS instead of 45, with repeated frames, for up to a minute. Frame generation now recovers at once.
-- Adaptive frame generation leaves 3X sooner when 2X would hold (Balanced and Prefer refresh rate). It now allows for the higher frame time measured at 3X, and the late frames of the switch itself no longer send it straight back.
-- The engine's test suite no longer stops at once on a headset without quad views ("nothing to compare"). It compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
-- AltGr+Shift+F11 works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt, so it cannot trigger the engine module's reserved Ctrl+Alt keys (GitHub #32).
+- End DCS: a DCS running with administrator rights is no longer taken for "not responding", and End DCS says why if you decline Windows' prompt (GitHub #21, reported by @whitedear).
+- A crashed DCS no longer counts as running and keeps the app waiting. A DCS without a window is pointed out after a minute, so one that is only slow to close is left alone. End DCS only looks at DCS in your own Windows session.
+- The GPU-bound guard no longer takes a steady frame rate near half or a third of the refresh rate for a frame-rate cap (GitHub #27, reported by @deamonesque). A guard step taken without a measured gain is undone when a mission loads, you change slot or the mission ends.
+- With Smoothness buffer on, a short run of heavy frames (opening the F10 map) could hold DCS at about 41 FPS instead of 45 for up to a minute. Frame generation now recovers at once.
+- Adaptive frame generation leaves 3× sooner when 2× would hold (Balanced and Prefer refresh rate).
+- The engine's test suite no longer stops at once on a headset without quad views. It compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
+- AltGr+Shift+F11 works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt (GitHub #32).
 - Diagnostic package: a PC named after its user ("JOHN-PC") shows as `<pc>`, not `<user>-PC` (GitHub #31, reported by @Mav87th).
-- The DLSS 5 page and the guide say plainly that NVIDIA does not offer `nvngx_dlssnr.dll` on its own and that DCS Control cannot provide it. With a patched copy on an RTX 50 card, the page says to use NVIDIA's original file (GitHub #33, reported by @Mav87th).
+- The DLSS page and the guide say plainly that NVIDIA does not offer `nvngx_dlssnr.dll` on its own and that DCS Control cannot provide it. With a patched copy on an RTX 50 card, the page says to use NVIDIA's original file (GitHub #33, reported by @Mav87th).
 - For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
-- With DLSS 5 (Cheeky) hooked into DCS's DLSS first, the Focus and Periphery DLSS presets could stay at DCS's own preset. The engine module now chains its hook behind Cheeky's, so both work.
+- With DLSS 5 (Cheeky) hooked into DCS's DLSS first, the Focus and Periphery DLSS presets could stay at DCS's own preset. Both work now.
 - Cheeky no longer starts in the helper processes of DCS's built-in browser.
-- After an update, Launch DCS installs the new frame generation, Quad Views, DLSS 5 and engine module files even when your settings are unchanged. Before, the old files could stay in use until you changed a setting.
-- After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because DCS Control has not been checked against that DCS version yet. Before, they stopped without a word.
-- Checks: a new **DCS version** line names the parts that did not recognise the DCS build at the last DCS start, also frame generation, Sharp HUD, Depth boost and Far depth with Engine Optimizations off. A part that a safety check turned off shows on the Engine page only.
-- Checks: the HUD after DLSS check names the autoexec.cfg of the Saved Games folder you use (DCS.openbeta too).
+- After an update, Launch DCS installs the new component files even when your settings are unchanged.
+- After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because this DCS version has not been checked yet.
+- Checks: a new **DCS version** line names the parts that did not recognise the DCS build at the last start. The HUD after DLSS check names the autoexec.cfg of the Saved Games folder you use (DCS.openbeta too).
 - On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before.
-- Back to stock DCS also removes the engine module's new 0.7 log files.
-- Back to stock DCS keeps a DCS setting you changed yourself after DCS Control set it (Max FPS, for example), instead of setting it back.
-- If DCS Control's record of the files it changed is damaged or deleted, it uses its last good copy. If both are damaged, the Stock DCS page says so instead of the app failing, and Back to stock DCS removes only DCS Control's own files.
-- After going back and forth with 0.6.6, an outdated copy of the record of originals is no longer used.
+- Back to stock DCS also removes the engine module's new 0.7 log files, and keeps a DCS setting you changed yourself after DCS Control set it (Max FPS, for example).
+- If DCS Control's record of the files it changed is damaged or deleted, it uses its last good copy. If both are damaged, the Stock DCS page says so, and Back to stock DCS removes only DCS Control's own files. After going back and forth with 0.6.6, an outdated copy of the record is no longer used.
 - A backup that went missing (quarantined by an antivirus, for example) can no longer cost the newer original of another program's file, such as ReShade's dxgi.dll.
-- Uninstalling the ZIP version puts DCS back to stock first, and stops with a clear message if it can't. The setup's uninstaller also offers Back to stock DCS when DCS Control's files are in DCS without a record.
+- Uninstalling the ZIP version puts DCS back to stock first, and stops with a clear message if it can't. The setup's uninstaller also offers Back to stock DCS when DCS Control's files are in DCS without a record. Uninstalling also removes the setups kept for Go back.
 - Importing a profile or preset no longer turns on Developer options or their file paths unless your current profile has them. Developer files on a network share are refused.
-- Diagnostics: the Diagnostic report is cleaned like the package. Steam IDs, headset serial numbers (also in SteamVR's logs and in files written before the one that names it) and network and MAC addresses are removed. The package includes DLSS 5's crash log.
-- Without DLSS 5, the colour modes no longer show DCS's own tone map in a view for a frame now and then, and Skip unused effects works on that route too.
+- Diagnostics: the text report is cleaned like the package. Steam IDs, headset serial numbers and network and MAC addresses are removed. The package includes DLSS 5's crash log.
+- Without DLSS 5, the color modes no longer show DCS's own tone map in a view for a frame now and then, and Skip unused effects works there too.
 - Skip unused effects could drop the heat haze while something hot was drawn, and Skip hidden water could lose some of DCS's uploads in rare frames.
 - Far depth: turning it off while DCS is busy can no longer crash Quad Views (rare).
 - Other hardware: CPU Boost no longer lists headset services as moving on CPUs too small to move them, and Move VR runtime is for the Pimax route only. DLSS 5 says when NVIDIA's original file cannot run on an RTX 20-40 card. Read settings from this PC tells Index, Varjo, Reverb and Meta users to choose Optimizations only.
 - A long preset name copied in by hand no longer breaks the app's pages.
-- End DCS only looks at DCS in your own Windows session, and no longer reports a failure because another Windows user runs DCS.
 - DLSS 5's crash and runtime logs are rotated, so a real crash is still logged after a long session. DCS Control's modules load Windows DLLs only from System32.
 - The terrain prefetch fix's spin cap also works when the engine's pass timing is not running (for example on AMD graphics without D3D11 command lists).
 - Foveated frame generation: the width of the focus area's soft edge can be set in Quad Views' settings file (`dcsvr_two_layers_opaque_ramp`) and changes in flight.
