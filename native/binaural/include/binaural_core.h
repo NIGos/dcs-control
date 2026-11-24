@@ -12,7 +12,8 @@
 //     changing per sample; delays scaled about their mean by headRadius / datasetHeadRadius, so head size changes the
 //     ITD only. The FIR runs first so both ears (and both filters of a crossfade) share one pass over the mono input.
 //   - Near field (NearField on, source < 1 m): per-ear parallax (direction from each ear, ears at +-r on the z axis) for
-//     sources under 2 m (fading out between 1.5 and 2 m), plus a first-order low shelf per ear (1 kHz corner,
+//     sources under 2 m (fading out between 1.5 and 2 m; the ear offset shrinks to 0 between 2 and 1 head radius, so
+//     a source at the head never flips the near ear's filter), plus a first-order low shelf per ear (1 kHz corner,
 //     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees (+8 dB near ear, -4 dB far ear).
 //   - FIR: direct form, AVX2/FMA with an SSE2 fallback (chosen at Init); any block length, no FFT framing.
 //   - Distance gain, doppler, propagation delay, air and canopy filtering: never applied here (DCS already did them).
@@ -166,8 +167,10 @@ private:
 };
 
 // CPU budget and back-off (implemented by the audio module, measured with Stats):
-//   - budget = CpuBudgetPercent (binaural_config.h, default 25 %) of the block duration, measured as Stats::lastBlockNs
-//     against frames / sampleRate;
+//   - budget = CpuBudgetPercent (binaural_config.h, default 25 %) of the block duration, measured by the module around
+//     its own work only (the HRTF voices' Render calls and their scratch clears, audio_render.h Block::dspTicks)
+//     against frames / sampleRate. Stats::lastBlockNs is not that measure: it runs from BeginBlock to EndBlock, which
+//     in DCS spans ED's whole mix including ED's own voices; it is informational;
 //   - over budget in more than 10 % of the blocks of the last second: MaxObjects in use drops by 8 (not below 8), the
 //     quietest owned voices fade back to DCS's own panning; it climbs back by 4 after 10 s under half the budget;
 //   - ED's own overrun counter (docs/BINAURAL_AUDIO_HOOKS.md section 6, item 7) is the hard stop: 3 overruns in 10 s

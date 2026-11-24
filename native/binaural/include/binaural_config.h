@@ -75,11 +75,27 @@ struct AudioConfig {
 
 inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// Head radius for the ITD model from the head circumference: r = C / (2 pi), clamped to 0.06 .. 0.12 m.
-// (57 cm -> 9.07 cm; the KU100's fitted radius is about 8.7-9 cm.)
+// Head radius from the head circumference: r = C / (2 pi), clamped to 0.06 .. 0.12 m (57 cm -> 9.07 cm). The geometric
+// size, for display; the ITD radius the renderer gets is PilotItdRadiusM below.
 inline float HeadRadiusFromCircumferenceCm(float cm) {
     const double c = Clamp(std::isfinite(cm) ? cm : 57.0, 48.0, 66.0);
     return static_cast<float>(Clamp(c / 100.0 / (2.0 * 3.14159265358979323846), 0.06, 0.12));
+}
+
+// The circumference an HRTF set is taken to be measured at (the average adult head, HeadCircumferenceCm's default).
+constexpr double kReferenceCircumferenceCm = 57.0;
+// ITD scale of a head circumference against that reference: 1 at 57 cm (the set as measured), clamped like the key.
+inline double HeadScaleFromCircumferenceCm(float cm) {
+    return Clamp(std::isfinite(cm) ? cm : kReferenceCircumferenceCm, 48.0, 66.0) / kReferenceCircumferenceCm;
+}
+// The head radius the renderer is given (binaural::Config::headRadiusM, Renderer::SetHeadRadius): the set's own
+// Woodworth-fitted radius scaled by the head size, so the renderer's ITD scale (radius / the set's fitted radius) is
+// exactly the circumference ratio: 57 cm plays the set's own timing, whatever head it was measured on. (Comparing
+// C / 2 pi with a Woodworth fit would scale even the reference head's ITDs by a few percent.) Clamped to the renderer's
+// 0.06 .. 0.12 m.
+inline float PilotItdRadiusM(float datasetHeadRadiusM, float cm) {
+    const double fit = std::isfinite(datasetHeadRadiusM) && datasetHeadRadiusM > 0.0f ? datasetHeadRadiusM : 0.0875;
+    return static_cast<float>(Clamp(fit * HeadScaleFromCircumferenceCm(cm), 0.06, 0.12));
 }
 
 // "1, 3,5" -> bits 1, 3, 5. Ignores spaces; any token that is not an integer 0..7 makes the result invalid (false).

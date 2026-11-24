@@ -1,12 +1,22 @@
 // BinauralCore: AVX2/FMA kernels (this file is compiled with /arch:AVX2; called only when the CPU has AVX2 and FMA).
 #include <immintrin.h>
 
-#include <cmath>
-
 #include "internal.h"
 
+// Only intrinsics and functions with internal linkage here: an inline function from a header (std::floor, std::fma,
+// std::min ...) compiled with /arch:AVX2 is a COMDAT the linker may pick over the SSE2 copy of another object, which
+// would run VEX code on a CPU without AVX2. The ctest binaural_avx2_object (test/check_avx2_object.ps1) checks
+// that this object defines no external symbol outside binaural::kernels.
 namespace binaural::kernels {
 namespace {
+
+inline float FmaSs(float a, float b, float c) {
+    return _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c)));
+}
+inline float FloorSs(float x) {
+    const __m128 v = _mm_set_ss(x);
+    return _mm_cvtss_f32(_mm_floor_ss(v, v));
+}
 
 // y[i] = sum_k h[k] x[taps-1+i-k]: each tap broadcast across 8 outputs; 64 outputs per pass (8 independent FMA chains
 // keep both FMA ports busy), then 32, 8 and a scalar tail.
@@ -47,7 +57,7 @@ void FirAvx2(const float* h, std::uint32_t taps, const float* x, float* y, std::
     for (; i < n; ++i) {
         float acc = 0.0f;
         const float* p = xc + i;
-        for (std::uint32_t k = 0; k < taps; ++k, --p) acc = std::fma(h[k], *p, acc);
+        for (std::uint32_t k = 0; k < taps; ++k, --p) acc = FmaSs(h[k], *p, acc);
         y[i] = acc;
     }
 }
@@ -81,7 +91,7 @@ void FirNT(const float* const* h, std::uint32_t taps, const float* x, float* con
         for (int c = 0; c < C; ++c) {
             float acc = 0.0f;
             const float* p = xc + i;
-            for (std::uint32_t k = 0; k < taps; ++k, --p) acc = std::fma(h[c][k], *p, acc);
+            for (std::uint32_t k = 0; k < taps; ++k, --p) acc = FmaSs(h[c][k], *p, acc);
             y[c][i] = acc;
         }
 }
@@ -106,7 +116,7 @@ void FdAvx2(const float* table, const float* x, std::int32_t base, float d0, flo
     if (step == 0.0f) {
         // Constant delay: one interpolated row, run as a 16-tap FIR across outputs.
         const float p = static_cast<float>(base) - d0;
-        const float fl = std::floor(p);
+        const float fl = FloorSs(p);
         const float ph = (p - fl) * kFdPhases;
         int r = static_cast<int>(ph);
         if (r >= kFdPhases) r = kFdPhases - 1;
@@ -120,7 +130,7 @@ void FdAvx2(const float* table, const float* x, std::int32_t base, float d0, flo
     }
     for (std::uint32_t i = 0; i < n; ++i) {
         const float p = static_cast<float>(base + static_cast<std::int32_t>(i)) - (d0 + step * static_cast<float>(i));
-        const float fl = std::floor(p);
+        const float fl = FloorSs(p);
         const float ph = (p - fl) * kFdPhases;
         int r = static_cast<int>(ph);
         if (r >= kFdPhases) r = kFdPhases - 1;

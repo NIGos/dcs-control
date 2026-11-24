@@ -495,6 +495,40 @@ static void TestNearField(const std::vector<std::uint32_t>& file) {
     std::printf("A7 parallax 0.3 m at 45 deg right: left ear sees %.2f deg (expected %.2f), right ear %.2f deg (%.2f)\n", angL, expL, angR, expR);
     CHECK(std::fabs(angL - expL) <= 0.5 && std::fabs(angR - expR) <= 0.5);
     CHECK(angR < 45.0 && angL > 45.0);
+    // Sources at and inside the head radius (the module allows 0.05 m; late translation moves cockpit sources there):
+    // swept from 0.3 m in to 0.05 m on the right and at 45 / 135 degrees right, the near ear's filter never turns to
+    // the far side, and the ITD and the ILD change smoothly (no step between 5 mm steps) and never lose their side.
+    for (double az : {-90.0, -45.0, -135.0}) {
+        const Dir3 d = FromAzEl(az, 0.0);
+        double prevItd = 0.0, prevIld = 0.0, worstItdStep = 0.0, worstIldStep = 0.0, minIld = 1e9, minItd = 1e9;
+        double nearZmin = 1e9;
+        bool first = true;
+        for (int mm = 300; mm >= 50; mm -= 5) {
+            const float dist = static_cast<float>(mm) / 1000.0f;
+            const Vec out = RenderStatic(rig.r, 5, d, dist, noise, 480);
+            float fr[3];
+            detail::SourceFilterDirection(rig.r, 5, 1, fr);
+            const double itd = (detail::SourceDelay(rig.r, 5, 0) - detail::SourceDelay(rig.r, 5, 1)) / 48.0;  // ms, L later
+            double eL = 0.0, eR = 0.0;
+            for (std::size_t i = 2048; i < out.size() / 2; ++i) eL += double(out[2 * i]) * out[2 * i], eR += double(out[2 * i + 1]) * out[2 * i + 1];
+            const double ild = Db(eR) - Db(eL);
+            nearZmin = std::min(nearZmin, double(fr[2]));
+            minIld = std::min(minIld, ild);
+            minItd = std::min(minItd, itd);
+            if (!first) {
+                worstItdStep = std::max(worstItdStep, std::fabs(itd - prevItd));
+                worstIldStep = std::max(worstIldStep, std::fabs(ild - prevIld));
+            }
+            first = false;
+            prevItd = itd;
+            prevIld = ild;
+        }
+        std::printf("A7 inside the head, az %.0f, 0.3 -> 0.05 m: near-ear filter z >= %.3f, ITD >= %.3f ms (largest 5 mm step %.4f ms), "
+                    "ILD >= %.2f dB (largest step %.2f dB)\n", az, nearZmin, minItd, worstItdStep, minIld, worstIldStep);
+        CHECKM(nearZmin > 0.0, "az %.0f: the near ear's filter turned to the far side (z %.3f)", az, nearZmin);
+        CHECKM(minItd > 0.1 && minIld > 3.0, "az %.0f: ITD %.3f ms / ILD %.2f dB lost their side", az, minItd, minIld);
+        CHECKM(worstItdStep <= 0.02 && worstIldStep <= 1.0, "az %.0f: steps ITD %.4f ms, ILD %.2f dB", az, worstItdStep, worstIldStep);
+    }
     ReleaseHrtf(rig.set);
 }
 

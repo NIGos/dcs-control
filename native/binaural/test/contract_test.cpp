@@ -184,6 +184,13 @@ static void TestConfig() {
     CHECK(!def.binaural && def.maxObjects == 48 && def.cpuBudgetPercent == 25 && std::wcscmp(def.hrtf, kDefaultHrtfName) == 0);
     CHECK(std::fabs(HeadRadiusFromCircumferenceCm(57.0f) - 0.0907f) < 1e-3f);
     CHECK(HeadRadiusFromCircumferenceCm(10.0f) >= 0.06f && HeadRadiusFromCircumferenceCm(100.0f) <= 0.12f);
+    // The ITD radius: the default circumference plays the set's own timing (scale exactly 1, whatever its fitted radius);
+    // other sizes scale it by the circumference ratio; clamps as the key's range and the renderer's.
+    CHECK(PilotItdRadiusM(0.0875f, 57.0f) == 0.0875f && PilotItdRadiusM(0.0912f, 57.0f) == 0.0912f);
+    CHECK(std::fabs(PilotItdRadiusM(0.0875f, 60.0f) / 0.0875f - 60.0 / 57.0) < 1e-6);
+    CHECK(std::fabs(PilotItdRadiusM(0.0875f, 30.0f) / 0.0875f - 48.0 / 57.0) < 1e-6);
+    CHECK(PilotItdRadiusM(0.115f, 66.0f) == 0.12f && PilotItdRadiusM(0.0f, 57.0f) == 0.0875f);
+    CHECK(HeadScaleFromCircumferenceCm(std::nanf("")) == 1.0);
     std::uint32_t m = 99;
     CHECK(ParseExcludeContexts(L"", &m) && m == 0);
     CHECK(ParseExcludeContexts(L" 1, 3 ,5", &m) && m == ((1u << 1) | (1u << 3) | (1u << 5)));

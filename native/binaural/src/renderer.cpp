@@ -164,8 +164,12 @@ struct Renderer::Impl {
         const float pw = nearOn ? ParallaxWeight(r) : 0.0f;
         const float scale = radius / set->datasetHeadRadiusM;
         if (pw > 0.0f) {
+            // Each ear's filter is looked up from that ear (at +-radius on z). Closer than two head radii the ear offset
+            // shrinks to 0 at one radius: a source at or inside the head radius (allowed down to kMinDistanceM) would
+            // otherwise be seen by the near ear from the far side (filter flipped 180 degrees, ITD and ILD gone).
+            const float inside = std::clamp((r - radius) / radius, 0.0f, 1.0f);
             for (int e = 0; e < 2; ++e) {
-                const float ez = (e == 0 ? -radius : radius) * pw;
+                const float ez = (e == 0 ? -radius : radius) * pw * inside;
                 float v[3] = {dir[0] * r, dir[1] * r, dir[2] * r - ez};
                 const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
                 if (len > 1e-6f) {
