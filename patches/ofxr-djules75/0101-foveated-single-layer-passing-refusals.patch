@@ -1,0 +1,225 @@
+Foveated single layer (0099): a composition refused for a reason that passes no longer turns the single layer off for
+the session (bugfix round 0.7, round 3). 0099 latched `foveated_composer_failed` on every refusal, including the
+composer's 250 ms wait for a slot still on the GPU after one long stall (or a refused call): the focus line and the
+flicker of the two-layer submission then came back until DCS restarted. Now such a frame goes down as its two layers
+(and so does a repeat of it: the composed image went back unwritten, but no frame names it) and the next fresh
+submission composes again. Only what cannot be undone still latches: the composer or the composed swapchain cannot
+be made, the image cannot be acquired, waited for (it stays acquired) or released. Flight log: foveated_mode
+result=4 a=2 b=5 (c the refusals so far), written when the state changes, so a run of refusals is one record and the
+return to composing (a=1) one more. Tests only: XRFG_TEST_FOVEATED_COMPOSE_REFUSALS=<n> refuses compositions 10 to
+10 + n - 1; new test xrfg_layer_two_layers_deep_hold_composed_refused (alone): the refused frames go as two layers,
+composed frames follow them, the log has the refusal record and composing twice.
+
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1914,6 +1914,15 @@
+     std::uint64_t composed_gpu_sum_us{};
+     std::uint64_t composed_gpu_max_us{};
+     std::uint64_t composed_gpu_count{};
++    // DCS Control (0101): compositions refused for a reason that passes (the
++    // composer's slot wait, a refused call): that frame went down as two
++    // layers and the next one composes again. Counted for the log's detail.
++    std::uint64_t composed_refusals{};
++    // DCS Control (0101): tests only (XRFG_TEST_FOVEATED_COMPOSE_REFUSALS=<n>,
++    // read at the session's creation): compositions 10 to 10 + n - 1 are
++    // refused as a timed-out slot wait would be.
++    std::uint32_t test_compose_refusals{};
++    std::uint64_t composed_attempts{};
+     std::filesystem::path cursor_templates_directory;
+     std::mutex cursor_templates_mutex;
+     std::optional<xrfg::CursorTemplateSet> cursor_templates;
+@@ -6995,6 +7004,13 @@
+     // test_leader_unwritten.
+     state->test_leader_unwritten =
+         GetEnvironmentVariableW(L"XRFG_TEST_LEADER_UNWRITTEN", nullptr, 0) != 0;
++    {
++        // DCS Control (0101): see SessionState::test_compose_refusals.
++        wchar_t refusals[16]{};
++        if (GetEnvironmentVariableW(L"XRFG_TEST_FOVEATED_COMPOSE_REFUSALS", refusals, 16) != 0) {
++            state->test_compose_refusals = static_cast<std::uint32_t>(std::max(0, _wtoi(refusals)));
++        }
++    }
+     state->cadence_accountable_enabled = !dispatch->steamvr_runtime &&
+         xrfg::implicit_layer::read_cadence_accountable(current_layer_directory());
+     // DCS Control (0034): adaptive at the shallow depth, starting in 2X, on a
+@@ -10196,20 +10212,38 @@
+                 }
+             }
+         }
+-        const HRESULT composed_result = session.foveated_composer->compose(queue,
+-            {session.composed_images[index], session.composed_width, session.composed_height},
+-            std::span<const xrfg::D3D12FoveatedComposeView>(views.data(), view_count));
++        const std::uint64_t attempt = session.composed_attempts++;
++        const HRESULT composed_result =
++            attempt >= 10 && attempt < 10 + static_cast<std::uint64_t>(session.test_compose_refusals)
++            ? HRESULT_FROM_WIN32(WAIT_TIMEOUT) // DCS Control (0101): tests only
++            : session.foveated_composer->compose(queue,
++                  {session.composed_images[index], session.composed_width, session.composed_height},
++                  std::span<const xrfg::D3D12FoveatedComposeView>(views.data(), view_count));
+         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+         const XrResult released = with_runtime_entry(&session, [&] {
+             return dispatch->release_swapchain_image(composed, &release_info);
+         });
+-        if (FAILED(composed_result) || XR_FAILED(released)) {
+-            // The image went back unwritten: this frame and every later one go
+-            // down as two layers, so no repeat names it.
++        if (XR_FAILED(released)) {
++            // The image may still be acquired: the swapchain is out of use for
++            // the session, every later frame goes down as two layers.
+             session.foveated_composer_failed = true;
+             note_single_layer(session, 2, 3);
+             return false;
+         }
++        if (FAILED(composed_result)) {
++            // DCS Control (0101): a refusal that passes (a slot still on the
++            // GPU past the composer's 250 ms wait after a stall, a refused
++            // call). The image went back unwritten, but this frame does not
++            // name it: it goes down as its two layers, and so does a repeat of
++            // it. The next fresh submission composes again (it acquires the
++            // next image and writes it before naming it). Logged when the
++            // state changes (result=4 a=2 b=5, c the refusals so far), so a
++            // run of refusals is one record and the return to composing one
++            // more. 0099 latched the single layer off for the session here.
++            ++session.composed_refusals;
++            note_single_layer(session, 2, 5, session.composed_refusals);
++            return false;
++        }
+         // The frame now: the periphery's projection layer on the composed
+         // swapchain, the focus layer gone.
+         for (std::size_t v = 0; v < view_count; ++v) {
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -817,6 +817,14 @@
+ std::atomic<std::uint32_t> g_composed_alpha_wrong{0};
+ std::atomic<std::uint32_t> g_composed_two_layer_private{0};
+ std::atomic<std::uint32_t> g_composed_two_layer_before{0};
++// DCS Control (0101): XRFG_TEST_FOVEATED_COMPOSE_REFUSALS=<n> (read by the
++// layer too: its compositions 10 to 10 + n - 1 are refused as a timed-out slot
++// wait). Those frames go down as their two layers (counted in
++// g_composed_two_layer_private, allowed then), and composing must come back
++// after them (g_composed_after_two_layer): a refusal that passes no longer
++// turns the single layer off for the session.
++std::uint32_t g_composed_refusals_expected = 0;
++std::atomic<std::uint32_t> g_composed_after_two_layer{0};
+ 
+ [[nodiscard]] bool is_application_swapchain(XrSwapchain swapchain) {
+     return swapchain == g_application_swapchain ||
+@@ -3296,6 +3304,9 @@
+     if (g_two_layer_composed && count == 1 && layers[0]->views != nullptr && layers[0]->viewCount != 0 &&
+         layers[0]->views[0].subImage.swapchain == g_composed_swapchain) {
+         g_composed_frames.fetch_add(1, std::memory_order_relaxed);
++        if (g_composed_two_layer_private.load(std::memory_order_relaxed) != 0) {
++            g_composed_after_two_layer.fetch_add(1, std::memory_order_relaxed); // 0101
++        }
+         bool shape_ok = layers[0]->viewCount == 2 && layers[0]->layerFlags == 0 && g_composed_array == 2;
+         for (std::uint32_t view = 0; shape_ok && view < layers[0]->viewCount; ++view) {
+             const XrSwapchainSubImage& sub = layers[0]->views[view].subImage;
+@@ -3572,6 +3583,12 @@
+             GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS", nullptr, 0) != 0; // 0094
+         g_two_layer_composed =
+             GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_COMPOSED", nullptr, 0) != 0; // 0099
++        {
++            char refusals[16]{};
++            if (GetEnvironmentVariableA("XRFG_TEST_FOVEATED_COMPOSE_REFUSALS", refusals, sizeof(refusals)) != 0) {
++                g_composed_refusals_expected = static_cast<std::uint32_t>(std::max(0, std::atoi(refusals))); // 0101
++            }
++        }
+     }
+     const int result = call_chain_main(argc, argv);
+     if (!g_two_layer_mode) {
+@@ -3622,14 +3639,22 @@
+                   << ", alpha checked " << g_composed_alpha_checked.load() << " not 255 "
+                   << g_composed_alpha_wrong.load() << "; two layers on private swapchains before the first "
+                   << "composed frame " << g_composed_two_layer_before.load() << ", after it "
+-                  << g_composed_two_layer_private.load() << '\n';
++                  << g_composed_two_layer_private.load() << "; refusals asked " << g_composed_refusals_expected
++                  << ", composed frames after a two-layer one " << g_composed_after_two_layer.load() << '\n';
+         if (result != EXIT_SUCCESS) {
+             return result;
+         }
++        // DCS Control (0101): with refusals, their frames (and repeats of them)
++        // go down as two layers, and composing comes back after them.
++        const std::uint32_t two_after = g_composed_two_layer_private.load();
++        const bool refusals_ok = g_composed_refusals_expected == 0
++            ? two_after == 0
++            : two_after >= 1 && two_after <= g_composed_refusals_expected * 4 &&
++                g_composed_after_two_layer.load() != 0;
+         if (frames == 0 || g_composed_frames.load() == 0 || g_composed_synthetics.load() == 0 ||
+             g_composed_creates.load() != 1 || shape != 0 || mixed != 0 || fov != 0 ||
+             g_composed_alpha_checked.load() == 0 || g_composed_alpha_wrong.load() != 0 ||
+-            g_composed_two_layer_private.load() != 0) {
++            !refusals_ok) {
+             std::cerr << "two layers composed: validation failed\n";
+             return EXIT_FAILURE;
+         }
+--- a/tests/layer_two_layers.cmake
++++ b/tests/layer_two_layers.cmake
+@@ -72,6 +72,11 @@
+ if(DEFINED COMPOSED)
+     set(ENV{XRFG_TEST_TWO_LAYER_COMPOSED} "1")
+ endif()
++# DCS Control (0101): REFUSALS=<n>, the layer refuses compositions 10 to
++# 10 + n - 1 as a timed-out slot wait (XRFG_TEST_FOVEATED_COMPOSE_REFUSALS).
++if(DEFINED REFUSALS)
++    set(ENV{XRFG_TEST_FOVEATED_COMPOSE_REFUSALS} "${REFUSALS}")
++endif()
+ if(DEFINED SINGLE_SLOW_MS)
+     set(ENV{XRFG_TEST_TWO_LAYER_SINGLE} "1")
+     set(ENV{XRFG_TEST_SLOW_PRIVATE_CREATE_MS} "${SINGLE_SLOW_MS}")
+@@ -105,6 +110,7 @@
+ set(single_off 0)
+ set(single_refused 0)
+ set(single_made 0)
++set(single_passing 0)
+ foreach(line IN LISTS mode_lines)
+     if(line MATCHES " op=foveated_mode result=1 ")
+         math(EXPR active "${active} + 1")
+@@ -119,6 +125,9 @@
+             math(EXPR single_on "${single_on} + 1")
+         elseif(CMAKE_MATCH_1 EQUAL 0)
+             math(EXPR single_off "${single_off} + 1")
++        elseif(line MATCHES " b=5 ")
++            # 0101: a refusal that passes (the frame went as two layers).
++            math(EXPR single_passing "${single_passing} + 1")
+         elseif(single_on GREATER 0 OR NOT line MATCHES " b=2 ")
+             math(EXPR single_refused "${single_refused} + 1")
+         endif()
+@@ -146,6 +155,16 @@
+ message(STATUS "Two layers '${scenario}': foveated mode active ${active}, not applied ${not_applied}")
+ # DCS Control (0099): composed, the swapchain made once and the state on
+ # without a refusal; otherwise never composed.
++if(DEFINED REFUSALS)
++    # 0101: the refusals logged once per run of them, composing again after.
++    if(single_passing LESS 1 OR single_on LESS 2)
++        message(FATAL_ERROR
++            "foveated single layer: refusals that pass logged ${single_passing}, 'composing' records ${single_on} "
++            "(1 or more, 2 or more expected): ${mode_lines}")
++    endif()
++elseif(single_passing GREATER 0)
++    message(FATAL_ERROR "foveated single layer: a refusal that passes without REFUSALS: ${mode_lines}")
++endif()
+ if(DEFINED COMPOSED)
+     if(NOT single_made EQUAL 1 OR single_on LESS 1 OR NOT single_refused EQUAL 0)
+         message(FATAL_ERROR
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1451,7 +1451,10 @@
+             "2x|dcs-deep-hold|ofxr_bridge_pipelined_deep_hold.ini|-|-"
+             "3x|dcs-triple-deep|ofxr_bridge_triple_deep.ini|pipelined_deep_hold=1|-"
+             "auto|dcs-cadence|ofxr_bridge_adaptive_cadence.ini|-|-"
+-            "opaque|dcs|ofxr_bridge_shallow_pipeline.ini|-|-DOPAQUE=1")
++            "opaque|dcs|ofxr_bridge_shallow_pipeline.ini|-|-DOPAQUE=1"
++            # DCS Control (0101): three compositions refused as a timed-out
++            # slot wait: those frames go as two layers, composing comes back.
++            "refused|dcs-deep-hold|ofxr_bridge_pipelined_deep_hold.ini|-|-DREFUSALS=3")
+         foreach(two_layer_case IN LISTS two_layer_composed_cases)
+             string(REPLACE "|" ";" two_layer_fields "${two_layer_case}")
+             list(GET two_layer_fields 0 two_layer_name)
+@@ -2106,6 +2109,7 @@
+         xrfg_layer_two_layers_deep_hold_composed_3x
+         xrfg_layer_two_layers_deep_hold_composed_auto
+         xrfg_layer_two_layers_deep_hold_composed_opaque
++        xrfg_layer_two_layers_deep_hold_composed_refused
+         xrfg_layer_two_layers_deep_hold_release_offset
+         xrfg_layer_adaptive_lazy_slot
+         xrfg_layer_adaptive_frame_gen_cadence_off
