@@ -24,13 +24,13 @@ public sealed class HrirSet
     }
 }
 
-public sealed class HrtfConversionException(string message) : Exception(message);
-
 public sealed record HrtfConversionReport(
     int Directions, int MergedDuplicates, int UnusedDirections, double SampleRate, int Taps, double FittedHeadRadiusM,
     double MinElevationDeg, double MaxElevationDeg, double LargestGapDeg, double FrontGain, IReadOnlyList<string> Warnings);
 
-public sealed record HrtfConversion(byte[] File, HrtfConversionReport Report, double[] DiffuseFieldEqDb, int SpectrumPoints);
+/// <summary>The converted set: the .dcshrtf bytes and the converter's report. Refusals throw
+/// <see cref="DcsVr.Core.HrtfConversionException"/>, the same type the import path (HrtfLibrary, the Audio page) catches.</summary>
+public sealed record HrtfConvertedSet(byte[] File, HrtfConversionReport Report, double[] DiffuseFieldEqDb, int SpectrumPoints);
 
 /// <summary>
 /// SOFA HRIRs -> .dcshrtf (native/binaural/include/hrtf_format.h). Steps, in order:
@@ -54,7 +54,7 @@ public static class HrtfConverter
     public const double SpeedOfSound = 343.0;
     const double MergeDegrees = 0.05;
 
-    public static HrtfConversion Convert(HrirSet set, bool personal, int? taps = null)
+    public static HrtfConvertedSet Convert(HrirSet set, bool personal, int? taps = null)
     {
         // 1. Checks.
         if (!(set.SampleRate >= 44100 && set.SampleRate <= 96000)) throw new HrtfConversionException($"Unsupported sample rate {set.SampleRate:0} Hz (44.1 to 96 kHz).");
@@ -208,7 +208,7 @@ public static class HrtfConverter
         var bytes = DcsHrtfFile.Write(data);
         if (DcsHrtfFile.Validate(bytes) is { } why) throw new HrtfConversionException("The converted file does not validate: " + why + ".");
         var report = new HrtfConversionReport(n, merged, unused, set.SampleRate, outTaps, radius, minEl, maxEl, largestGap, gain, warnings);
-        return new HrtfConversion(bytes, report, eqDb, N);
+        return new HrtfConvertedSet(bytes, report, eqDb, N);
     }
 
     /// <summary>The triangle whose cone holds `d` and its barycentric weights (>= 0, sum 1).</summary>

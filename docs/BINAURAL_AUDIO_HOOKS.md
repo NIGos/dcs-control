@@ -405,7 +405,9 @@ Runs on the render thread (MMCSS). No allocation, locks, logging or file I/O.
    `22050 ≤ rate ≤ 96000` Hz (the range the core supports).
 7. Runtime self-checks: the pan-law check of §5.1, non-finite output of the core (the source is reset and counted), and
    ED's own `render time = %fs exceeded allowed slice` count (`SND_Wasapi+0x2274` increments, `0x201c1`): 3 overruns
-   within 10 s → binaural off for the session (pass-through), log and status bit.
+   within 10 s, each while our own work took half the CPU budget or more of that block or the one before (ED counts
+   anybody's slow block), → binaural off for the session (pass-through), log and status bit; the kill switch off and on,
+   or Binaural back to 1 in the settings, re-arms it (`audio: on (re-armed ...)` / `audio: on (re-enabled ...)`).
 
 Any failure → nothing is patched (or everything is restored in reverse order), log `audio: <id> not found (<why>)` or
 `audio: off (<reason>)`, DCS audio stock.
@@ -472,6 +474,14 @@ Where the implementation differs from or adds to the sections above:
   RePan without a crossfade (the contract refuses only on misuse: frames > 8192, slot out of range, no set).
 - **Binding (§5.3, §6 item 6).** Also requires the 3D weights (1, 0) / (0, 1) of the stereo pair. Channels and rate are
   re-checked every block (a change re-binds). Blocks over 8192 frames pass through.
+- **Two outputs.** ed_sound makes one or two outputs (`num_outputs` 1-2 at `0x1ed44`; the second is options.lua
+  `sound.hp_output`), each an `SND_Wasapi` with its own thread calling P5. One renderer is bound at a time: while it
+  delivered a block within 200 ms another renderer is bound only when the world's 3D sounds play on it. The sim counts,
+  per panner call, the renderer of every 3D sound in a non-2D context (`audsim::Sim::world`); the control thread adopts
+  the busiest one after it led two seconds in a row (`WorldTick`) and binds it once. The other output's blocks then pass
+  through without waking the control thread. Test: `TwoOutputs` (main bound first, and the headphones output first).
+- **Nothing to render with.** ed_sound is patched only when a set is there: the named one or the generic resource
+  (`HrtfReady`); otherwise `audio: off (no HRTF set: ...)` and the four sites stay stock. Test: `NoSetNoHooks`.
 - **Overruns (§6 item 7).** ED's counter is read at renderer - 8 + 0x2274, accepted only when the `lock inc` at P5 +
   0x3e reads `F0 FF 83 74 22 00 00`.
 - **Threads.** The module has its own control thread (`AudioThread`, 20 ms loop): independent of the engine worker

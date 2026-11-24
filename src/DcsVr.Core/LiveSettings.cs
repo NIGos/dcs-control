@@ -241,11 +241,14 @@ public static class LiveSettings
     /// <paramref name="audio"/>: the installed engine payload has the audio part (<see cref="AudioInstalled"/>), for [Audio].
     /// <paramref name="hrtfSets"/>: the personal HRTF sets installed next to the module (<see cref="InstalledHrtfSets"/>);
     /// [Audio] Hrtf naming another one waits, since its file comes only with the next launch. Null: not checked.
-    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null)
+    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null, bool audioOnLive = true)
     {
         if (file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase) && IsAudioKey(key))
             return audio && !(key.Equals("Audio.Hrtf", StringComparison.OrdinalIgnoreCase) && hrtfSets is not null && value is not null
-                && !value.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && !hrtfSets.Contains(value));
+                && !value.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && !hrtfSets.Contains(value))
+                // Turned on when DCS started with it off: live only when nothing it needs waits for the launch (audioOnLive:
+                // no head pose to start in VR, DCS's speaker layout already Stereo). Back on after a live off is live.
+                && !(key.Equals("Audio.Binaural", StringComparison.OrdinalIgnoreCase) && value == "1" && atStart != "1" && !audioOnLive);
         if (file.Equals(QuadFile, StringComparison.OrdinalIgnoreCase))
         {
             var name = key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key;

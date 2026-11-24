@@ -37,9 +37,19 @@ public static partial class Binaural
     public const int MaxContextId = 7;
 
     /// <summary>A valid Hrtf value (binaural_config.h IsValidHrtfName): "default", or 1 to 64 letters, digits, spaces,
-    /// '-', '_' and '.', not starting with '.'; ASCII only, no path separators.</summary>
+    /// '-', '_' and '.', not starting with '.'; ASCII only, no path separators. No space at either end: the module reads
+    /// the ini value trimmed (GetPrivateProfileString), so such a name would ask it for another file.</summary>
     public static bool IsValidHrtfName(string? name) =>
-        !string.IsNullOrEmpty(name) && name.Length <= MaxNameLength && name[0] != '.' && name.All(c => char.IsAsciiLetterOrDigit(c) || c is ' ' or '-' or '_' or '.');
+        !string.IsNullOrEmpty(name) && name.Length <= MaxNameLength && name[0] != '.' && name[0] != ' ' && name[^1] != ' '
+        && name.All(c => char.IsAsciiLetterOrDigit(c) || c is ' ' or '-' or '_' or '.');
+
+    /// <summary>A profile's Hrtf value as the module reads it: null or blank is the generic set, "default" in any case is
+    /// "default" (the module compares it exactly), anything else trimmed (the module reads the ini value trimmed).</summary>
+    public static string NormalizeHrtfName(string? name)
+    {
+        var text = (name ?? "").Trim();
+        return text.Length == 0 || text.Equals(DefaultHrtf, StringComparison.OrdinalIgnoreCase) ? DefaultHrtf : text;
+    }
 
     /// <summary>A name for an imported set from a file name: the characters <see cref="IsValidHrtfName"/> refuses become
     /// '_', spaces at the ends and leading dots go, at most 64 characters; "personal" when nothing is left, and never
@@ -71,7 +81,8 @@ public static partial class Binaural
     public static string? ExcludeContextsValue(string? text) =>
         TryParseExcludeContexts(text, out var mask) && mask != 0 ? string.Join(",", Enumerable.Range(0, MaxContextId + 1).Where(i => (mask & (1u << i)) != 0)) : null;
 
-    /// <summary>The head radius the module derives (binaural_config.h HeadRadiusFromCircumferenceCm), in mm.</summary>
+    /// <summary>The head radius of a circumference (binaural_config.h HeadRadiusFromCircumferenceCm), in mm. The module's
+    /// time difference between the ears is the set's own scaled by circumference / 57 cm (PilotItdRadiusM).</summary>
     public static double HeadRadiusMm(double circumferenceCm) =>
         Math.Clamp(Math.Clamp(double.IsFinite(circumferenceCm) ? circumferenceCm : HeadCircumferenceDefault, HeadCircumferenceMin, HeadCircumferenceMax) / 100 / (2 * Math.PI), .06, .12) * 1000;
 
@@ -104,7 +115,32 @@ public static partial class Binaural
         return "Asked DCS to switch 3D audio off, or back on. It takes about a second.";
     }
 
-    // ---- Does the installed engine module carry the audio part? ------------------------------------------------------
+    // ---- Does the installed engine module carry the audio part, and the generic set? -----------------------------------
+
+    private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Has)> ResourceCache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The payload embeds the generic HRTF set: an RCDATA resource named HRTF_DEFAULT with data in its PE resource
+    /// directory (binaural_config.h kEmbeddedResourceName; native/dcsqvcull embeds native/binaural/data/sadie2_ku100.dcshrtf
+    /// when the build has it). The name alone is also in the module's code, so this reads the resource table. Cached by
+    /// size and time.</summary>
+    public static bool PayloadHasDefaultHrtf(string? payloadPath)
+    {
+        if (payloadPath is null) return false;
+        try
+        {
+            var info = new FileInfo(payloadPath);
+            if (!info.Exists || info.Length > 256L * 1024 * 1024) return false;
+            if (ResourceCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return cached.Has;
+            var has = PeResource.Find(File.ReadAllBytes(info.FullName), PeResource.RcData, "HRTF_DEFAULT") is { Length: > 0 };
+            ResourceCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, has);
+            return has;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>3D audio has a set to render with: the generic one in this build's engine module, or one of the pilot's own.
+    /// Without either, the module never patches DCS's sound engine, and Launch DCS does not deploy 3D audio at all.</summary>
+    public static bool Usable(string? payloadPath, int personalSets) => personalSets > 0 || PayloadHasDefaultHrtf(payloadPath);
+    public const string UnusableReason = "This DCS Control build has no generic HRTF set yet, and you have no set of your own.";
 
     private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Has)> PayloadCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly byte[] EmbeddedMarker = Encoding.Unicode.GetBytes("HRTF_DEFAULT");
@@ -139,6 +175,9 @@ public static partial class Binaural
     ///   audio: running, N sounds, p99 X ms per block, ...; head pose on|off|unused   every 10 s while running
     ///   audio: CPU budget: at most N sounds now (... over budget)   CPU back-off (fewer 3D sounds to stay in the budget)
     ///   audio: CPU budget: at most N sounds now (10 s under half the budget)   back up
+    ///   audio: on (re-enabled ..., HRTF &lt;name&gt;: N directions)   running again on the same binding
+    ///   audio: HRTF &lt;name&gt; not usable (&lt;why&gt;); the default set is used   the pilot's set refused by the module
+    /// A "running," line is written only while sounds were rendered in 3D, so it also means running after an "off".
     /// </summary>
     public static AudioStatus ParseStatus(IEnumerable<string>? moduleLines, bool installed, bool dcsRunning)
     {
@@ -149,7 +188,7 @@ public static partial class Binaural
             if (line.Contains("loader started", StringComparison.Ordinal)) { lines.Clear(); continue; }
             if (line.Contains(" audio: ", StringComparison.Ordinal) || line.StartsWith("audio: ", StringComparison.Ordinal)) lines.Add(line);
         }
-        string? state = null, reason = null, hrtf = null; int? sounds = null, maxNow = null; double? cost = null; bool? pose = null; var backoffs = 0; var switchedOff = false;
+        string? state = null, reason = null, hrtf = null, fallback = null, fallbackWhy = null; int? sounds = null, maxNow = null; double? cost = null; bool? pose = null; var backoffs = 0; var switchedOff = false;
         foreach (var line in lines)
         {
             var text = line[(line.IndexOf("audio: ", StringComparison.Ordinal) + 7)..].Trim();
@@ -161,10 +200,17 @@ public static partial class Binaural
             }
             if (text.StartsWith("on (", StringComparison.Ordinal)) { state = "running"; reason = null; switchedOff = false; }
             if (KillRegex().Match(text) is { Success: true } k) switchedOff = k.Groups[1].Value == "OFF";
-            if (HrtfRegex().Match(text) is { Success: true } h) hrtf = h.Groups[1].Value;
+            if (FallbackRegex().Match(text) is { Success: true } fb) { fallback = fb.Groups[1].Value; fallbackWhy = fb.Groups[2].Value; continue; }
+            if (HrtfRegex().Match(text) is { Success: true } h)
+            {
+                hrtf = h.Groups[1].Value;
+                // Another set picked live after a refused one: that one is in use now.
+                if (!hrtf.Equals(DefaultHrtf, StringComparison.Ordinal)) fallback = fallbackWhy = null;
+            }
             if (text.StartsWith("running,", StringComparison.Ordinal))
             {
-                state ??= "running";
+                // Written only while sounds were rendered in 3D: running, also after an earlier "off" (turned back on live).
+                if (state != "running") { state = "running"; reason = null; }
                 if (SoundsRegex().Match(text) is { Success: true } s) sounds = int.Parse(s.Groups[1].Value, CultureInfo.InvariantCulture);
                 if (P99Regex().Match(text) is { Success: true } c && double.TryParse(c.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var ms)) cost = ms;
                 if (PoseRegex().Match(text) is { Success: true } p) pose = p.Groups[1].Value switch { "on" => true, "off" => false, _ => (bool?)null };
@@ -178,11 +224,12 @@ public static partial class Binaural
         var tail = lines.TakeLast(12).Select(l => l.Trim()).ToArray();
         if (state is null)
             return new("waiting", dcsRunning ? "Waiting for DCS's sound engine." : "Installed for the next DCS start.", Lines: tail);
-        if (state == "off") return new("off", $"Off: {reason}. DCS's own sound plays.", reason, Backoffs: backoffs, Lines: tail);
+        if (state == "off") return new("off", $"Off: {reason}. DCS's own sound plays.", reason, Backoffs: backoffs, Lines: tail) { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy };
         var parts = new List<string> { switchedOff ? "Switched off in flight" : dcsRunning ? "Running" : "Ran at the last DCS start" };
         if (sounds is { } n) parts.Add(n == 1 ? "1 sound" : n + " sounds");
         if (cost is { } t) parts.Add(t.ToString("0.0#", CultureInfo.InvariantCulture) + " ms");
-        return new(switchedOff ? "switched-off" : "running", string.Join(" · ", parts), null, sounds, cost, backoffs, maxNow, switchedOff, hrtf, pose, tail);
+        return new(switchedOff ? "switched-off" : "running", string.Join(" · ", parts), null, sounds, cost, backoffs, maxNow, switchedOff, hrtf, pose, tail)
+            { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy };
 
         static string Inside(string text)
         {
@@ -214,6 +261,7 @@ public static partial class Binaural
     [GeneratedRegex(@"\bp99 (\d+(?:\.\d+)?) ms\b")] private static partial Regex P99Regex();
     [GeneratedRegex(@"^CPU budget: at most (\d+) sounds now\b")] private static partial Regex BudgetRegex();
     [GeneratedRegex(@"^kill switch \([^)]*\): binaural (ON|OFF)\b")] private static partial Regex KillRegex();
+    [GeneratedRegex(@"^HRTF ([\w .-]+?) not usable \((.*)\); the default set is used\s*$")] private static partial Regex FallbackRegex();
 }
 
 /// <summary>3D audio as the module's log has it (<see cref="Binaural.ParseStatus"/>).</summary>
@@ -230,4 +278,76 @@ public sealed record AudioStatus(string State, string Summary, string? Reason = 
     int? MaxObjectsNow = null, bool SwitchedOff = false, string? Hrtf = null, bool? HeadTracking = null, IReadOnlyList<string>? Lines = null)
 {
     public IReadOnlyList<string> Lines { get; init; } = Lines ?? [];
+    /// <summary>The pilot's own set the module refused at the last DCS start (it used the generic one), and why.</summary>
+    public string? HrtfFallback { get; init; }
+    public string? HrtfFallbackReason { get; init; }
+}
+
+/// <summary>Reads one resource's data from a PE image's resource directory (no loading, no execution).</summary>
+public static class PeResource
+{
+    public const int RcData = 10;
+    /// <summary>The data of the first language of resource <paramref name="type"/> / <paramref name="name"/> (a string
+    /// name, compared case-insensitively as Windows does), or null when absent or the image is malformed.</summary>
+    public static byte[]? Find(byte[] image, int type, string name)
+    {
+        try
+        {
+            uint U32(int o) => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(image.AsSpan(o, 4));
+            ushort U16(int o) => System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(o, 2));
+            if (image.Length < 0x40 || U16(0) != 0x5a4d) return null;
+            var pe = (int)U32(0x3c);
+            if (pe < 0 || pe + 24 > image.Length || U32(pe) != 0x4550) return null;
+            var sections = U16(pe + 6); var optSize = U16(pe + 20); var opt = pe + 24;
+            var magic = U16(opt);
+            var dirs = opt + (magic == 0x20b ? 112 : magic == 0x10b ? 96 : -1);
+            if (dirs < opt || dirs + 8 * 3 > image.Length) return null;
+            var rsrcRva = U32(dirs + 8 * 2);
+            if (rsrcRva == 0) return null;
+            var table = opt + optSize;
+            int Offset(uint rva)
+            {
+                for (var i = 0; i < sections; i++)
+                {
+                    var sh = table + 40 * i;
+                    var va = U32(sh + 12); var size = Math.Max(U32(sh + 8), U32(sh + 16)); var raw = U32(sh + 20);
+                    if (rva >= va && rva < va + size) return checked((int)(raw + (rva - va)));
+                }
+                return -1;
+            }
+            var root = Offset(rsrcRva);
+            if (root < 0) return null;
+            // A directory's entry matching an id (name == null) or a string name; returns the offset field.
+            uint? Entry(int dir, int? id, string? text)
+            {
+                int named = U16(dir + 12), ids = U16(dir + 14);
+                for (var i = 0; i < named + ids; i++)
+                {
+                    var e = dir + 16 + 8 * i;
+                    var n = U32(e);
+                    if ((n & 0x80000000) != 0)
+                    {
+                        if (text is null) continue;
+                        var at = root + (int)(n & 0x7fffffff);
+                        var len = U16(at);
+                        if (string.Equals(System.Text.Encoding.Unicode.GetString(image.AsSpan(at + 2, len * 2)), text, StringComparison.OrdinalIgnoreCase)) return U32(e + 4);
+                    }
+                    else if (id is { } want && n == want) return U32(e + 4);
+                }
+                return null;
+            }
+            if (Entry(root, type, null) is not { } t || (t & 0x80000000) == 0) return null;
+            var typeDir = root + (int)(t & 0x7fffffff);
+            if (Entry(typeDir, null, name) is not { } nm || (nm & 0x80000000) == 0) return null;
+            var nameDir = root + (int)(nm & 0x7fffffff);
+            if (U16(nameDir + 12) + U16(nameDir + 14) == 0) return null;
+            var lang = U32(nameDir + 16 + 4);
+            if ((lang & 0x80000000) != 0) return null;
+            var data = root + (int)lang;
+            var dataRva = U32(data); var dataSize = (int)U32(data + 4);
+            var at2 = Offset(dataRva);
+            return at2 < 0 || at2 + dataSize > image.Length ? null : image.AsSpan(at2, dataSize).ToArray();
+        }
+        catch (Exception e) when (e is ArgumentOutOfRangeException or OverflowException or IndexOutOfRangeException) { return null; }
+    }
 }

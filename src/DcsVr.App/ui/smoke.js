@@ -863,6 +863,16 @@ window.runWebSmoke = async function() {
     { const f = path => ui.fields.find(x => x.path === path), why = path => $('why-'+path).hidden ? null : $('why-'+path).textContent;
       const wasDesktop = Boolean(ui.profile.desktop), route = ui.profile.runtime;
       ui.navigate('audio');
+      { // A build without any HRTF set (no generic one, none of the pilot's own): the switch is greyed out and the reason
+        // shown; Import stays the way in. (This host stands for a release, which has the generic set.)
+        const saved = ui.state;
+        ui.sync({...saved, profile: ui.profile, audioUsable: false, sofaImport: true});
+        check('Without any HRTF set 3D audio is greyed out, says why, and Import SOFA stays available',$('input-binauralAudio').disabled && !$('audioNeeds').hidden
+          && $('audioNeeds').textContent.includes('no generic HRTF set') && !$('hrtfImport').disabled);
+        ui.sync({...saved, profile: ui.profile, audioUsable: false, sofaImport: false});
+        check('Without a SOFA converter Import SOFA is greyed out with a reason',$('hrtfImport').disabled && $('hrtfImport').title.includes('cannot convert'));
+        ui.sync({...saved, profile: ui.profile});
+      }
       check('The Audio page is in the rail, named for its content, with an EXPERIMENTAL card and no consent gate',$('nav-audio') && !$('page-audio').hidden && $('pageTitle').textContent === 'Audio'
         && [...$('audioControls').querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL') && !$('audioControls').querySelector('dialog, [role=alertdialog]') && !$('input-binauralAudio').disabled);
       // (The head size itself was set to its range's ends by the number checks above; DcsVr.Tests checks the 57 cm default.)

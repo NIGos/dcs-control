@@ -58,10 +58,15 @@ $output = Join-Path $data 'sadie2_ku100.dcshrtf'
 if ($LASTEXITCODE -ne 0) { throw 'The conversion failed.' }
 
 # Licence and attribution next to the data (Apache-2.0 section 4: the licence, the notice, the statement of changes).
+# The repository carries the Apache-2.0 text as SADIE_II_LICENSE.txt; a licence file in the archive replaces it. Without
+# either, or without the NOTICE, the converted set is removed: it is never kept without its licence.
 $licence = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File | Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING)' })
 if ($licence.Count -ge 1) { Copy-Item -LiteralPath $licence[0].FullName -Destination (Join-Path $data 'SADIE_II_LICENSE.txt') -Force }
-elseif (-not (Test-Path -LiteralPath (Join-Path $data 'SADIE_II_LICENSE.txt'))) {
-    Write-Warning 'The archive carries no licence file: add the Apache-2.0 text as native/binaural/data/SADIE_II_LICENSE.txt before committing.'
+foreach ($required in 'SADIE_II_LICENSE.txt', 'NOTICE') {
+    if (-not (Test-Path -LiteralPath (Join-Path $data $required))) {
+        Remove-Item -LiteralPath $output -Force
+        throw "native/binaural/data/$required is missing: the converted set was removed (it is not kept without its Apache-2.0 licence and notice)."
+    }
 }
 Write-Output "Converted: $output ($((Get-Item -LiteralPath $output).Length) bytes, SHA-256 $((Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()))"
 Write-Output "Record the archive's SHA-256 in `$PinnedSha256 and docs/THIRD_PARTY.md if it is not there yet."

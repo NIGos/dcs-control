@@ -681,8 +681,11 @@ public sealed record VrProfile
     /// default; Launch DCS installs the engine module for it, in its Perception-only mode when Engine Optimizations are off.</summary>
     public bool BinauralAudio { get; init; }
     /// <summary>[Audio] Hrtf: "default" (the generic SADIE II KU100 set embedded in the module) or the name of a set
-    /// imported from the pilot's own SOFA file (<see cref="HrtfLibrary"/>).</summary>
-    public string BinauralHrtf { get; init; } = Binaural.DefaultHrtf;
+    /// imported from the pilot's own SOFA file (<see cref="HrtfLibrary"/>). Any value, also a hand-edited one, is held as
+    /// the module reads it (<see cref="Binaural.NormalizeHrtfName"/>): null or any case of "default" is the generic set, a
+    /// name is trimmed.</summary>
+    public string BinauralHrtf { get => _binauralHrtf; init => _binauralHrtf = Binaural.NormalizeHrtfName(value); }
+    private readonly string _binauralHrtf = Binaural.DefaultHrtf;
     /// <summary>[Audio] HeadCircumferenceCm: the head size the time difference between the ears is scaled to (48 to 66;
     /// 54, 57 and 60 are Small, Medium and Large).</summary>
     public double HeadCircumferenceCm { get; init; } = Binaural.HeadCircumferenceDefault;

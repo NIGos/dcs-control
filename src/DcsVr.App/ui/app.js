@@ -1017,7 +1017,9 @@ function buildFields() {
   const audioOn = usesBinauralAudio;
   c = card('audioControls','<span class="tag">EXPERIMENTAL</span> 3D headphone audio',['Sounds come from where they are: front, back, above. For headphones.','Engines, wingmen, missiles and cockpit switches get a direction you can hear, behind and above you too. Radio and intercom stay as DCS plays them. Works in VR and on a monitor.']);
   needsNote(c,'audioNeeds');
-  field(c,'binauralAudio','3D headphone audio',['Replaces DCS\'s left and right panning with 3D sound.','Distance, doppler and the canopy stay DCS\'s own. It uses a little CPU on DCS\'s sound thread, not the GPU. Its key on the Keys & headset panel page switches it off and on in flight, to compare.'],'toggle');
+  // Without any HRTF set (no generic one in this build, none of the pilot's own) it cannot run: greyed out, the reason
+  // above it (renderAudioNeeds); a profile that has it on can still turn it off.
+  field(c,'binauralAudio','3D headphone audio',['Replaces DCS\'s left and right panning with 3D sound.','Distance, doppler and the canopy stay DCS\'s own. It uses a little CPU on DCS\'s sound thread, not the GPU. Its key on the Keys & headset panel page switches it off and on in flight, to compare.'],'toggle',null,p => state?.audioUsable !== false || Boolean(p.binauralAudio));
   field(c,'headCircumferenceCm','Head size',['Measure around your head, just above the eyebrows and ears.','A tape measure or a piece of string will do. It sets how far apart your ears sound: 57 cm is the average.'],'number',[48,66,.5],audioOn,'cm');
   { const row = document.createElement('div'); row.className = 'inline-actions head-presets'; row.id = 'headPresets';
     row.innerHTML = [['Small',54],['Medium',57],['Large',60]].map(([t,v]) => `<button type="button" class="button quiet" data-head="${v}" aria-label="Head size ${t}, ${v} cm">${t} · ${v} cm</button>`).join('');
@@ -1440,7 +1442,10 @@ function renderHrtfOptions() {
   if (f.input.dataset.options !== html) { f.input.dataset.options = html; f.input.innerHTML = html; }
   f.input.value = options.find(([v]) => v.toLowerCase() === value.toLowerCase())[0];
   const personal = sets.find(s => s.name.toLowerCase() === value.toLowerCase());
-  $('hrtfImport').disabled = busy || !profile.binauralAudio;
+  // Import needs this installation's SOFA converter; it is also the way in when 3D audio has no set at all yet.
+  const canImport = state?.sofaImport !== false;
+  $('hrtfImport').disabled = busy || !canImport || !(profile.binauralAudio || state?.audioUsable === false);
+  $('hrtfImport').title = canImport ? '' : 'This DCS Control cannot convert SOFA files yet.';
   $('hrtfRemove').hidden = !personal; $('hrtfRemove').disabled = busy || !personal;
 }
 /** What the chosen set is, after an import or for the set selected: the conversion report in plain words. */
@@ -1493,7 +1498,8 @@ let hrtfFixture = null;
 function renderAudioNeeds() {
   if (!profile) return;
   const name = String(profile.binauralHrtf || 'default'), missing = name.toLowerCase() !== 'default' && !(state?.hrtfSets || []).some(s => s.name.toLowerCase() === name.toLowerCase());
-  showNeeds('audioNeeds', !profile.binauralAudio ? null : missing ? [`Your HRTF "${name}" is missing, so the generic one is used. Import the SOFA file again, or choose Generic.`,['audioHrtfFix','binauralHrtf','Choose HRTF']] : null, false);
+  const unusable = state?.audioUsable === false ? [`${state.audioUnusableReason || 'There is no HRTF set to render with.'} ${state?.sofaImport === false ? 'It comes with a later DCS Control.' : 'Import your own SOFA file to use it.'}`] : null;
+  showNeeds('audioNeeds', unusable || (!profile.binauralAudio ? null : missing ? [`Your HRTF "${name}" is missing, so the generic one is used. Import the SOFA file again, or choose Generic.`,['audioHrtfFix','binauralHrtf','Choose HRTF']] : null), false);
 }
 let audioTimer, audioSequence = 0, audioStatus = null;
 /** The module's audio lines, read again every 5 s while the page is open. */
@@ -1504,6 +1510,8 @@ async function refreshAudio() {
   catch (error) { if (mine === audioSequence) $('audioStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
   if (page === 'audio' && mine === audioSequence) audioTimer = setTimeout(refreshAudio, 5000);
 }
+/** DCS's speaker layout ids (options.lua sound.main_layout) as its Audio options name them (Binaural.LayoutName). */
+const LAYOUT_NAMES = {'':'Auto', stereo:'Stereo', mono:'Mono', stereo_2_1:'2.1', quadraphonic:'Quadraphonic', suround_5_1:'5.1', surround_5_1:'5.1', suround_7_1:'7.1', surround_7_1:'7.1', spatial_8_1_4_4:'Spatial 8.1.4.4'};
 const AUDIO_STATE = {'not-installed':['Not installed',''], waiting:['Ready: starts with DCS',''], running:['Running','loaded'], 'switched-off':['Switched off',''], off:['Off','failed']};
 function renderAudio() {
   const box = $('audioStatus'); if (!box) return;
@@ -1521,7 +1529,8 @@ function renderAudio() {
   const lines = s?.lines?.length ? `<details class="report-details"><summary>Log lines</summary><pre class="log-lines">${escape(s.lines.join('\n'))}</pre></details>` : '';
   const open = [...box.querySelectorAll('details.report-details')].map(d => d.open);
   box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(s?.summary || 'Select DCS\'s options.lua first.')}</span></div>${pending}`
-    + (profile?.binauralAudio && layout !== undefined && layoutValue !== 'stereo' ? `<p class="pimax-note">DCS's speaker layout is ${layoutValue ? escape(layoutValue) : 'Auto'}. Launch DCS sets it to Stereo while 3D audio is on; Back to stock DCS puts yours back.</p>` : '')
+    + (profile?.binauralAudio && layout !== undefined && layoutValue !== 'stereo' ? `<p class="pimax-note">DCS's speaker layout is ${escape(LAYOUT_NAMES[layoutValue] ?? layoutValue)}. Launch DCS sets it to Stereo while 3D audio is on; Back to stock DCS puts yours back.</p>` : '')
+    + (s?.hrtfFallback ? `<p class="pimax-note">Your HRTF "${escape(s.hrtfFallback)}" could not be used (${escape(s.hrtfFallbackReason || 'refused')}), so the generic one played. Import the SOFA file again.</p>` : '')
     + statusRows(rows, []) + lines
     + `<p class="fine">To compare: ${keyText ? `press <kbd>${escape(keyText)}</kbd> in flight` : 'set a key on the Keys & headset panel page'}, or use the button below. Turn your head while a sound plays behind you.</p>`;
   box.querySelectorAll('details.report-details').forEach((d,i) => { d.open = Boolean(open[i]); });
@@ -1931,6 +1940,7 @@ const CHECK_INFO = {
   'audio-contexts':['3D audio contexts',null], 'audio-hotkey':['3D audio key',{reveal:'audioToggleKey',label:'Change'}], 'audio-hotkey-dcs':['3D audio key',{reveal:'audioToggleKey',label:'Change'}],
   'audio-layout':['DCS speaker layout',{page:'audio',label:'Open'}], 'audio-spatial':['Windows spatial sound in DCS',{page:'audio',label:'Open'}],
   'audio-head-pose':['Follow the head between frames',{reveal:'binauralLateHeadTracking',label:'Open'}], 'audio-status':['3D headphone audio',{page:'audio',label:'Open'}],
+  'audio-unavailable':['3D headphone audio',{page:'audio',label:'Open'}], 'audio-hrtf-refused':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}],
   'audio-backoff':['3D audio CPU budget',{reveal:'binauralCpuBudgetPercent',label:'Open'}],
   'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}], 'quad-vertical-offset':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}], 'quad-offset-gaze':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}],
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],

@@ -192,6 +192,31 @@ public sealed class HrtfConversionException(string message) : Exception(message)
 public sealed class CliHrtfConverter(string? directory = null) : IHrtfConverter
 {
     public static readonly TimeSpan Timeout = TimeSpan.FromMinutes(2);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> Probed = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>This installation's CLI has the converter: <c>DcsVr.Cli hrtf-convert --check</c> exits 0 (the contract's
+    /// probe, docs/BINAURAL_AUDIO.md section 10). Asked once per folder and app run (hidden, below-normal priority, 10 s).
+    /// False while the CLI has no such command, so the Audio page greys out Import SOFA instead of failing.</summary>
+    public static bool IsAvailable(string? directory = null)
+    {
+        var folder = directory ?? AppContext.BaseDirectory;
+        return Probed.GetOrAdd(folder, static f =>
+        {
+            var cli = new[] { "DcsVr.Cli.exe", "DcsVr.Cli" }.Select(n => Path.Combine(f, n)).FirstOrDefault(File.Exists);
+            if (cli is null) return false;
+            try
+            {
+                var start = new ProcessStartInfo(cli) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = Path.GetDirectoryName(cli)! };
+                start.ArgumentList.Add("hrtf-convert"); start.ArgumentList.Add("--check");
+                using var process = Process.Start(start);
+                if (process is null) return false;
+                try { process.PriorityClass = ProcessPriorityClass.BelowNormal; } catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                _ = process.StandardOutput.ReadToEndAsync(); _ = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(TimeSpan.FromSeconds(10))) { try { process.Kill(true); } catch (InvalidOperationException) { } return false; }
+                return process.ExitCode == 0;
+            }
+            catch (Exception e) when (e is IOException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
+        });
+    }
     public HrtfConversion Convert(string sofaPath, string outputPath, string name, CancellationToken cancel = default)
     {
         var folder = directory ?? AppContext.BaseDirectory;

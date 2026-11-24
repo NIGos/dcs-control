@@ -1230,7 +1230,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness,
             // 3D headphone audio: the pilot's own HRTF sets (the generic one is always there), and whether this build has
             // the pupil shift layer that publishes the head pose.
-            hrtfSets = service.Hrtf.List(), headPoseLayer = File.Exists(Path.Combine(service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll")) };
+            hrtfSets = service.Hrtf.List(), headPoseLayer = File.Exists(Path.Combine(service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll")),
+            // Whether 3D audio has a set to render with (the generic one in this build, or one of the pilot's own), and whether
+            // this installation can convert a SOFA file at all: the Audio page greys out what cannot work, with the reason.
+            audioUsable = service.BinauralAudioUsable(), audioUnusableReason = Binaural.UnusableReason, sofaImport = _hrtfConverter is not CliHrtfConverter || CliHrtfConverter.IsAvailable() };
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>
     private object? SavedRuntimeView() => service.SavedRuntime.Current() is { } s

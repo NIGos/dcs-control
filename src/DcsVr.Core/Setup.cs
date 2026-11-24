@@ -72,7 +72,9 @@ public static class Readiness
             Add("engine-dcs-version", CheckState.Warning, "DCS version", "At the last DCS start: " + string.Join(" ", offOnThisBuild));
         // 3D headphone audio: the set picked is still in the library, the head pose has its layer, and what the module said
         // at the last DCS start (it stays off, with DCS's own sound, on anything unexpected).
-        if (profile.UsesBinauralAudio)
+        if (profile.UsesBinauralAudio && !service.BinauralAudioUsable())
+            Add("audio-unavailable", CheckState.Warning, "3D headphone audio", Binaural.UnusableReason + " Launch DCS leaves 3D audio off.");
+        else if (profile.UsesBinauralAudio)
         {
             if (!profile.BinauralHrtf.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && Binaural.IsValidHrtfName(profile.BinauralHrtf) && !service.Hrtf.Contains(profile.BinauralHrtf))
                 Add("audio-hrtf-missing", CheckState.Warning, "3D headphone audio", $"Your HRTF set \"{profile.BinauralHrtf}\" is missing, so the generic one is used. Import the SOFA file again on the Audio page, or choose Generic.");
@@ -84,6 +86,8 @@ public static class Readiness
             {
                 if (audio.State == "off" && audio.Reason is { } reason)
                     Add("audio-status", CheckState.Warning, "3D headphone audio", $"At the last DCS start it stayed off: {reason}. DCS's own sound played.");
+                if (audio.HrtfFallback is { } refused)
+                    Add("audio-hrtf-refused", CheckState.Warning, "3D headphone audio", $"At the last DCS start your HRTF set \"{refused}\" could not be used ({audio.HrtfFallbackReason}), so the generic one played. Import the SOFA file again on the Audio page.");
                 else if (audio.Backoffs > 0)
                     Add("audio-backoff", CheckState.Manual, "3D headphone audio", $"At the last DCS start it rendered fewer sounds in 3D to stay within its CPU budget{(audio.MaxObjectsNow is { } n ? $" (down to {n})" : "")}. Raise CPU budget on the Audio page if your CPU has room, or lower Most 3D sounds.");
             }

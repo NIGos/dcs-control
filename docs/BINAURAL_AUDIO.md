@@ -453,6 +453,25 @@ dataset and PureHDF. Until then the payload has no `HRTF_DEFAULT` resource: with
 "this DCS Control has no SOFA converter yet". `Binaural.PayloadHasAudio` (Live) finds the resource name in the module's
 code either way, so it tells "this payload has the audio module", not "this payload has the set".
 
+Review fixes (`fix/hrtf-audio-review`, on `feat/hrtf-audio`):
+- **No set, nothing deployed.** `Binaural.PayloadHasDefaultHrtf` reads the payload's PE resource table (`PeResource`):
+  the RCDATA `HRTF_DEFAULT` with data. Without it and without a personal set (`Binaural.Usable`), Launch DCS deploys no
+  part of 3D audio (no `[Audio]`, no head pose, no Stereo layout; profile.json keeps the choice), Checks says
+  `audio-unavailable`, and the Audio page greys the switch out with the reason; the module patches ed_sound only when a
+  set loads (`HrtfReady`). `scripts/build-release.ps1` refuses a release without the set, its Apache-2.0 text and its
+  NOTICE (a `-LocalOnly` package warns), and copies both into `licenses/`.
+- **SOFA import offered only with a converter:** `CliHrtfConverter.IsAvailable` asks `DcsVr.Cli hrtf-convert --check`
+  once per run (exit 0 = the converter is there; part of the CLI contract below).
+- **Head size** is relative to the set's own head: the renderer gets `PilotItdRadiusM(set's fitted radius,
+  circumference)` = fit x C / 57 cm (binaural_config.h), so 57 cm plays the set's own timing, whatever head it was
+  measured on, and a set picked live gets its own fit again. (C / 2 pi against a Woodworth fit scaled the reference head's
+  ITDs by about 4 %.)
+- **Inside the head radius** (the module allows 0.05 m) the per-ear parallax offset shrinks to 0 between two radii and
+  one, so the near ear's filter never turns to the far side (harness A7, sweep 0.3 to 0.05 m).
+- **Two DCS outputs**, the overrun stop counted only against our own share and re-armed by the kill switch or Live, a
+  busy settings slot keeping the last good copy, and a control thread that does not stop within 3 s leaving every
+  binding in place: docs/BINAURAL_AUDIO_HOOKS.md section 9.
+
 ## 10. The app side (task D): what the app writes, reads and calls
 
 Implemented on `feat/hrtf-app` (`src/DcsVr.Core/BinauralAudio.cs`, `HrtfLibrary.cs`; the Audio page in `src/DcsVr.App/ui`).
@@ -478,7 +497,10 @@ Tasks A and B match these when they merge; the integrator checks them against th
 **Live:** every field above but `binauralExcludeContexts`, file `DcsQvCull.ini`, only while the installed payload has the
 audio part: the app looks for the UTF-16 resource name `HRTF_DEFAULT` in the installed `DcsQvCullPayload.dll` (task B
 embeds the generic set under that name). `Audio.Hrtf` naming a set not installed at launch waits. `HeadPose.Publish` is
-not a live key (read when DCS starts VR), so turning 3D audio on in VR waits.
+not a live key (read when DCS starts VR), so turning 3D audio on in VR waits: `Audio.Binaural` 0 -> 1 is held back
+(the whole `DcsQvCull.ini` write waits) when DCS started with it off and either the head pose is needed (VR with
+LateHeadTracking) or options.lua's speaker layout is not Stereo yet (`LiveSettings.IsLiveKey`, `audioOnLive`). Back on
+after a live off is live.
 
 **Log lines the app reads** (`Binaural.ParseStatus`; Audio page status, Last flight, Checks), all after the last
 `loader started` of `DcsQvCull.log`, each containing ` audio: `:
@@ -492,6 +514,8 @@ not a live key (read when DCS starts VR), so turning 3D audio on in VR waits.
 | `audio: kill switch (<by>): binaural OFF (...)` / `... binaural ON` | the kill switch (key or flag) |
 | `audio: running, <n> sounds, p99 <x> ms per block, ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D, the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
 | `audio: CPU budget: at most <n> sounds now (... over budget)` | a CPU back-off, down to n sounds (Checks `audio-backoff`); `(10 s under half the budget)` raises it again |
+| `audio: on (re-enabled in the settings, HRTF <name>: <n> directions)` / `audio: on (re-armed by the kill switch ..., ...)` | running again on the same binding (after Binaural=0 live, or after the overrun stop); a later `running,` line also means running |
+| `audio: HRTF <name> not usable (<why>); the default set is used` | the pilot's set was refused by the module: the Audio page and Checks (`audio-hrtf-refused`) say so with the reason |
 
 These are the module's own lines (`native/dcsqvcull/src/main/audio.inc`); the module's `Phrases` test keeps them in the
 source and the app's status test parses them verbatim.
@@ -499,7 +523,8 @@ source and the app's status test parses them verbatim.
 **SOFA converter** (task A), called through the CLI contract `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> --name <name>`
 (`CliHrtfConverter`, hidden, below-normal priority, two-minute limit): exit 0 with the file written is a conversion;
 stdout lines `warning: <text>` are shown in the report and `coverage: <percent>%` as the grid coverage. Any other exit
-is a refusal whose reason is the last stderr line. The app validates the result again with a port of
+is a refusal whose reason is the last stderr line. `DcsVr.Cli hrtf-convert --check` exits 0 when the converter is there
+(the app greys Import SOFA out otherwise). The app validates the result again with a port of
 `hrtf_format.h Validate()` (`HrtfFile.Validate`) and keeps nothing it refuses. `IHrtfConverter` is the seam: task A may
 replace `CliHrtfConverter` with an in-process call. The SOFA file and its folder are never kept; the library keeps the
 `.dcshrtf`, and a sidecar with the SOFA file's name, the import time, the warnings and the coverage.

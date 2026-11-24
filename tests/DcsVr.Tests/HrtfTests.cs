@@ -1,3 +1,4 @@
+using DcsVr.Core;
 using DcsVr.Core.Hrtf;
 
 namespace DcsVr.Tests;

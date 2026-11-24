@@ -6178,6 +6178,30 @@ Test("Small fixes: DST-safe DCS lifetime, Sboys \"1.3\", the SteamVR log read on
 // ---- End-to-end scenarios: a whole fake PC per test (DCS install, Saved Games, OpenXR runtimes, distribution, state) ----
 // Only fixture folders under the test root are written; the guard against a running DCS compares these paths only.
 const string E2eLua = "options = {\n\t[\"graphics\"] = {\n\t\t[\"maxFPS\"] = 120,\n\t\t[\"sync\"] = true,\n\t\t[\"Upscaling\"] = \"TAA\",\n\t\t[\"width\"] = 2560,\n\t\t[\"height\"] = 1440,\n\t\t[\"fullScreen\"] = true,\n\t\t[\"aspect\"] = 1.7777777777778,\n\t},\n\t[\"miscellaneous\"] = {\n\t\t[\"launcher\"] = true,\n\t},\n\t[\"VR\"] = {\n\t\t[\"enable\"] = false,\n\t\t[\"openxr_quadView\"] = false,\n\t\t[\"custom_IPD_enable\"] = true,\n\t\t[\"custom_IPD\"] = 63.5,\n\t},\n}\n";
+// A minimal PE32+ image whose resource directory holds one resource: type `type`, the string name `name`, one language,
+// `data` (Binaural.PayloadHasDefaultHrtf reads the table; nothing is ever loaded).
+byte[] PeWithResource(int type, string name, byte[] data)
+{
+    var image = new byte[0x400];
+    void U16(int o, int v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(o), (ushort)v);
+    void U32(int o, uint v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(o), v);
+    U16(0, 0x5a4d); U32(0x3c, 0x40); U32(0x40, 0x4550);
+    U16(0x44, 0x8664); U16(0x46, 1); U16(0x54, 240);         // machine, one section, optional header size
+    const int opt = 0x58; U16(opt, 0x20b);                   // PE32+
+    U32(opt + 112 + 16, 0x1000); U32(opt + 112 + 20, 0x200); // data directory 2: resources
+    var sh = opt + 240; Encoding.ASCII.GetBytes(".rsrc").CopyTo(image, sh);
+    U32(sh + 8, 0x200); U32(sh + 12, 0x1000); U32(sh + 16, 0x200); U32(sh + 20, 0x200);
+    const int r = 0x200;                                     // resource section: root, type, name directories, data entry, data, name
+    U16(r + 14, 1); U32(r + 16, (uint)type); U32(r + 20, 0x80000000u | 0x18);
+    U16(r + 0x18 + 12, 1); U32(r + 0x18 + 16, 0x80000000u | 0x70); U32(r + 0x18 + 20, 0x80000000u | 0x30);
+    U16(r + 0x30 + 14, 1); U32(r + 0x30 + 16, 0x409); U32(r + 0x30 + 20, 0x48);
+    U32(r + 0x48, 0x1000 + 0xb0); U32(r + 0x48 + 4, (uint)data.Length);
+    U16(r + 0x70, name.Length); Encoding.Unicode.GetBytes(name).CopyTo(image, r + 0x72);
+    data.CopyTo(image, r + 0xb0);
+    return image;
+}
+// The engine payload of a release: the generic HRTF set is a resource in it (build-release.ps1 refuses a build without).
+byte[] PayloadFixture() => PeWithResource(10, "HRTF_DEFAULT", Encoding.ASCII.GetBytes("DHRT (fixture set)"));
 E2eFixture E2e(string name)
 {
     var prefix = "e2e/" + name; var dist = Path.Combine(root, prefix, "dist");
@@ -6189,7 +6213,8 @@ E2eFixture E2e(string name)
         Component(folder + "/CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll", "MZ " + kind + " runtime (fixture)");
     }
     Component("CheekyOpenXRLayer.dll", "MZ cheeky layer (fixture)"); Component("ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll", "MZ ofxr fork (fixture)");
-    Component("dcsqvcull/DcsQvCull.dll", "MZ engine loader (fixture)"); Component("dcsqvcull/DcsQvCullPayload.dll", "MZ engine payload (fixture)"); Component("dcsqvcull/DcsQvCull.lua", "-- engine hook (fixture)");
+    Component("dcsqvcull/DcsQvCull.dll", "MZ engine loader (fixture)"); Component("dcsqvcull/DcsQvCull.lua", "-- engine hook (fixture)");
+    { var payloadFile = Make(prefix + "/dist/components/dcsqvcull/DcsQvCullPayload.dll", ""); File.WriteAllBytes(payloadFile, PayloadFixture()); AtomicFile.WriteText(payloadFile + ".sha256", Hashing.FileSha256(payloadFile)); }
     Component("pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "MZ pupil shift (fixture)");
     var quad = Path.Combine(dist, "components/quadviews"); Directory.CreateDirectory(quad);
     foreach (var file in new[] { "XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "openxr-api-layer.json", "settings.cfg" })
@@ -6861,6 +6886,16 @@ Test("3D audio: the module's log gives the Audio page's status, Last flight and 
     Require(Binaural.ParseStatus([On("default"), "audio: kill switch (toggle_audio.flag): binaural OFF (DCS's own panning)", "audio: kill switch (toggle_audio.flag): binaural ON"], true, true).State == "running", "on again");
     Require(Binaural.ParseStatus([], true, false).State == "waiting" && Binaural.ParseStatus(null, false, false).State == "not-installed", "waiting / not installed");
     Require(LastFlight.ParseAudio(["perf: fps=1"]) is null && LastFlight.ParseAudio(["audio: off (pan law mismatch)"]) is { State: "off", Reason: "pan law mismatch" }, "Last flight");
+    // Off in the settings, then back on in flight: the module's "on (re-enabled ...)" line, or a later "running," line
+    // (written only while sounds are rendered in 3D), is running again.
+    var back = Binaural.ParseStatus([On("default"), "audio: off (binaural is off in the settings)", "audio: on (re-enabled in the settings, HRTF default: 2562 directions)", Stats(12, "0.2", "on")], true, true);
+    Require(back is { State: "running", Sounds: 12, Hrtf: "default", Reason: null }, back.Summary);
+    Require(Binaural.ParseStatus([On("default"), "audio: off (binaural is off in the settings)", Stats(14, "0.2", "on")], true, true) is { State: "running", Sounds: 14 }, "running after off");
+    // A set of the pilot's that the module refused: said, with the reason, until another set is picked live.
+    string[] refusedLines = ["audio: HRTF My ears not usable (payload checksum); the default set is used", On("default"), Stats(3, "0.1", "on")];
+    var refusedSet = Binaural.ParseStatus(refusedLines, true, true);
+    Require(refusedSet is { State: "running", HrtfFallback: "My ears", HrtfFallbackReason: "payload checksum", Hrtf: "default" }, "refused set");
+    Require(Binaural.ParseStatus([.. refusedLines, "audio: HRTF Spare (crossfading)"], true, true) is { HrtfFallback: null, Hrtf: "Spare" }, "another set picked live");
 });
 Test("3D audio: Launch DCS installs [Audio], the HRTF sets, the head pose and Stereo; Back to stock DCS removes all of it", () =>
 {
@@ -6912,9 +6947,9 @@ Test("3D audio: without the pupil shift layer in the distribution, 3D audio stil
 Test("3D audio Live: every setting is written at once to a module with the audio part; on a monitor even on and off; in VR turning it on waits for the layer", () =>
 {
     var f = E2e("audio-live");
-    // A payload with the audio part carries its generic HRTF as the resource HRTF_DEFAULT (the name in UTF-16).
+    // A payload with the audio part carries its generic HRTF as the resource HRTF_DEFAULT (the E2e fixture's payload).
     var payload = Path.Combine(f.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
-    File.WriteAllBytes(payload, [.. Encoding.ASCII.GetBytes("MZ engine payload (fixture) "), .. Encoding.Unicode.GetBytes("HRTF_DEFAULT")]); File.WriteAllText(payload + ".sha256", Hashing.FileSha256(payload));
+    Require(Binaural.PayloadHasAudio(payload) && Binaural.PayloadHasDefaultHrtf(payload), "the fixture payload has the audio part and the generic set");
     var monitor = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-audio-live", Name = "Audio live", Desktop = true, EngineOptimizations = true, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false });
     var inventory = E2eInventory(f);
     Require(f.Service.SyncApplied(monitor, inventory).Kind == LaunchSyncKind.Applied);
@@ -6942,7 +6977,43 @@ Test("3D audio Live: every setting is written at once to a module with the audio
     var vr = LiveDraft();
     Require(g.Service.SyncApplied(vr, E2eInventory(g)).Kind == LaunchSyncKind.Applied);
     var vrOn = WhileDcsRuns(g, () => g.Service.ApplyLive(vr with { BinauralAudio = true }, E2eInventory(g)));
-    Require(vrOn.Waiting.Contains("binauralAudio"), vrOn.Message);
+    Require(vrOn.Waiting.Contains("binauralAudio") && !vrOn.Written.Any(w => w.EndsWith("DcsQvCull.ini", StringComparison.Ordinal)), "VR: [Audio] Binaural=1 is not written before the head pose can run: " + vrOn.Message);
+    // Turned on in flight when DCS started with it off: live only when nothing it needs is read at launch.
+    Require(!LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.Binaural", "1", null, audioOnLive: false) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.Binaural", "1", "1", audioOnLive: false)
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.Binaural", "0", "1", audioOnLive: false) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.Binaural", "1", null), "Binaural on: waits unless it can start in full; back on after a live off is live");
+    // A monitor with DCS's speaker layout still 7.1: Stereo is written at launch, so turning it on waits too.
+    var h = E2e("audio-live-layout");
+    var layoutInventory = E2eInventory(h) with { DcsSettings = new Dictionary<string, string> { ["sound.main_layout"] = "\"suround_7_1\"" } };
+    Require(h.Service.SyncApplied(monitor, layoutInventory).Kind == LaunchSyncKind.Applied);
+    var layoutOn = WhileDcsRuns(h, () => h.Service.ApplyLive(monitor with { BinauralAudio = true }, layoutInventory));
+    Require(layoutOn.Waiting.Contains("binauralAudio") && layoutOn.Written.Count == 0, "7.1: waits: " + layoutOn.Message);
+});
+Test("3D audio: without any HRTF set (no generic one in the build, none of the pilot's own) nothing of it is deployed, and Checks says why", () =>
+{
+    var f = E2e("audio-noset");
+    var payload = Path.Combine(f.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
+    File.WriteAllBytes(payload, PeWithResource(10, "OTHER", [1, 2, 3])); File.WriteAllText(payload + ".sha256", Hashing.FileSha256(payload));
+    Require(!Binaural.PayloadHasDefaultHrtf(payload) && !f.Service.BinauralAudioUsable(), "no set");
+    var lua = E2eLua.Replace("options = {\n", "options = {\n\t[\"sound\"] = {\n\t\t[\"main_layout\"] = \"suround_7_1\",\n\t},\n"); File.WriteAllText(f.Options, lua);
+    var profile = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-audio-noset", Name = "Audio", QuadViews = QuadProvider.None, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, BinauralAudio = true });
+    var plan = f.Service.Preview(profile, E2eInventory(f));
+    Require(!plan.Files.Any(p => p.Path.EndsWith("DcsQvCull.ini", StringComparison.Ordinal) || p.Path.Contains("pupilshift", StringComparison.OrdinalIgnoreCase) || p.Path.EndsWith("PupilShift.ini", StringComparison.Ordinal))
+        && !plan.Files.Any(p => p.LuaChanges?.Any(c => c.Path.Contains("main_layout", StringComparison.Ordinal)) == true), "no [Audio], no head pose, the speaker layout untouched");
+    Require(Readiness.Check(profile, E2eInventory(f), f.Service).Checks.Any(c => c.Id == "audio-unavailable" && c.State == CheckState.Warning), "Checks: audio-unavailable");
+    // One set of the pilot's own makes it usable (the module renders with it).
+    f.Service.Hrtf.Import(Make("e2e/audio-noset/mine.sofa", "fixture"), "mine", new FixtureHrtfConverter());
+    Require(f.Service.BinauralAudioUsable() && f.Service.Preview(profile with { BinauralHrtf = "mine" }, E2eInventory(f)).Files.Any(p => p.Path.EndsWith("DcsQvCull.ini", StringComparison.Ordinal)), "a personal set: deployed");
+    // The resource reader: the name is matched as Windows does (any case), a damaged image is no resource.
+    var pe = PeWithResource(10, "HRTF_DEFAULT", [9, 8, 7]);
+    Require(PeResource.Find(pe, 10, "hrtf_default") is [9, 8, 7] && PeResource.Find(pe, 3, "HRTF_DEFAULT") is null && PeResource.Find(pe[..0x250], 10, "HRTF_DEFAULT") is null && PeResource.Find([0x4d, 0x5a], 10, "X") is null, "PE resources");
+});
+Test("3D audio: a hand-edited HRTF name is read as the module reads it", () =>
+{
+    Require(JsonData.Deserialize<VrProfile>("{\"binauralHrtf\": null}").BinauralHrtf == Binaural.DefaultHrtf && JsonData.Deserialize<VrProfile>("{\"binauralHrtf\": \"Default\"}").BinauralHrtf == Binaural.DefaultHrtf
+        && JsonData.Deserialize<VrProfile>("{\"binauralHrtf\": \" My ears \"}").BinauralHrtf == "My ears" && (new VrProfile() with { BinauralHrtf = null! }).BinauralHrtf == Binaural.DefaultHrtf, "null, any-case default, spaces");
+    Require(IniFile.Parse(ConfigurationWriters.DcsQvCull(AudioOn() with { BinauralHrtf = "DEFAULT" }).ReplaceLineEndings("\n"))["Audio.Hrtf"] == "default", "written as the module compares it");
+    Require(!Binaural.IsValidHrtfName("abc ") && !Binaural.IsValidHrtfName(" abc") && Binaural.IsValidHrtfName("a b") && Binaural.IsValidHrtfName(Binaural.NameFrom(" padded name ")), "no space at either end");
+    Require(!ProfileValidation.Validate(AudioOn() with { BinauralHrtf = null! }).Any(i => i.Severity == IssueSeverity.Error && i.Code.StartsWith("audio", StringComparison.Ordinal)), "a null name is valid (the generic set)");
 });
 Test("3D audio: the diagnostic package lists the HRTF sets and the module's audio lines, never a SOFA file or its folder", () =>
 {

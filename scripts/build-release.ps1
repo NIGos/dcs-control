@@ -29,6 +29,16 @@ if ($Sign -and -not $AllowDirty) {
             (($sourceChanges | Select-Object -First 10) -join "`n") + "`nCommit them or move them out of the tree, then build again. -AllowDirty builds anyway and the manifest says so.")
     }
 }
+# 3D headphone audio's generic HRTF set (native/binaural/data, made by scripts/fetch-hrtf.ps1) is what pilots without a
+# SOFA file of their own hear: a release without it would offer 3D audio that cannot run. Its Apache-2.0 licence and
+# NOTICE go with it (section 4). A -LocalOnly package may lack it (the app then greys 3D audio out and says why).
+$hrtfData = Join-Path $workspaceRoot 'native/binaural/data'
+$hrtfMissing = @('sadie2_ku100.dcshrtf', 'SADIE_II_LICENSE.txt', 'NOTICE') | Where-Object { -not (Test-Path -LiteralPath (Join-Path $hrtfData $_)) }
+if ($hrtfMissing) {
+    $hrtfWhy = "native/binaural/data lacks $($hrtfMissing -join ', ') (scripts/fetch-hrtf.ps1 makes the generic HRTF set)"
+    if (-not $LocalOnly) { throw "$hrtfWhy`: a release needs the generic HRTF set and its licence. -LocalOnly builds without 3D audio's set." }
+    Write-Warning "$hrtfWhy`: this local package has no generic HRTF set; 3D audio is greyed out in it."
+}
 $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
@@ -223,6 +233,12 @@ Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Mi
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/ThirdPartyNotices.txt') -Destination (Join-Path $payloadRoot 'licenses/WIL-ThirdPartyNotices.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/cheeky/licenses') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-dependencies') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/sboys/LICENCE.md') -Destination (Join-Path $payloadRoot 'licenses/Sboys-GPL-2.0.md') -Force
+# The generic HRTF set embedded in the engine payload (SADIE II, Apache-2.0): its licence and its NOTICE (attribution and
+# the changes made), checked present above.
+if (Test-Path -LiteralPath (Join-Path $hrtfData 'sadie2_ku100.dcshrtf')) {
+    Copy-Item -LiteralPath (Join-Path $hrtfData 'SADIE_II_LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/SADIE-II-Apache-2.0.txt') -Force
+    Copy-Item -LiteralPath (Join-Path $hrtfData 'NOTICE') -Destination (Join-Path $payloadRoot 'licenses/SADIE-II-NOTICE.txt') -Force
+}
 $presets = & $dotnet (Join-Path $payloadRoot 'DcsVr.Cli.dll') presets
 if ($LASTEXITCODE -ne 0 -or -not $presets) { throw 'Preset export failed.' }
 $presets | Set-Content -LiteralPath (Join-Path $payloadRoot 'profiles/presets.json') -Encoding utf8
