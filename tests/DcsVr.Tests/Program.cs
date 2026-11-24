@@ -47,6 +47,8 @@ var skipped = new List<(string Test, string Reason)>(); var currentTest = "";
 void Skip(string reason) { skipped.Add((currentTest, reason)); Console.WriteLine("SKIP " + currentTest + ": " + reason); }
 void Test(string name, Action action) => tests.Add((name, action));
 void Require(bool value, string message = "Assertion failed") { if (!value) throw new Exception(message); }
+// Binaural audio: the SOFA -> .dcshrtf converter (HrtfTests.cs).
+DcsVr.Tests.HrtfTests.Register(Test, Require, workspace);
 void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new Exception("Expected " + typeof(T).Name); }
 string DeferredOfxr = Path.Combine(workspace, "artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll");
 string Make(string relative, string text) { var path = PathPolicy.UnderRoot(root, relative); AtomicFile.WriteText(path, text); return path; }
