@@ -134,6 +134,7 @@ struct Renderer::Impl {
     std::atomic<const HrtfSet*> inUse{nullptr};
     std::atomic<const HrtfSet*> trying{nullptr};
     std::atomic<float> headRadius{kDefaultHeadRadiusM};
+    std::atomic<float> earRadius{kDefaultHeadRadiusM};
     std::atomic<bool> nearField{true};
     std::vector<const HrtfSet*> owned;  // control thread only
 
@@ -142,8 +143,10 @@ struct Renderer::Impl {
     bool inBlock = false;
     unsigned int csr = 0;
     LARGE_INTEGER t0{};
-    float radius = kDefaultHeadRadiusM;
+    float radius = kDefaultHeadRadiusM;     // ITD radius (delay scale)
+    float earR = kDefaultHeadRadiusM;       // ear positions (near-field parallax)
     bool nearOnBlock = true;
+    float nearMix = 1.0f;                   // 0 (near field off) .. 1 (on), faded over kNearFieldFadeS
 
     // stats (written by the audio thread, read anywhere)
     std::atomic<std::uint64_t> blocks{0}, renders{0}, filterCrossfades{0}, hrtfSwaps{0}, nonFinite{0}, rejected{0},
@@ -161,15 +164,16 @@ struct Renderer::Impl {
     }
 
     void Targets(Slot& s, const float dir[3], float r, bool nearOn, EarTarget t[2]) const {
-        const float pw = nearOn ? ParallaxWeight(r) : 0.0f;
+        const float pw = nearOn ? ParallaxWeight(r) * nearMix : 0.0f;
         const float scale = radius / set->datasetHeadRadiusM;
         if (pw > 0.0f) {
-            // Each ear's filter is looked up from that ear (at +-radius on z). Closer than two head radii the ear offset
-            // shrinks to 0 at one radius: a source at or inside the head radius (allowed down to kMinDistanceM) would
-            // otherwise be seen by the near ear from the far side (filter flipped 180 degrees, ITD and ILD gone).
-            const float inside = std::clamp((r - radius) / radius, 0.0f, 1.0f);
+            // Each ear's filter is looked up from that ear (at +-earR on z: the head's real radius, not the ITD radius,
+            // which is a fit of the set's delays and larger). Closer than two head radii the ear offset shrinks to 0 at
+            // one radius: a source at or inside the head radius (allowed down to kMinDistanceM) would otherwise be seen
+            // by the near ear from the far side (filter flipped 180 degrees, ITD and ILD gone).
+            const float inside = std::clamp((r - earR) / earR, 0.0f, 1.0f);
             for (int e = 0; e < 2; ++e) {
-                const float ez = (e == 0 ? -radius : radius) * pw * inside;
+                const float ez = (e == 0 ? -earR : earR) * pw * inside;
                 float v[3] = {dir[0] * r, dir[1] * r, dir[2] * r - ez};
                 const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
                 if (len > 1e-6f) {
@@ -198,7 +202,7 @@ struct Renderer::Impl {
         for (int e = 0; e < 2; ++e) {
             t[e].delay = std::clamp(t[e].delay + kFdLatency, kFdLatency, maxDelay);
             const float cosEar = e == 0 ? -dir[2] : dir[2];
-            t[e].shelf = (nearOn && r < kNearFieldM) ? std::pow(10.0f, NearFieldShelfDb(cosEar, r) / 20.0f) : 1.0f;
+            t[e].shelf = (nearOn && r < kNearFieldM) ? std::pow(10.0f, NearFieldShelfDb(cosEar, r) * nearMix / 20.0f) : 1.0f;
         }
     }
 
@@ -277,11 +281,16 @@ bool Renderer::Init(const Config& config, char* error, std::size_t errorCapacity
     m.cfg = config;
     float radius = config.headRadiusM == 0.0f ? kDefaultHeadRadiusM : config.headRadiusM;
     if (!std::isfinite(radius)) radius = kDefaultHeadRadiusM;
-    radius = std::clamp(radius, 0.06f, 0.12f);
+    radius = std::clamp(radius, kMinItdRadiusM, kMaxItdRadiusM);
     m.headRadius.store(radius);
     m.radius = radius;
+    float ear = config.earRadiusM == 0.0f || !std::isfinite(config.earRadiusM) ? kDefaultHeadRadiusM : config.earRadiusM;
+    ear = std::clamp(ear, kMinEarRadiusM, kMaxEarRadiusM);
+    m.earRadius.store(ear);
+    m.earR = ear;
     m.nearField.store(config.nearField);
     m.nearOnBlock = config.nearField;
+    m.nearMix = config.nearField ? 1.0f : 0.0f;
 
     const int force = g_forceKernels.load();
     const bool avx = kernels::CpuHasAvx2Fma();
@@ -341,12 +350,15 @@ const HrtfSet* Renderer::TakeRetiredHrtf() {
 
 void Renderer::SetHeadRadius(float metres) {
     if (!std::isfinite(metres)) return;
-    impl_->headRadius.store(std::clamp(metres, 0.06f, 0.12f));
+    impl_->headRadius.store(std::clamp(metres, kMinItdRadiusM, kMaxItdRadiusM));
+}
+void Renderer::SetEarRadius(float metres) {
+    if (!std::isfinite(metres)) return;
+    impl_->earRadius.store(std::clamp(metres, kMinEarRadiusM, kMaxEarRadiusM));
 }
 void Renderer::SetNearField(bool on) { impl_->nearField.store(on); }
 
 void Renderer::BeginBlock(std::uint32_t frames) {
-    (void)frames;
     Impl& m = *impl_;
     if (!m.block) return;
     if (!m.inBlock) {
@@ -373,7 +385,13 @@ void Renderer::BeginBlock(std::uint32_t frames) {
     }
     m.trying.store(nullptr);
     m.radius = m.headRadius.load(std::memory_order_relaxed);
-    m.nearOnBlock = m.nearField.load(std::memory_order_relaxed);
+    m.earR = m.earRadius.load(std::memory_order_relaxed);
+    {
+        const float target = m.nearField.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+        const float step = std::min(1.0f, static_cast<float>(frames) / (kNearFieldFadeS * static_cast<float>(m.cfg.sampleRate)));
+        m.nearMix = target > m.nearMix ? std::min(target, m.nearMix + step) : std::max(target, m.nearMix - step);
+        m.nearOnBlock = m.nearMix > 0.0f;
+    }
 }
 
 void Renderer::EndBlock() {

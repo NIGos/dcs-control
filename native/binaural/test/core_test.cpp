@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "binaural_config.h"
 #include "binaural_core.h"
 #include "dsp.h"
 #include "hrtf_format.h"
@@ -100,7 +101,7 @@ struct Rig {
     std::uint32_t rate = 48000;
     bool ok = false;
     Rig(const std::vector<std::uint32_t>& file, std::uint32_t deviceRate, float radius = 0.0875f, bool nearField = true,
-        std::uint32_t maxSources = 64)
+        std::uint32_t maxSources = 64, float earRadius = 0.0f)
         : rate(deviceRate) {
         char err[128];
         set = LoadHrtf(file.data(), file.size() * 4, deviceRate, err, sizeof(err));
@@ -112,6 +113,7 @@ struct Rig {
         c.sampleRate = deviceRate;
         c.maxSources = maxSources;
         c.headRadiusM = radius;
+        c.earRadiusM = earRadius;
         c.nearField = nearField;
         if (!r.Init(c, err, sizeof(err))) {
             std::printf("Init failed: %s\n", err);
@@ -413,7 +415,11 @@ static double BandRatioDb(const Vec& out, const Vec& in, double fs, double lo, d
     const auto ma = dsp::Magnitude(a.data(), n, n), mb = dsp::Magnitude(b.data(), n, n);
     return Db(dsp::BandEnergy(ma, n, fs, lo, hi)) - Db(dsp::BandEnergy(mb, n, fs, lo, hi));
 }
-static void TestFrontEnergy(const std::vector<std::uint32_t>& file, std::uint32_t rate, const char* label) {
+// `measured`: a measured set (A14), whose two ears differ at the front (the KU100's right ear is 1 dB louder there and
+// its spectra differ): the converter normalises their mean, so that is held to +-0.5 dB, each ear to +-1 dB, and the
+// rendered difference between the ears to the set's own front IRs' (+-0.2 dB). A synthetic set is symmetric: each ear
+// +-0.5 dB and identical ears.
+static void TestFrontEnergy(const std::vector<std::uint32_t>& file, std::uint32_t rate, const char* label, bool measured = false) {
     Rig rig(file, rate);
     CHECK(rig.ok);
     if (!rig.ok) return;
@@ -421,6 +427,21 @@ static void TestFrontEnergy(const std::vector<std::uint32_t>& file, std::uint32_
     const Vec out = RenderStatic(rig.r, 0, FromAzEl(0, 0), 3.0f, noise, 480);
     const Vec L = Channel(out, 0), R = Channel(out, 1);
     const double gl = BandRatioDb(L, noise, rate, 100, 16000, 512), gr = BandRatioDb(R, noise, rate, 100, 16000, 512);
+    if (measured) {
+        const double mean = Db(0.5 * (std::pow(10.0, gl / 10.0) + std::pow(10.0, gr / 10.0)));
+        const HrtfSet& s = *rig.set;
+        std::uint32_t f = 0;
+        for (std::uint32_t i = 0; i < s.directions; ++i) if (s.dir[i * 3] > s.dir[f * 3]) f = i;
+        const std::size_t N = 1024;
+        const double setIld = Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, 1), s.taps, N), N, rate, 100, 16000)) -
+                              Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, 0), s.taps, N), N, rate, 100, 16000));
+        std::printf("A5 front energy %s @%u Hz: left %+.3f dB, right %+.3f dB, mean %+.3f dB (limits +-1, +-1, +-0.5); right - left %+.3f dB, the set's front IRs %+.3f dB (+-0.2)\n",
+                    label, rate, gl, gr, mean, gr - gl, setIld);
+        CHECKM(std::fabs(gl) <= 1.0 && std::fabs(gr) <= 1.0 && std::fabs(mean) <= 0.5, "left %.3f right %.3f mean %.3f", gl, gr, mean);
+        CHECKM(std::fabs((gr - gl) - setIld) <= 0.2, "rendered %.3f set %.3f", gr - gl, setIld);
+        ReleaseHrtf(rig.set);
+        return;
+    }
     std::printf("A5 front energy %s @%u Hz: left %+.3f dB, right %+.3f dB (limit +-0.5)\n", label, rate, gl, gr);
     CHECKM(std::fabs(gl) <= 0.5 && std::fabs(gr) <= 0.5, "left %.3f right %.3f", gl, gr);
     double diff = 0.0, peak = 0.0;
@@ -429,7 +450,9 @@ static void TestFrontEnergy(const std::vector<std::uint32_t>& file, std::uint32_
     CHECK(diff <= 1e-5 * std::max(peak, 1.0));
     ReleaseHrtf(rig.set);
 }
-static void TestFrontBack(const std::vector<std::uint32_t>& file, const char* label) {
+// `minDb`: the front/back difference the set must have; SADIE II's KU100 has 2.4 dB in 2-8 kHz (A14 asks 2), the
+// synthetic set's back shelf more (3).
+static void TestFrontBack(const std::vector<std::uint32_t>& file, const char* label, double minDb = 3.0) {
     Rig rig(file, 48000);
     CHECK(rig.ok);
     if (!rig.ok) return;
@@ -454,8 +477,8 @@ static void TestFrontBack(const std::vector<std::uint32_t>& file, const char* la
         set += 0.5 * (Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(f, ear), s.taps, N), N, 48000, 2000, 8000)) -
                       Db(dsp::BandEnergy(dsp::Magnitude(s.Ir(b, ear), s.taps, N), N, 48000, 2000, 8000)));
     }
-    std::printf("A6 front/back 2-8 kHz %s: rendered %.2f dB, set %.2f dB (>= 3, +-1)\n", label, rendered, set);
-    CHECK(rendered >= 3.0);
+    std::printf("A6 front/back 2-8 kHz %s: rendered %.2f dB, set %.2f dB (>= %.0f, +-1)\n", label, rendered, set, minDb);
+    CHECK(rendered >= minDb);
     CHECK(std::fabs(rendered - set) <= 1.0);
     ReleaseHrtf(rig.set);
 }
@@ -1029,11 +1052,58 @@ static void TestDefaultData() {
     if (!v.header) return;
     std::printf("A14 default set: %u directions, %u taps @ %u Hz, fitted head radius %.4f m, '%s'\n", v.header->directionCount,
                 v.header->taps, v.header->sampleRate, v.header->datasetHeadRadiusM, v.header->name);
-    CHECK(v.header->directionCount == 8802);
-    CHECK(v.header->datasetHeadRadiusM >= 0.08f && v.header->datasetHeadRadiusM <= 0.095f);
-    TestFrontEnergy(file, 48000, "(default set)");
-    TestFrontBack(file, "(default set)");
+    // 8,802 measurements, 99 of them repeats of a direction already measured (merged by the converter).
+    CHECK(v.header->directionCount == 8703);
+    // The Woodworth fit of the KU100's onset delays (largest ITD about 0.89 ms): 0.119 m, above the head's geometric
+    // radius as every fit of measured onsets is. Head size scales it relative to itself (PilotItdRadiusM), unclamped
+    // over the whole 48-66 cm range.
+    CHECK(v.header->datasetHeadRadiusM >= 0.10f && v.header->datasetHeadRadiusM <= 0.13f);
+    CHECK(binaural_config::PilotItdRadiusM(v.header->datasetHeadRadiusM, 66.0f) <= kMaxItdRadiusM &&
+          std::fabs(binaural_config::PilotItdRadiusM(v.header->datasetHeadRadiusM, 66.0f) / v.header->datasetHeadRadiusM - 66.0 / 57.0) < 1e-5);
+    TestFrontEnergy(file, 48000, "(default set)", true);
+    TestFrontBack(file, "(default set)", 2.0);
     TestLatency(file, 48000, {480});
+    // Near field on the real set at the smallest, default and largest head: the ITD radius is the set's fit scaled by
+    // the head size, the ears sit on the real head (C / 2 pi). Turning the near field on for a source at 0.3 m is as
+    // smooth as A10 asks (-60 dBFS), and each ear's filter is looked up from the real ear position.
+    for (const float cm : {48.0f, 57.0f, 66.0f}) {
+        const float itd = binaural_config::PilotItdRadiusM(v.header->datasetHeadRadiusM, cm);
+        const float ear = binaural_config::HeadRadiusFromCircumferenceCm(cm);
+        Rig rig(file, 48000, itd, true, 64, ear);
+        CHECK(rig.ok);
+        if (!rig.ok) continue;
+        char name[96];
+        std::snprintf(name, sizeof(name), "near field off -> on (default set, %.0f cm: ITD radius %.4f m, ears at %.4f m)", cm, itd, ear);
+        Crossfade(name, rig, [&](std::uint32_t b, std::uint32_t k, SourceUpdate& u, float&, float&, bool&) {
+            const Dir3 d = FromAzEl(60, 10);
+            u.position[0] = d.x * 0.3f, u.position[1] = d.y * 0.3f, u.position[2] = d.z * 0.3f;
+            if (b == 0) rig.r.SetNearField(false);
+            if (b == k) rig.r.SetNearField(true);
+        });
+        std::snprintf(name, sizeof(name), "head size 57 -> %.0f cm live (default set)", cm);
+        if (cm != 57.0f) {
+            Rig live(file, 48000, binaural_config::PilotItdRadiusM(v.header->datasetHeadRadiusM, 57.0f), true, 64,
+                     binaural_config::HeadRadiusFromCircumferenceCm(57.0f));
+            Crossfade(name, live, [&](std::uint32_t b, std::uint32_t k, SourceUpdate& u, float&, float&, bool&) {
+                const Dir3 d = FromAzEl(60, 10);
+                u.position[0] = d.x * 0.3f, u.position[1] = d.y * 0.3f, u.position[2] = d.z * 0.3f;
+                if (b == k) live.r.SetHeadRadius(itd), live.r.SetEarRadius(ear);
+            });
+            ReleaseHrtf(live.set);
+        }
+        Vec in(960, 0.0f);
+        RenderStatic(rig.r, 4, FromAzEl(-45, 0), 0.3f, in, 480);
+        float dl[3], dr[3];
+        detail::SourceFilterDirection(rig.r, 4, 0, dl);
+        detail::SourceFilterDirection(rig.r, 4, 1, dr);
+        const double angL = std::atan2(dl[2], dl[0]) * 180 / kPi, angR = std::atan2(dr[2], dr[0]) * 180 / kPi;
+        const double s = 0.3 * std::sqrt(0.5);
+        const double expL = std::atan2(s + ear, s) * 180 / kPi, expR = std::atan2(s - ear, s) * 180 / kPi;
+        std::printf("A7 parallax (default set, %.0f cm) 0.3 m at 45 deg right: left ear %.2f deg (expected %.2f), right ear %.2f deg (%.2f)\n",
+                    cm, angL, expL, angR, expR);
+        CHECK(std::fabs(angL - expL) <= 0.5 && std::fabs(angR - expR) <= 0.5);
+        ReleaseHrtf(rig.set);
+    }
 }
 
 int main(int argc, char** argv) {

@@ -48,6 +48,15 @@ constexpr float kNearFieldM = 1.0f;                  // ILD correction below thi
 constexpr float kParallaxM = 2.0f;                   // per-ear directions below this distance
 constexpr float kMinDistanceM = 0.05f;               // positions are clamped to this distance (head-locked below)
 constexpr float kDefaultHeadRadiusM = 0.0875f;       // used when Config.headRadiusM is 0
+// The ITD radius the renderer accepts (Config.headRadiusM, SetHeadRadius): the range a .dcshrtf's fitted radius may have
+// (hrtf_format.h), so that every set can be scaled by the whole head-size range. A Woodworth fit of measured onsets is
+// larger than the head's geometric radius (SADIE II's KU100: 0.119 m), so the geometric 0.06 .. 0.12 m would stop it.
+constexpr float kMinItdRadiusM = 0.04f, kMaxItdRadiusM = 0.15f;
+// The ear radius (Config.earRadiusM, SetEarRadius): the geometric head radius, 48-66 cm around (binaural_config.h
+// HeadRadiusFromCircumferenceCm), kept apart from the ITD radius, which is a fit of the set's delays and larger.
+constexpr float kMinEarRadiusM = 0.06f, kMaxEarRadiusM = 0.12f;
+// The largest ITD scale the head size asks for: 66 cm against the 57 cm reference (binaural_config.h PilotItdRadiusM).
+constexpr float kMaxHeadSizeScale = 66.0f / 57.0f;
 
 // An HRTF set validated (hrtf_format::Validate) and resampled to one device rate. Immutable once built; shared by
 // any number of Renderers at that rate.
@@ -71,7 +80,8 @@ HrtfInfo DescribeHrtf(const HrtfSet* set);
 struct Config {
     std::uint32_t sampleRate = 48000;    // the device rate (kMinSampleRate .. kMaxSampleRate)
     std::uint32_t maxSources = 48;       // 1 .. kMaxSources; slots 0 .. maxSources-1
-    float headRadiusM = 0.0f;            // 0: kDefaultHeadRadiusM
+    float headRadiusM = 0.0f;            // ITD radius (scales the set's delays by headRadiusM / its fit); 0: kDefaultHeadRadiusM
+    float earRadiusM = 0.0f;             // the head's real radius: where the ears sit for near-field parallax; 0: kDefaultHeadRadiusM
     bool nearField = true;
 };
 
@@ -128,7 +138,8 @@ public:
     void SetHrtf(const HrtfSet* set);
     const HrtfSet* TakeRetiredHrtf();    // null when nothing is retired yet
 
-    void SetHeadRadius(float metres);    // 0.06 .. 0.12; ITDs ramp to the new scale over the next call per source
+    void SetHeadRadius(float metres);    // kMinItdRadiusM .. kMaxItdRadiusM; ITDs ramp to the new scale over the next call per source
+    void SetEarRadius(float metres);     // kMinEarRadiusM .. kMaxEarRadiusM; near sources crossfade to the new ear positions
     void SetNearField(bool on);
 
     // ---- audio thread ---------------------------------------------------------------------------------------------

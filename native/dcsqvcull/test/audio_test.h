@@ -825,6 +825,7 @@ void Config() {
   const audio::Rt rt = audio::ReadRt();
   Check(audiofake::g_setHrtf.load() == hr0 + 1 && audiofake::g_setRadius.load() == rad0 + 1 &&
             audiofake::g_setNear.load() == nf0 + 1 && std::fabs(audiofake::g_lastRadius - 0.0875f * 54.0f / 57.0f) < 1e-5 &&
+            std::fabs(audiofake::g_lastEarRadius - binaural_config::HeadRadiusFromCircumferenceCm(54.0f)) < 1e-6 &&
             std::fabs(rt.trim - 0.5011872f) < 1e-5 && !rt.nearField && rt.maxObjects == 8 && audio::g_hrtfName == L"personal",
         "audio Live: a changed ini reaches the module at once (HRTF set crossfaded, head size, near field, trim, MaxObjects)");
   WriteIni(q.dir, "[Audio]\r\nBinaural=1\r\nHrtf=missing\r\nLateHeadTracking=0\r\n");

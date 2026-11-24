@@ -113,6 +113,7 @@ void Circle() {
   cc.sampleRate = kRate;
   cc.maxSources = 4;
   cc.headRadiusM = radius;
+  cc.earRadiusM = binaural_config::HeadRadiusFromCircumferenceCm(kCircumferenceCm);
   cc.nearField = true;
   const bool directOk = set && direct->Init(cc, err, sizeof(err));
   if (directOk) direct->SetHrtf(set);

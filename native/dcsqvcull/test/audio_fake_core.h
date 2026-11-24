@@ -17,6 +17,7 @@ extern float g_lastAdded[2 * binaural::kMaxFramesPerCall];  // what the last Ren
 extern uint32_t g_lastFrames;
 extern float g_lastMono[binaural::kMaxFramesPerCall];       // its mono input
 extern float g_lastRadius;
+extern float g_lastEarRadius;  // the last Config.earRadiusM or SetEarRadius
 extern float g_lastInitRadius;                 // Config::headRadiusM of the last Init
 }  // namespace audiofake
 

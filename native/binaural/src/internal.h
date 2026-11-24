@@ -24,6 +24,10 @@ constexpr float kFdBlendMax = 0.1f;                // sub-block delay change ren
 constexpr float kFilterUpdateCos = 0.99996192f;     // cos(0.5 degree): a filter direction change past it crossfades
 constexpr std::uint32_t kFilterFadeFrames = 64;     // that crossfade's length (from the start of the sub-block)
 constexpr float kShelfCornerHz = 1000.0f;           // near-field ILD low shelf corner
+// Near field switched on or off: the parallax and the shelf fade in or out over this long, so the per-ear delays of a
+// close source glide instead of jumping within one call (on the KU100 set at 0.3 m a jump within a 480-frame call
+// overshot A10's -60 dBFS step limit).
+constexpr float kNearFieldFadeS = 0.02f;
 constexpr float kNearFieldMaxDb = 12.0f;            // added ILD at 0.25 m, 90 degrees: +8 dB near ear, -4 dB far ear
 constexpr float kNearFieldRefM = 0.25f;
 

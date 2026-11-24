@@ -189,7 +189,9 @@ static void TestConfig() {
     CHECK(PilotItdRadiusM(0.0875f, 57.0f) == 0.0875f && PilotItdRadiusM(0.0912f, 57.0f) == 0.0912f);
     CHECK(std::fabs(PilotItdRadiusM(0.0875f, 60.0f) / 0.0875f - 60.0 / 57.0) < 1e-6);
     CHECK(std::fabs(PilotItdRadiusM(0.0875f, 30.0f) / 0.0875f - 48.0 / 57.0) < 1e-6);
-    CHECK(PilotItdRadiusM(0.115f, 66.0f) == 0.12f && PilotItdRadiusM(0.0f, 57.0f) == 0.0875f);
+    CHECK(PilotItdRadiusM(0.14f, 66.0f) == 0.15f && PilotItdRadiusM(0.0f, 57.0f) == 0.0875f);
+    // The default set's fit (SADIE II KU100, 0.1194 m) scales over the whole head-size range, unclamped.
+    CHECK(std::fabs(PilotItdRadiusM(0.1194f, 66.0f) / 0.1194f - 66.0 / 57.0) < 1e-6 && std::fabs(PilotItdRadiusM(0.1194f, 48.0f) / 0.1194f - 48.0 / 57.0) < 1e-6);
     CHECK(HeadScaleFromCircumferenceCm(std::nanf("")) == 1.0);
     std::uint32_t m = 99;
     CHECK(ParseExcludeContexts(L"", &m) && m == 0);

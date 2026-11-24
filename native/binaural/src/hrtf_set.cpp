@@ -195,7 +195,11 @@ HrtfSet* LoadHrtf(const void* data, std::size_t bytes, std::uint32_t deviceRate,
             s.delay[i * 2 + 0] = static_cast<float>((v.delays[i].left - minDelay) * ratio);
             s.delay[i * 2 + 1] = static_cast<float>((v.delays[i].right - minDelay) * ratio);
         }
-        const float sMax = 0.12f / s.datasetHeadRadiusM;
+        // The largest ITD scale the base keeps non-negative: a 0.12 m head (the geometric radius of the largest head
+        // size), and at least kMaxHeadSizeScale, the head-size range's own maximum (66 / 57 cm, PilotItdRadiusM), for a
+        // set whose fitted radius is larger than the geometric one (SADIE II's KU100: 0.119 m). A larger scale only
+        // clamps the shortest delays at zero (Targets).
+        const float sMax = std::max(0.12f / s.datasetHeadRadiusM, kMaxHeadSizeScale);
         float lowest = 0.0f;
         for (std::uint32_t i = 0; i < n; ++i) {
             const float l = s.delay[i * 2], r = s.delay[i * 2 + 1], m = 0.5f * (l + r);

@@ -3,12 +3,11 @@
 # into native/binaural/data/sadie2_ku100.dcshrtf, the set embedded in the engine payload:
 #   SADIE II database (University of York), subject D1 = Neumann KU100 dummy head, 48 kHz SOFA, Apache-2.0.
 #   Zenodo record 12092466, version v2-2, file D1_HRIR_SOFA.zip.
-# The archive is pinned by the size and MD5 Zenodo publishes for it, and by its SHA-256 (recorded on the first fetch in
-# docs/THIRD_PARTY.md and $PinnedSha256 below). It is unpacked into .cache/hrtf (untracked, never run), the 48 kHz SOFA
-# is converted by DcsVr.Cli hrtf-convert (src/DcsVr.Core/Hrtf), and the licence text and attribution are kept next to the
-# converted file. Re-running gives a bit-identical .dcshrtf.
-# Not run yet: downloading the archive needs the user's go, and the SOFA reader behind `hrtf-convert` needs the PureHDF
-# package (MIT, NuGet), whose download needs the same go (docs/BINAURAL_AUDIO.md, task A, "Pending").
+# The archive is pinned by the size and MD5 Zenodo publishes for it and by its SHA-256, the SOFA inside by its SHA-256
+# (both recorded in docs/THIRD_PARTY.md). An archive already in .cache/hrtf is reused (checked the same way). It is
+# unpacked into .cache/hrtf (untracked, never run), the 48 kHz SOFA is converted by DcsVr.Cli hrtf-convert
+# (src/DcsVr.Core/Hrtf, SOFA read with PureHDF), and the licence text and attribution are kept next to the converted
+# file. Re-running gives a bit-identical .dcshrtf (the converter is deterministic); the result is committed.
 # -Cli: an already built DcsVr.Cli.exe (default: build it with the repository's SDK).
 param([string]$Cli)
 $ErrorActionPreference = 'Stop'
@@ -17,7 +16,8 @@ $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $recordUrl = 'https://zenodo.org/api/records/12092466/files/D1_HRIR_SOFA.zip/content'
 $expectedBytes = 38151804
 $expectedMd5 = '4850c1eb8e63e2d4f605edcdb4d5c883'
-$PinnedSha256 = ''  # filled in from the first verified fetch (then every later fetch must match it)
+$PinnedSha256 = '366321fa78f211bacc0ec6bea96701625b196a5db54ec16748b0eab0b9705f75'      # D1_HRIR_SOFA.zip, first verified fetch 2026-11-24
+$PinnedSofaSha256 = '9af7cb19531e52fb7ae8ec92621e6ab62b1d5fe584b3742be36699a0ddb0ccd4'  # D1_48K_24bit_256tap_FIR_SOFA.sofa inside it
 
 $cache = Join-Path $workspaceRoot '.cache/hrtf'
 $archive = Join-Path $cache 'D1_HRIR_SOFA.zip'
@@ -33,7 +33,7 @@ if ($size -ne $expectedBytes -or $md5 -ne $expectedMd5) {
     Remove-Item -LiteralPath $archive -Force
     throw "D1_HRIR_SOFA.zip does not match the Zenodo record (size $size, MD5 $md5): deleted, nothing converted."
 }
-if ($PinnedSha256 -and $sha256 -ne $PinnedSha256) { throw "D1_HRIR_SOFA.zip SHA-256 $sha256 differs from the pinned $PinnedSha256." }
+if ($sha256 -ne $PinnedSha256) { throw "D1_HRIR_SOFA.zip SHA-256 $sha256 differs from the pinned $PinnedSha256." }
 Write-Output "D1_HRIR_SOFA.zip verified: $size bytes, MD5 $md5, SHA-256 $sha256"
 
 # Unpack into its own folder (data only: nothing from it is executed).
@@ -43,6 +43,7 @@ Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
 $sofa = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter '*.sofa' | Where-Object { $_.Name -match '48K' })
 if ($sofa.Count -ne 1) { throw "Expected one 48 kHz SOFA file in the archive, found $($sofa.Count): $($sofa.Name -join ', ')" }
 $sofaSha = (Get-FileHash -LiteralPath $sofa[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($sofaSha -ne $PinnedSofaSha256) { throw "$($sofa[0].Name) SHA-256 $sofaSha differs from the pinned $PinnedSofaSha256." }
 Write-Output "SOFA: $($sofa[0].Name), SHA-256 $sofaSha"
 
 if (-not $Cli) {
@@ -69,4 +70,3 @@ foreach ($required in 'SADIE_II_LICENSE.txt', 'NOTICE') {
     }
 }
 Write-Output "Converted: $output ($((Get-Item -LiteralPath $output).Length) bytes, SHA-256 $((Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()))"
-Write-Output "Record the archive's SHA-256 in `$PinnedSha256 and docs/THIRD_PARTY.md if it is not there yet."

@@ -26,6 +26,7 @@ float g_lastAdded[2 * binaural::kMaxFramesPerCall];
 uint32_t g_lastFrames = 0;
 float g_lastMono[binaural::kMaxFramesPerCall];
 float g_lastRadius = 0;
+float g_lastEarRadius = 0;
 float g_lastInitRadius = 0;
 }  // namespace audiofake
 
@@ -88,6 +89,7 @@ bool Renderer::Init(const Config& c, char* error, std::size_t errorCapacity) {
   impl_->cfg = c;
   impl_->radius = c.headRadiusM;
   audiofake::g_lastInitRadius = c.headRadiusM;
+  audiofake::g_lastEarRadius = c.earRadiusM;
   return true;
 }
 void Renderer::SetHrtf(const HrtfSet* s) {
@@ -101,6 +103,7 @@ void Renderer::SetHeadRadius(float m) {
   audiofake::g_lastRadius = m;
   impl_->radius = m;
 }
+void Renderer::SetEarRadius(float m) { audiofake::g_lastEarRadius = m; }
 void Renderer::SetNearField(bool) { audiofake::g_setNear.fetch_add(1); }
 void Renderer::BeginBlock(std::uint32_t) {
   audiofake::g_begin.fetch_add(1, std::memory_order_relaxed);

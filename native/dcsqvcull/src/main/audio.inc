@@ -594,6 +594,7 @@ void Bind(void* rend) {
   cc.sampleRate = static_cast<uint32_t>(rate);
   cc.maxSources = binaural::kMaxSources;
   cc.headRadiusM = binaural_config::PilotItdRadiusM(audr::CoreDescribe(set).datasetHeadRadiusM, c.headCircumferenceCm);
+  cc.earRadiusM = binaural_config::HeadRadiusFromCircumferenceCm(c.headCircumferenceCm);  // the ears sit on the real head
   cc.nearField = c.nearField;
   char err[160] = {};
   if (!core || !audr::CoreInit(core, cc, err, sizeof(err))) {
@@ -718,8 +719,11 @@ void ReadConfig(bool force) {
     }
     // The head size is relative to the set's own measured head (binaural_config.h PilotItdRadiusM): set again for a new
     // circumference or a new set.
+    // The near-field ear positions use the real head radius (C / 2 pi), never the set's fitted one.
     if ((first || newSet || prev.headCircumferenceCm != c.headCircumferenceCm) && g_curSet)
       audr::CoreSetHeadRadius(b->core, binaural_config::PilotItdRadiusM(audr::CoreDescribe(g_curSet).datasetHeadRadiusM, c.headCircumferenceCm));
+    if (first || prev.headCircumferenceCm != c.headCircumferenceCm)
+      audr::CoreSetEarRadius(b->core, binaural_config::HeadRadiusFromCircumferenceCm(c.headCircumferenceCm));
     if (first || prev.nearField != c.nearField) audr::CoreSetNearField(b->core, c.nearField);
   }
   if (!c.binaural && !first && prev.binaural) LogOff("binaural is off in the settings");

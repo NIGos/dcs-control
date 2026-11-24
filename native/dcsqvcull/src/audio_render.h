@@ -55,6 +55,7 @@ inline bool CoreInit(binaural::Renderer* r, const binaural::Config& c, char* e, 
 inline void CoreSetHrtf(binaural::Renderer* r, const binaural::HrtfSet* s) { r->SetHrtf(s); }
 inline const binaural::HrtfSet* CoreTakeRetired(binaural::Renderer* r) { return r->TakeRetiredHrtf(); }
 inline void CoreSetHeadRadius(binaural::Renderer* r, float m) { r->SetHeadRadius(m); }
+inline void CoreSetEarRadius(binaural::Renderer* r, float m) { r->SetEarRadius(m); }
 inline void CoreSetNearField(binaural::Renderer* r, bool on) { r->SetNearField(on); }
 inline void CoreBegin(binaural::Renderer* r, uint32_t frames) { r->BeginBlock(frames); }
 inline bool CoreRender(binaural::Renderer* r, uint32_t slot, const binaural::SourceUpdate& u, const binaural::MonoInput& in,
@@ -79,6 +80,7 @@ inline bool CoreInit(binaural::Renderer*, const binaural::Config&, char* e, size
 inline void CoreSetHrtf(binaural::Renderer*, const binaural::HrtfSet*) {}
 inline const binaural::HrtfSet* CoreTakeRetired(binaural::Renderer*) { return nullptr; }
 inline void CoreSetHeadRadius(binaural::Renderer*, float) {}
+inline void CoreSetEarRadius(binaural::Renderer*, float) {}
 inline void CoreSetNearField(binaural::Renderer*, bool) {}
 inline void CoreBegin(binaural::Renderer*, uint32_t) {}
 inline bool CoreRender(binaural::Renderer*, uint32_t, const binaural::SourceUpdate&, const binaural::MonoInput&, uint32_t,

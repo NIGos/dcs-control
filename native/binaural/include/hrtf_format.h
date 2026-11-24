@@ -73,7 +73,7 @@ struct Header {
     std::uint32_t triangleCount;       // t (a closed convex hull: t = 2n - 4)
     std::uint16_t taps;                // IR length
     std::uint16_t reserved0;           // 0
-    float datasetHeadRadiusM;          // Woodworth fit of the delays, metres (0.06 .. 0.12)
+    float datasetHeadRadiusM;          // Woodworth fit of the delays, metres (0.04 .. 0.15)
     float measurementDistanceM;        // source distance of the measurements, metres (SOFA SourcePosition r)
     float frontGain;                   // the front normalisation gain applied (1 when none), informational
     std::uint64_t payloadBytes;        // bytes after the header = PayloadBytes(n, t, taps)
