@@ -1,0 +1,95 @@
+Adaptive cadence: 0098's settle after a 3 -> 2 (missed slots in its first 300 ms not counted) was kept through 1X.
+CadenceController's two_from_three_ was cleared by a move up, a scene change, a start and a stop, but not by entering
+or leaving 1X, so after 3 -> 2 -> 1X -> 2 the first 300 ms of the 2 that 1X left for still ignored missed slots, as if
+it came from 3 (native review, round 5). Now entering 1X and leaving it clear it: a 2 entered from 1X counts its missed
+slots from the start, as before 0098. New test cadence_3x_exit_after_one_tests (latency_control_tests): fails before
+(still at 2, 266 ms after the return, two episodes in), passes after (3 at 177 ms).
+
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1147,6 +1147,9 @@
+     run_three_ = 0;
+     one_fit_since_ = -1;
+     one_entered_at_ = -1;
++    // DCS Control (0102): this 2 comes from 1X, not from 3: its missed
++    // slots count from the start (0098's settle is for a 3 -> 2 only).
++    two_from_three_ = false;
+     // DCS Control (0075): what this 1X leaves behind at 2 is judged by
+     // 0072's rule until 2 has been clean for up_late_gate_clean.
+     late_gate_ = event == CadenceEvent::one_left_late ||
+@@ -1313,6 +1316,7 @@
+         if (fits && now - one_fit_since_ >= config_.one_enter_hold &&
+             now >= one_allowed_at_) {
+             late_gate_ = false; // DCS Control (0075)
++            two_from_three_ = false; // DCS Control (0102): 1X ends the 3 -> 2
+             level_ = 1;
+             level_since_ = now;
+             one_entered_at_ = now;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -4818,6 +4818,55 @@
+     }
+ }
+ 
++// DCS Control (0102): 0098's settle after a 3 -> 2 (missed slots in its first
++// two_settle_after_three not counted) belongs to that 2 only. 3 -> 2 -> 1X ->
++// 2: the 2 that 1X leaves for counts its missed slots from the start, as
++// before 0098 (the flag stayed set through 1X and hid them for 300 ms).
++void cadence_3x_exit_after_one_tests() {
++    CadenceSim sim(cadence_config_for(CadencePreference::steady));
++    sim.controller.set_three_exit_learned(true);
++    constexpr Nanoseconds kHeavy = 24 * kMillisecond;
++    constexpr Nanoseconds kLight = 6 * kMillisecond;
++    bool up = false, down = false, one = false;
++    for (int index = 0; index < 200 && !up; ++index) {
++        up = sim.frame(kHeavy, kHeavy).level == 3;
++    }
++    for (int index = 0; index < 400 && !down; ++index) {
++        const CadenceStep step = sim.frame(kLight, kLight);
++        down = step.previous == 3 && step.level == 2;
++    }
++    for (int index = 0; index < 1000 && !one; ++index) {
++        one = sim.frame(kLight, kLight).event == CadenceEvent::one_entered;
++    }
++    require(up && down && one, "3x exit after 1X: 3, back to 2, then 1X");
++    // Past 1X's grace, two missed-slot episodes leave it for 2.
++    for (int index = 0; index < 100; ++index) { // a second at 1X: past its grace
++        sim.frame(kLight, kLight);
++    }
++    bool left = false;
++    for (int index = 0; index < 30 && !left; ++index) {
++        sim.controller.add_late(sim.now + kPeriod, 1);
++        left = sim.frame(kLight, kLight).event == CadenceEvent::one_left_late;
++        for (int gap = 0; gap < 12 && !left; ++gap) {
++            left = sim.frame(kLight, kLight).event == CadenceEvent::one_left_late;
++        }
++    }
++    require(left && sim.controller.level() == 2, "3x exit after 1X: 1X left on missed slots");
++    // Two episodes 130 ms apart, both within 300 ms of the return to 2.
++    const Nanoseconds returned = sim.now;
++    std::uint32_t level = 2;
++    for (int index = 0; index < 12 && level == 2; ++index) {
++        if (index == 1 || index == 7) {
++            sim.controller.add_late(sim.now + kPeriod * 2, 1);
++        }
++        level = sim.frame(kLight, kLight).level;
++    }
++    std::cout << "3x exit after 1X: level " << level << " "
++              << (sim.now - returned) / kMillisecond << " ms after the return to 2\n";
++    require(level == 3 && sim.now - returned < 300 * kMillisecond,
++        "3x exit after 1X: missed slots count from the start of a 2 that 1X left for");
++}
++
+ void cadence_accountable_tests() {
+     const auto light = [](std::uint64_t, Nanoseconds) { return kAccountLight; };
+     const auto between = [](std::uint64_t, Nanoseconds) { return kAccountBetween; };
+@@ -5370,6 +5419,7 @@
+         leader_lead_model_tests(); // DCS Control (0078)
+         cadence_accountable_tests(); // DCS Control (0079)
+         cadence_3x_exit_tests(); // DCS Control (0098)
++        cadence_3x_exit_after_one_tests(); // DCS Control (0102)
+         release_rephase_tests(); // DCS Control (0079)
+         release_offset_guard_tests(); // DCS Control (0081)
+         std::cout << "Latency control tests passed\n";
