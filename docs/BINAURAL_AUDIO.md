@@ -82,7 +82,7 @@ off or in perception-only mode, since audio is not an engine optimization.
 | **Barycentric interpolation on the measurement triangulation** | Works for any measurement grid (SADIE's lat-long grid, personal SOFA files with irregular grids); 3 FIRs per lookup; no resampling of the data onto another grid. The convex hull is computed once by the converter and stored in the file. |
 | **Fractional delay (4-tap Lagrange/Thiran), changed per sample** | Smooth ITD changes with head motion; no zipper noise. |
 | **Direct-form FIR, AVX2/FMA** | Any block length (WASAPI asks for a varying number of frames), no FFT framing latency. At 128 taps it is cheaper than partitioned convolution: about 3 µs per source per 10 ms block. |
-| **Crossfade on every parameter change** | Filters: old and new FIR both run and crossfade over the sub-block when the direction moves more than 0.5°. Gains and shelves: linear ramps. HRTF swap: full-call crossfade. Ownership: one-block crossfade with DCS's own output, exact at both ends (hook spec §5.2). |
+| **Crossfade on every parameter change** | Filters: old and new FIR both run and crossfade over 64 frames when the direction moves more than 0.5°. Gains and shelves: linear ramps. HRTF swap: 10 ms crossfade per source. Every crossfade and delay glide keeps its length across calls, so short calls never shorten it. Ownership: one-block crossfade with DCS's own output, exact at both ends (hook spec §5.2). |
 | **Near field: per-ear parallax (< 2 m) + first-order ILD shelf (< 1 m)** | Cockpit sources are 0.3 to 1 m away; far-field HRTFs measured at 1.2 m put them in the wrong place per ear. The Brungart-style shelf adds the close-range level difference (up to +12 dB at 0.25 m, 90°). |
 | **Diffuse-field equalised, front normalised to 0 dB** | The KU100 colouring stays neutral on average, and a sound from the front keeps DCS's level exactly (the mono gain rule, hook spec §5.1). |
 | **No distance, doppler or filter of our own** | DCS already applied them once; applying them twice would change DCS's mix. The only distance term is the late-translation correction `r_dcs / r_now` for sources under 1.5 m, clamped to ±3 dB. |
@@ -292,7 +292,8 @@ Pass: `0 failure(s)`.
     directions, not 8,802) and the fitted radius (0.119 m, not 0.08-0.095 m); and one limit of the renderer, the ITD
     radius range (0.04-0.15 m, section 4.1). The set's base delay (`delayBase`) covers a 0.12 m head as before and at
     least the head-size maximum 66 / 57 (`kMaxHeadSizeScale`), so the synthetic harness is unchanged.
-  - Two radii: the ITD radius (`Config.headRadiusM`, `SetHeadRadius`: the set's fit x C / 57 cm) only scales the
+  - Two radii: the ITD radius (`Config.headRadiusM`, `SetHeadRadius`: the set's fit x C / 57 cm; kept as a scale of the
+    set's fit, so a new set keeps the head size and is never paired with another set's radius) only scales the
     delays; the near-field ear positions use the head's real radius (`Config.earRadiusM`, `SetEarRadius`:
     `HeadRadiusFromCircumferenceCm`, 0.06-0.12 m), which the module sets from the same circumference. On the KU100 the
     ears sat at 0.119 m before (the fit), now at 0.0907 m for 57 cm.

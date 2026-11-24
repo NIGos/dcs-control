@@ -31,6 +31,7 @@ struct Env {
   int32_t engineState = 3;
   int64_t now = 0, freq = 1;
   bool poseValid = false;
+  bool posValid = false;    // t is a tracked position (the pose entry had one)
   float q[4] = {0, 0, 0, 1}, t[3] = {0, 0, 0};
   uint64_t poseBase = 0;
 };
@@ -371,7 +372,8 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   d.voice = voice;
   d.gen = o.slotGen[r->slot];
   d.flags = meta_flags::kOwned | (r->initialOwned ? meta_flags::kInitial : 0u) |
-            (e.poseValid ? meta_flags::kPoseValid : 0u) | (dist < audr::kNearM ? meta_flags::kNear : 0u);
+            (e.poseValid ? meta_flags::kPoseValid : 0u) | (e.poseValid && e.posValid ? meta_flags::kPosValid : 0u) |
+            (dist < audr::kNearM ? meta_flags::kNear : 0u);
   d.frame = o.frame;
   d.ctx = ctxId;
   double p[3];

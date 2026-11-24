@@ -35,6 +35,17 @@ std::atomic<uint32_t> g_overrunGen{0};    // bumped when the overrun stop is re-
 // The renderer the world's 3D sounds play on (control thread picks it from audsim's counts, MixWrap reads it).
 std::atomic<void*> g_worldRenderer{nullptr};
 constexpr double kLiveBindingS = 0.2;     // a binding whose renderer delivered a block within this is in use
+// The bound renderer's blocks pass through (render thread sets, the sim and the control thread read): the frame count
+// of a block too long for the core, 1 for a block whose layout changed, 0 while blocks are armed. The sim releases every
+// voice meanwhile (they would play centred: tagged but not rendered).
+std::atomic<uint32_t> g_passFrames{0};
+// The binding is moving to another live renderer (control thread): the sim releases every voice first, so the old
+// renderer's blocks fade them back to DCS's panning before its binding is retired (no centred voices, no step).
+std::atomic<bool> g_handover{false};
+void* g_handoverTo = nullptr;             // control thread
+ULONGLONG g_handoverSince = 0;
+constexpr ULONGLONG kHandoverMaxMs = 500;
+int g_stopGraceMs = 50;                   // Stop: quiet time before freeing (a wrapper not yet counted in g_inflight)
 std::atomic<dcsvr_headpose::Block*> g_pose{nullptr};
 std::atomic<uint32_t> g_selfPid{0};       // the pose block's writer must be this process (set by Start)
 thread_local audr::Block* t_block = nullptr;
@@ -50,7 +61,6 @@ inline dcsvr_headpose::ReaderLimits PoseLimits() {
 struct Rt {
   bool binaural = false;
   bool late = true;
-  bool nearField = true;
   float trim = 1.0f;
   int maxObjects = 48;
   int cpuBudget = 25;
@@ -89,6 +99,7 @@ audhk::ImportFn g_testImports = nullptr;
 const audhk::SigTable* g_testTable = nullptr;
 bool (*g_testHrtf)(const wchar_t* name, std::vector<uint8_t>* out) = nullptr;
 std::atomic<bool> g_testNoThread{false};  // tests drive ControlTick themselves
+void (*g_testAfterRestore)() = nullptr;   // Stop: right after the sites are restored
 
 inline int64_t Qpc() {
   LARGE_INTEGER c;
@@ -136,7 +147,8 @@ void SimFrame(uint32_t f) {
   g_simEpoch = ep;
   const bool on = rt.binaural && b && b->core && !b->retired.load(std::memory_order_relaxed) &&
                   !g_userOff.load(std::memory_order_relaxed) && g_offReason.load(std::memory_order_relaxed) == kOffNone &&
-                  !g_stopping.load(std::memory_order_relaxed) && !g_sim.panLawTripped;
+                  !g_stopping.load(std::memory_order_relaxed) && !g_sim.panLawTripped &&
+                  g_passFrames.load(std::memory_order_relaxed) == 0 && !g_handover.load(std::memory_order_relaxed);
   g_simCfg.on = on;
   g_simCfg.limit = std::min<int>(rt.maxObjects, static_cast<int>(g_cnt.limitNow.load(std::memory_order_relaxed)));
   g_simCfg.excludeMask = rt.exclude;
@@ -148,12 +160,14 @@ void SimFrame(uint32_t f) {
   e.now = Qpc();
   e.freq = QpcFreq();
   e.poseValid = false;
+  e.posValid = false;
   dcsvr_headpose::Block* pb = rt.late ? g_pose.load(std::memory_order_acquire) : nullptr;
   dcsvr_headpose::PredictedPose pp;
   // The pose DCS used for this frame: the newest checked entry as it is (its extrapolation is not used here).
   if (pb && dcsvr_headpose::ReadPredicted(pb, e.now, e.now, PoseLimits(), pp) == dcsvr_headpose::PoseStatus::kOk) {
     const dcsvr_headpose::Entry& pe = pp.entry;
     e.poseValid = true;
+    e.posValid = (pe.flags & dcsvr_headpose::entry_flags::position_valid) != 0;
     memcpy(e.q, pe.orientation, sizeof(e.q));
     memcpy(e.t, pe.position, sizeof(e.t));
     e.poseBase = pe.baseSpace;
@@ -250,9 +264,14 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
       audv::Rd<double>(rend, audv::off::kRRate) != static_cast<double>(b->rate)) {
     if (frames > audr::kMaxFrames) g_cnt.framesTooLong.fetch_add(1, std::memory_order_relaxed);
     else g_newRenderer.store(rend, std::memory_order_release);  // its layout changed: validate again
+    // The owned voices are not rendered in this block (they play centred): the sim releases them (and the control
+    // thread says why when the blocks are too long).
+    g_passFrames.store(frames > audr::kMaxFrames ? frames : 1u, std::memory_order_relaxed);
+    g_cnt.passBlocks.fetch_add(1, std::memory_order_relaxed);
     g_res.mix(rend, out, frames);
     return;
   }
+  if (g_passFrames.load(std::memory_order_relaxed)) g_passFrames.store(0, std::memory_order_relaxed);
   const Rt rt = ReadRt();
   audr::Block blk;
   blk.b = b;
@@ -262,7 +281,6 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
            g_offReason.load(std::memory_order_relaxed) == kOffNone && !g_stopping.load(std::memory_order_relaxed) &&
            !qvexit::Exiting();
   blk.late = rt.late;
-  blk.nearField = rt.nearField;
   blk.trim = rt.trim;
   const int64_t now = Qpc(), freq = QpcFreq();
   if (rt.late) {
@@ -273,6 +291,7 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
     dcsvr_headpose::PredictedPose pp;
     if (pb && dcsvr_headpose::ReadPredicted(pb, now, target, PoseLimits(), pp) == dcsvr_headpose::PoseStatus::kOk) {
       blk.pose.valid = true;
+      blk.pose.posValid = (pp.entry.flags & dcsvr_headpose::entry_flags::position_valid) != 0;
       blk.pose.q = pp.orientation;
       blk.pose.t = pp.position;
       blk.pose.base = pp.entry.baseSpace;
@@ -342,16 +361,23 @@ bool Install() {
     LogOff(r.why);
     return false;
   }
+  // ed_sound's engine not started yet (state 0: its mutex and globals may not be set up): nothing is locked or patched
+  // now; tried again.
+  if (!r.engineState || *r.engineState < 1) return false;
   void* const wrappers[audhk::kSiteCount] = {reinterpret_cast<void*>(&PanWrapA), reinterpret_cast<void*>(&PanWrapB),
                                               reinterpret_cast<void*>(&RenderWrap), reinterpret_cast<void*>(&MixWrap)};
-  uint8_t* page = audhk::MakeThunks(r.base, r.expected, wrappers);
+  const char* thunkWhy = nullptr;
+  uint8_t* page = audhk::MakeThunks(r.base, r.expected, wrappers, &thunkWhy);
   if (!page) {
     g_hookState = -1;
-    LogOff("no memory within reach of ed_sound.dll");
+    LogOff(thunkWhy ? thunkWhy : "no memory within reach of ed_sound.dll");
     return false;
   }
   g_res = r;
   g_stopping.store(false);
+  g_passFrames.store(0);
+  g_handover.store(false);
+  g_handoverTo = nullptr;
   g_sim.meta = &g_meta;
   g_sim.cnt = &g_cnt;
   g_sim.ev = &g_ev;
@@ -407,6 +433,9 @@ void Uninstall(DWORD waitMs) {
   const ULONGLONG drainUntil = GetTickCount64() + 1000;
   while (g_inflight.load() > 0 && GetTickCount64() < drainUntil) Sleep(1);
   g_hookState = 0;
+  g_handover.store(false);
+  g_handoverTo = nullptr;
+  g_passFrames.store(0);
   Log("audio: hooks out (ed_sound.dll's call sites restored%s)", g_inflight.load() ? "; a call was still in flight" : "");
 }
 
@@ -557,24 +586,43 @@ bool ReadRenderer(void* rend, double* rate, uint32_t* ch, double z[2], bool lfe[
   }
 }
 
-void Bind(void* rend) {
+// Whether binaural can run on `rend` (DCS's stereo pair at a supported rate); why: the reason when not (may be null).
+bool CheckRenderer(void* rend, double* rateOut, char* why, size_t whyCap) {
   double rate = 0, z[2] = {};
   uint32_t ch = 0;
   bool lfe[2] = {};
   float w3d[2][2] = {};
-  if (!ReadRenderer(rend, &rate, &ch, z, lfe, w3d)) return;
-  char why[160];
+  if (why && whyCap) why[0] = 0;
+  if (!ReadRenderer(rend, &rate, &ch, z, lfe, w3d)) return false;
+  char w[160];
   // DCS's stereo pair (hook spec section 3): left speaker z < 0 with 3D weights (1, 0), right z > 0 with (0, 1).
   const bool pair = w3d[0][0] == 1.0f && w3d[0][1] == 0.0f && w3d[1][0] == 0.0f && w3d[1][1] == 1.0f;
   if (ch != 2 || !(z[0] < -0.5) || !(z[1] > 0.5) || lfe[0] || lfe[1] || !pair) {
-    snprintf(why, sizeof(why), "DCS's audio output is not stereo (%u channels); set Headphones or Stereo in DCS", ch);
+    snprintf(w, sizeof(w), "DCS's audio output is not stereo (%u channels); set Headphones or Stereo in DCS", ch);
   } else if (!(rate >= binaural::kMinSampleRate && rate <= binaural::kMaxSampleRate)) {
-    snprintf(why, sizeof(why), "output rate %.0f Hz is not supported", rate);
+    snprintf(w, sizeof(w), "output rate %.0f Hz is not supported", rate);
   } else if (!kHaveCore) {
-    snprintf(why, sizeof(why), "this build has no binaural renderer");
+    snprintf(w, sizeof(w), "this build has no binaural renderer");
   } else {
-    why[0] = 0;
+    w[0] = 0;
   }
+  if (why && whyCap) strncpy_s(why, whyCap, w, _TRUNCATE);
+  if (rateOut) *rateOut = rate;
+  return w[0] == 0;
+}
+bool RendererUsable(void* rend) { return CheckRenderer(rend, nullptr, nullptr, 0); }
+
+bool AnySlotInUse() {
+  for (int s = 0; s < audv::kSlots; ++s)
+    if (g_meta.voice[s].load() != nullptr) return true;
+  return false;
+}
+
+// The binding of `rend`. how: why this renderer (logged with its address, so two DCS outputs can be told apart).
+void Bind(void* rend, const char* how) {
+  double rate = 0;
+  char why[160];
+  if (!CheckRenderer(rend, &rate, why, sizeof(why)) && !why[0]) return;  // unreadable: tried again later
   if (why[0]) {
     if (rend != g_rejectedRenderer) LogOff(why);
     g_rejectedRenderer = rend;
@@ -630,6 +678,7 @@ void Bind(void* rend) {
   g_hrtfRequested = c.hrtf;
   const binaural::HrtfInfo info = audr::CoreDescribe(set);
   LogOn();
+  Log("audio: output %p bound (%s%s)", rend, how, old ? (old->renderer == rend ? "; validated again" : "; moved from another output") : "");
   Log("audio: on (%.0f Hz stereo, HRTF %ls: %u directions, head radius %.1f cm, near field %s, at most %d sounds)", rate,
       used.c_str(), info.directions, cc.headRadiusM * 100.0, c.nearField ? "on" : "off", c.maxObjects);
 }
@@ -665,7 +714,6 @@ void PublishRt() {
   Rt r;
   r.binaural = c.binaural;
   r.late = c.lateHeadTracking;
-  r.nearField = c.nearField;
   r.trim = binaural_config::TrimGain(c.levelTrimDb);
   r.maxObjects = c.maxObjects;
   r.cpuBudget = c.cpuBudgetPercent;
@@ -884,6 +932,7 @@ struct Loop {
   ULONGLONG lastFlag = 0, lastStats = 0, lastCtx = 0, lastDiag = 0, lastVoices = 0, lastInstall = 0, lastCfg = 0, lastWorld = 0;
   bool keyWas = false;
   uint64_t statsHrtf = 0, statsPose = 0;
+  std::string passText;  // the "audio: off" reason logged for blocks too long (empty: none)
 };
 Loop g_loop;
 
@@ -924,9 +973,45 @@ void ControlTick() {
     const bool curLive = cur && !cur->retired.load() &&
                          static_cast<double>(Qpc() - cur->lastUseQpc.load()) <= kLiveBindingS * static_cast<double>(QpcFreq());
     const bool wanted = !curLive || rend == cur->renderer || rend == g_worldRenderer.load();
-    if (g_installed.load() && c.binaural && retry && wanted) {
+    if (g_installed.load() && c.binaural && retry && wanted && !g_handover.load()) {
       if (rend == g_rejectedRenderer) lastRejectedTry = now;
-      Bind(rend);
+      const char* how = !cur ? "the first output with 3D sounds' blocks"
+                        : rend == cur->renderer ? "the bound output, its layout changed"
+                        : rend == g_worldRenderer.load() ? "the world's 3D sounds play on it"
+                                                          : "the bound output stopped delivering blocks";
+      if (curLive && rend != cur->renderer && AnySlotInUse() && RendererUsable(rend)) {
+        // Another live output takes over: the voices the bound one renders binaurally fade back to DCS's panning there
+        // first (the sim releases them), then the binding moves. Never more than kHandoverMaxMs.
+        g_handoverTo = rend;
+        g_handoverSince = now;
+        g_handover.store(true);
+        Log("audio: output %p takes over from %p (%s); fading its 3D sounds back first", rend, cur->renderer, how);
+      } else {
+        Bind(rend, how);
+      }
+    }
+  }
+  if (g_handover.load()) {
+    audr::Binding* cur = g_binding.load();
+    const bool curLive = cur && !cur->retired.load() &&
+                         static_cast<double>(Qpc() - cur->lastUseQpc.load()) <= kLiveBindingS * static_cast<double>(QpcFreq());
+    if (!AnySlotInUse() || !curLive || now - g_handoverSince >= kHandoverMaxMs) {
+      if (g_installed.load() && c.binaural) Bind(g_handoverTo, "the world's 3D sounds play on it");
+      g_handoverTo = nullptr;
+      g_handover.store(false);  // after the binding moved (a new epoch): the sim owns voices of the new output only
+    }
+  }
+  // The bound output's blocks pass through: too long for the core (said once), or a layout change (validated again).
+  {
+    const uint32_t pf = g_passFrames.load();
+    if (pf > 1 && L.passText.empty()) {
+      char b[160];
+      snprintf(b, sizeof(b), "DCS's audio blocks are %u frames, more than binaural takes (%u); DCS's own panning", pf, audr::kMaxFrames);
+      L.passText = b;
+      LogOff(L.passText);
+    } else if (pf == 0 && !L.passText.empty()) {
+      if (g_offText == L.passText) LogOnAgain("DCS's audio blocks fit again");
+      L.passText.clear();
     }
   }
   // Retired bindings: freed 2 s after their last block.
@@ -980,13 +1065,14 @@ void ControlTick() {
       const char* pose = !g_cfgRead.cfg.lateHeadTracking ? "unused" : pc != L.statsPose ? "on" : "off";
       L.statsPose = pc;
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
-          "%u; fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu, pan solves %llu (median %llu, mismatch "
+          "%u; fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), pan solves %llu (median %llu, mismatch "
           "%llu), overruns %llu; head pose %s",
           g_cnt.ownedNow.load(), P99Ms(), g_cfgRead.cfg.cpuBudgetPercent, budgetMs,
           std::min<uint32_t>(g_cnt.limitNow.load(), static_cast<uint32_t>(g_cfgRead.cfg.maxObjects)),
           static_cast<unsigned long long>(g_cnt.fadeIns.load()), static_cast<unsigned long long>(g_cnt.fadeOuts.load()),
           static_cast<unsigned long long>(g_cnt.repanCalls.load()), static_cast<unsigned long long>(g_cnt.coreRejected.load()),
-          static_cast<unsigned long long>(g_meta.torn.load()), static_cast<unsigned long long>(g_cnt.panSolves.load()),
+          static_cast<unsigned long long>(g_meta.torn.load()), static_cast<unsigned long long>(g_cnt.tornSnaps.load()),
+          static_cast<unsigned long long>(g_cnt.panSolves.load()),
           static_cast<unsigned long long>(g_cnt.panMedian.load()), static_cast<unsigned long long>(g_cnt.panMismatch.load()),
           static_cast<unsigned long long>(g_cnt.overruns.load()), pose);
       L.statsHrtf = hc;
@@ -1049,7 +1135,22 @@ void Stop() {
     return;
   }
   if (g_installed.load()) Uninstall(400);
-  if (g_inflight.load() == 0 && !g_installed.load()) {
+  if (g_testAfterRestore) g_testAfterRestore();
+  // A wrapper that passed a call site just before it was restored counts itself in g_inflight only once inside it: the
+  // memory is freed after a grace period with nothing in flight (checked again after it), else left in place (a leak,
+  // never a use after free).
+  bool quiet = !g_installed.load();
+  if (quiet && (g_binding.load() || !g_retiredBindings.empty() || !g_sets.empty())) {
+    quiet = false;
+    for (int round = 0; round < 3 && !quiet; ++round) {
+      const ULONGLONG until = GetTickCount64() + 1000;
+      while (g_inflight.load() > 0 && GetTickCount64() < until) Sleep(1);
+      Sleep(static_cast<DWORD>(g_stopGraceMs));
+      quiet = g_inflight.load() == 0;
+    }
+    if (!quiet) Log("audio: a call was still running at stop; the binaural renderer's memory is left in place");
+  }
+  if (quiet) {
     if (audr::Binding* b = g_binding.exchange(nullptr)) FreeBinding(b);
     for (audr::Binding* b : g_retiredBindings) FreeBinding(b);
     g_retiredBindings.clear();
