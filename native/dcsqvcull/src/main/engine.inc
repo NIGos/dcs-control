@@ -152,8 +152,9 @@ uint64_t ComputeStatus() {
 uint64_t StatusWordNow() {
   // R65: bits 39 / 40 (cockpit mask export) in both modes; 0 unless [Perception] CockpitMaskExport=1 and committing.
   // R69: bit 41 (its depth companion) likewise. R70: bit 42 (its motion companion) likewise.
+  // Binaural audio: bits 53-55 in both modes (audr::g_status, published by the audio module's control thread).
   return (g_perceptionOnly.load() ? (qvstatus::kRunning | qvstatus::kPerceptionOnly) : ComputeStatus()) |
-         fixdepth::cmask::StatusBits();
+         fixdepth::cmask::StatusBits() | audr::g_status.load(std::memory_order_acquire);
 }
 
 // R42 colour modes: the ini's configuration (or the ModeKey's mode) and the sun to the pass; compile / create / log.

@@ -128,6 +128,11 @@ const AppKey kAppKeys[] = {
     {L"Suite", L"BenchCbSkip", true}, {L"Suite", L"BenchTriPlain", true}, {L"Suite", L"BenchEngine", true},
     {L"Suite", L"BenchMicro", true}, {L"Suite", L"BenchPrefetch", true}, {L"Suite", L"Quick", true},
     {L"Suite", L"MotionSeconds", true}, {L"Dev", L"PayloadPath", false}, {L"Dev", L"IniPath", false},
+    // Binaural audio (docs/BINAURAL_AUDIO.md section 7; written by the app's Audio page).
+    {L"Audio", L"Binaural", false}, {L"Audio", L"Hrtf", false}, {L"Audio", L"HeadCircumferenceCm", false},
+    {L"Audio", L"LateHeadTracking", false}, {L"Audio", L"NearField", false}, {L"Audio", L"MaxObjects", false},
+    {L"Audio", L"LevelTrimDb", false}, {L"Audio", L"CpuBudgetPercent", false}, {L"Audio", L"ExcludeContexts", false},
+    {L"Audio", L"LogVoices", false}, {L"Hotkeys", L"AudioToggle", false},
 };
 
 bool Retired(const wchar_t* sec, const wchar_t* key) {

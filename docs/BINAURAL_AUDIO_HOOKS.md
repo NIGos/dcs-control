@@ -436,3 +436,50 @@ Any failure → nothing is patched (or everything is restored in reverse order),
 | WorldGeneral IAT hooks | Not verifiable (protected image); not needed [§0] |
 | New voices panned before the first block | Yes, at `0x1ba00`; hooked as P3b [V §1.2] |
 | Mono gain rule (design's S2 question) | DCS's own gain for a frontal source, solved from DCS's two gains [§5.1] |
+
+## 9. As implemented (task B, `native/dcsqvcull`)
+
+Files: `src/audio_sigs.h` (generated), `src/audio_hooks.h` (sites, checks, thunks, patching), `src/audio_voice.h`
+(layouts, mono gain rule, VoiceMeta), `src/audio_sim.h` (ownership, tag), `src/audio_render.h` (output rule, re-pan,
+budget, events), `src/audio_config.h` (`[Audio]`), `src/main/audio.inc` (wrappers, install / restore, control thread).
+Tests: `test/audio_test.h` with a fake ed_sound image (`test/audio_fake_ed.h`) and a stand-in core
+(`test/audio_fake_core.cpp`); `QV_AUDIO_ONLY=1` runs them alone.
+
+Where the implementation differs from or adds to the sections above:
+
+- **Signatures (§0).** ed_sound has its own table, `src/audio_sigs.h`, written by `tools/gen_audio_sigs.py` from the
+  DLL (`--check`: in step with the installed DCS; `--report`: where each location is after a DCS update). Each
+  location's masked hash covers its whole function (the `.pdata` entry plus its chained entries). It is not in
+  `hooks_manifest.json` / `hook_sigs.h`: `extract_manifest.py` stops in this tree at `binding pacer.h:pacer::kSiteRva:
+  not found by the source scan`, so the shared manifest cannot be regenerated today.
+- **Mono gain rule (§5.1).** A third equation makes the check real: WA + WB/2 = base/2 for any crosstalk, with
+  base = speed factor x `sound+0x1c0`, computed exactly as the panner does (`sound+0x178`, `|sound+0x108|`, single
+  precision, panner `0x1c208..0x1c2ae`). Lateral sources are solved from the two channels and checked against base;
+  near the median plane (|cL - cR| < 0.05) WA comes from base and the channel whose speaker is further away, so no
+  earlier frame is needed (k of an earlier frame is used only when base is not positive). Both also require
+  WA >= 0.05 base and WB >= 0.2 base (x in [0, 1]). In the tests this flags 99.8 % of pan laws 10 % off on one
+  channel; with only the two channels it flagged 14 %.
+- **The tag.** m is floored at 1e-20 so a tag is never all zero (a silent owned voice stays recognisable).
+- **Pose tag (§5.1).** `q_used` is the newest `Local\DcsVrHeadPose_v1` entry at the frame's first PanWrap (fresh within
+  200 ms), not `DcsVrMotion_v1`: that block exists only with the cockpit mask export and a reader. DCS locates its views
+  once per frame on its simulation thread before simulating (R74), so the newest entry is the pose of that frame. The
+  `audio: listener-vs-pose` line (once a minute) settles the remaining lag.
+- **Output rule (§5.2).** The tagged part is T = h HRTF + (1 - h) RePan, RePan(x) = x gL/m, x gR/m with DCS's own gains
+  of that frame (published in VoiceMeta). h ramps over one block; the ownership fade and h never move in the same
+  block, so every weight stays linear. The kill switch, `Binaural=0`, off for the session, MaxObjects and every release
+  reach DCS's own panning within one block this way; the fake measures RePan at -107 dB from DCS's mix. A voice owned at
+  creation (P3b) skips the fade: its first block is the core's. A core refusal in the middle of a voice switches to
+  RePan without a crossfade (the contract refuses only on misuse: frames > 8192, slot out of range, no set).
+- **Binding (§5.3, §6 item 6).** Also requires the 3D weights (1, 0) / (0, 1) of the stereo pair. Channels and rate are
+  re-checked every block (a change re-binds). Blocks over 8192 frames pass through.
+- **Overruns (§6 item 7).** ED's counter is read at renderer - 8 + 0x2274, accepted only when the `lock inc` at P5 +
+  0x3e reads `F0 FF 83 74 22 00 00`.
+- **Threads.** The module has its own control thread (`AudioThread`, 20 ms loop): independent of the engine worker
+  (which can wait minutes for Scene.dll) and of the engine kill switch. The real-time wrappers never log; they count and
+  push events to a ring this thread logs from.
+- **FTZ/DAZ** are set only around our own DSP in each P4 call and restored before ED's next kernel runs.
+- **Status word** bits 53 (configured), 54 (active), 55 (configured but off); see `status_word.h`.
+- **Build.** The payload links BinauralCore when `DCSQV_BINAURAL_CORE_LIB` names its `.lib`
+  (`scripts/build-dcsqvcull.ps1` passes the environment variable of that name); without it the module logs
+  `audio: off (this build has no binaural renderer)`. The default set is embedded as RCDATA `HRTF_DEFAULT` when
+  `native/binaural/data/sadie2_ku100.dcshrtf` exists.

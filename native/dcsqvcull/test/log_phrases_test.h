@@ -98,6 +98,10 @@ void Run() {
        "\"hotkey: engine optimizations back ON (ini engine key changed: %s)\""},
       {"hotkey: engine optimizations stay OFF", "\"hotkey: engine optimizations stay OFF (the ini reload changed no engine key)\""},
       {"reload frametimes: at <t> baseline p50/p99/max=", "\"reload frametimes: at %s baseline p50/p99/max="},
+      // Binaural audio (docs/BINAURAL_AUDIO.md section 9 D): the Audio page's status and the Checks line.
+      {"audio: off (<reason>)", "\"audio: off (%s)\""},
+      {"audio: running, <n> sounds, p99 <ms> ms per block", "\"audio: running, %u sounds, p99 %.2f ms per block"},
+      {"audio: on (<rate> Hz stereo, HRTF <name>", "\"audio: on (%.0f Hz stereo, HRTF %ls: %u directions"},
   };
   int missing = 0;
   for (const Phrase& p : phrases)
