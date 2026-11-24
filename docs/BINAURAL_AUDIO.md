@@ -117,16 +117,30 @@ off or in perception-only mode, since audio is not an engine optimization.
   `.cache/hrtf`) and checks its size, MD5 and SHA-256 and the 48 kHz SOFA's SHA-256 (all in `docs/THIRD_PARTY.md`); the
   licence text and attribution stay next to the generated `.dcshrtf`. The generated file is committed
   (`native/binaural/data/sadie2_ku100.dcshrtf`, 9,329,824 bytes: 8,703 directions x 2 ears x 128 taps; SHA-256
-  `45bd65499526b51b47ddc7e2614c27eee7db9bbc5a5f29a6aefaddb88edd9f09`) and embedded in the payload as the RCDATA
+  `5a23db950066065e5428d08a16342c7cbbd2f3682c38110d1e236302497d38e1`) and embedded in the payload as the RCDATA
   resource `HRTF_DEFAULT`. The original SOFA is not committed; the fetch script rebuilds the set bit-identically (checked
   twice, and by the C# test below whenever `.cache/hrtf` holds the archive).
 - **What the conversion found** (`hrtf-convert` on the 48 kHz file): 8,802 measurements, 99 of them repeats of a
-  direction already measured (merged, the first kept), so 8,703 directions; elevation -90 to 90 degrees, 100 % of the
-  sphere within 15 degrees of a measurement; fitted head radius 0.1194 m. That fit is Woodworth's ITD model on the
-  converter's onset delays (largest ITD about 0.89 ms; the broadband interaural cross-correlation gives about 0.80 ms):
-  larger than the KU100's geometric radius, as a fit of measured onsets is. The head size is relative to it (57 cm plays
-  the set's own timing), and the renderer's ITD radius range is 0.04-0.15 m (`kMinItdRadiusM`, `kMaxItdRadiusM`) so that
-  48-66 cm scale it unclamped (the earlier 0.06-0.12 m stopped every size above 57 cm).
+  direction already measured (merged, their responses averaged), so 8,703 directions; elevation -90 to 90 degrees, 100 %
+  of the sphere within 15 degrees of a measurement; fitted head radius 0.0943 m (the same within 0.5 mm from the 44.1
+  and 96 kHz files). That fit is Woodworth's ITD model on the converter's onset delays (largest ITD about 0.70 ms).
+  The onsets are the slope of each ear's excess phase over 200-1500 Hz, where hearing uses the phase between the ears.
+  Rendered (stored minimum-phase IR plus stored onset), the phase delay between the ears over 200-1500 Hz is 8.9 us RMS
+  from the measured one (31 us at worst, straight ahead -1.4 us against -12.7 us measured), and adjacent directions on
+  the 1-degree horizontal ring differ by at most 19 us in ITD (the measurement's own steps: 16 us) and 46 us in one
+  ear's onset. The earlier onsets, from a full-band cross-correlation with the minimum-phase version, locked onto the
+  high-frequency lobes of a shadowed ear: 119 us RMS (272 us at worst), the front 154 us to the left (about 15 degrees),
+  jumps up to 209 us (ITD) and 215 us (one ear) between 1-degree neighbours, a fitted radius of 0.119 m that moved with
+  the sample rate. Each ear keeps its own delay: holding the two ears' mean constant per direction (and splitting the
+  ITD around it) was tried and dropped, because with the near field on the renderer looks each ear up from its own
+  direction and needs that ear's own delay curve (A14's near-field crossfade went from 4.8e-4 to 1.3e-3, over the
+  A10 limit). The mean of the two ears varies by 0.14 ms around the horizontal ring (0.29 ms before). The head size is relative to the fit (57 cm
+  plays the set's own timing; it scales the stored onsets, the phase the minimum-phase IRs themselves carry between
+  the ears, about 15 % of the total at 90 degrees, stays). The renderer's ITD radius range is 0.04-0.15 m
+  (`kMinItdRadiusM`, `kMaxItdRadiusM`), so 48-66 cm scale it unclamped.
+- **Front level:** the front normalisation measures noise from straight ahead over 200 Hz-8 kHz (the mean of both ears
+  at 0 dB). Measured on white noise over the whole band, the 12-24 kHz half of the spectrum decided the level; the set
+  is now 1.0 dB louder in the band where DCS's sounds are.
 
 ### 4.2 Personal SOFA files
 - **Accepted input:** AES69 SOFA `SimpleFreeFieldHRIR`, any sample rate from 44.1 to 96 kHz, any grid with at least 100
@@ -146,6 +160,11 @@ off or in perception-only mode, since audio is not an engine optimization.
   measurements. PureHDF's default chunk cache is replaced by one that decodes each chunk once (SADIE II's file: a minute
   -> 0.1 s); a whole conversion takes about 2 s. The result is written to
   `Saved Games\DCS\Scripts\DcsQvCull\hrtf\<name>.dcshrtf`, through the deployment planner so that Back to stock removes it.
+- **Measurement distance:** a set measured closer than 1 m already holds some near-field effect; the converter warns
+  ("Measured at 0.5 m: ..."). The renderer does not read the file's `measurementDistanceM` yet: its parallax and
+  near-field shelf assume a far-field set (about 1.2 m, like SADIE II), so such a set gets a little too much near field
+  for close sources. Native follow-up: start the parallax and the shelf from the set's own distance.
+- **Repeated directions** (closer than 0.05 degrees) are merged with their impulse responses and `Data.Delay` averaged.
 - **Before it is offered:** the app shows the conversion report (directions, rate, grid coverage, the largest time
   difference between the ears that the fitted radius stands for, warnings). A file the converter rejects is never
   deployed.
@@ -233,7 +252,7 @@ Pass: `0 failure(s)`.
 | A2 | ILD per octave band (250 Hz-16 kHz) at measured directions | within ±1 dB of the `.dcshrtf` IRs' own magnitude |
 | A3 | Interpolation at unmeasured directions (midpoints of triangles) | the magnitude lies between the three neighbours' per band (±0.5 dB tolerance); no notch deeper than the deepest neighbour + 3 dB |
 | A4 | 360°/s horizontal sweep of a 1 kHz sine and of noise | no sample-to-sample step larger than the input's own maximum step × 1.05 plus 1e-4; band level monotonic in the lateral angle (±0.5 dB) |
-| A5 | Energy, front | white noise from the front: output per ear 0 dB ± 0.5 dB (front-normalised set) |
+| A5 | Energy, front | white noise from the front: output per ear 0 dB ± 0.5 dB (front-normalised set; a measured set over 200 Hz-8 kHz, the converter's band) |
 | A6 | Front/back | KU100 front vs back, 2-8 kHz band level difference ≥ 3 dB, as in the source set ±1 dB |
 | A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; parallax: a source 0.3 m at 45° right gets each ear's own direction (the near, right ear sees it at < 45°, the left ear at > 45°) |
 | A8 | Latency | impulse from the front appears at sample `round(onset delay)` ± 1 with no block delay, for block sizes 1, 7, 480, 1056, 4096 |
@@ -242,13 +261,19 @@ Pass: `0 failure(s)`.
 | A11 | Robustness | NaN/Inf input: source reset, output finite, `nonFinite` counted; denormal input: no slowdown (block time within 2× of normal input); frames > 8192 rejected |
 | A12 | Real-time | 64 sources × 480 frames at 48 kHz: p99 block time < 0.5 ms, p50 < 0.3 ms (Release, AVX2; SSE fallback reported, budget 2×); zero heap allocations after Init (counting allocator hook) |
 | A13 | Rates | 44.1, 48, 96 kHz: A1, A5, A8 pass at each |
-| A14 | Default data | the embedded set validates; 8,703 directions (8,802 measured, 99 repeats merged); fitted head radius 0.10-0.13 m (it is 0.1194 m, section 4.1), scaled by 48-66 cm unclamped; A5 on measured ears: their mean 0 ± 0.5 dB, each ear ± 1 dB, the rendered difference between the ears the set's own front IRs' ± 0.2 dB (the KU100's right ear is 1 dB louder at the front); A6 ≥ 2 dB (the KU100's own 2-8 kHz front/back difference is 2.4 dB) and the set's ± 1 dB; A8 |
+| A14 | Default data | the embedded set validates; 8,703 directions (8,802 measured, 99 repeats merged); fitted head radius 0.085-0.105 m (it is 0.0943 m, section 4.1), scaled by 48-66 cm unclamped; A5 on measured ears: their mean 0 ± 0.5 dB, each ear ± 1 dB, the rendered difference between the ears the set's own front IRs' ± 0.2 dB (the KU100's right ear is 1 dB louder at the front); A6 ≥ 2 dB (the KU100's own 2-8 kHz front/back difference is 2.4 dB) and the set's ± 1 dB; A8 |
 
 **C# converter tests** (`tests/DcsVr.Tests`):
 - **SOFA conversion:** the default set converts bit-identically twice. Against the source SOFA's HRIRs, the magnitude
   error per 1/3 octave (200 Hz-16 kHz) is ≤ 1 dB at every direction (minimum phase keeps the magnitude) and the onset
-  ITD error is ≤ 10 µs. (On SADIE II: worst 0.48 dB over all 8,703 directions; the ITD check runs on the synthetic set,
-  whose true delays are known.)
+  ITD error is ≤ 10 µs on the synthetic set, whose true delays are known, also with a strong late 12 kHz lobe in every
+  IR (what pulled the earlier cross-correlation onsets). On SADIE II (whenever `.cache/hrtf` holds the archive): worst
+  magnitude error ≤ 1 dB over all 8,703 directions; the rendered phase delay between the ears over 200-1500 Hz within
+  15 µs RMS and 50 µs at worst of the measured, straight ahead within 30 µs, adjacent directions of the horizontal ring
+  less than 30 µs apart in ITD and 60 µs in one ear's onset; the 44.1 and 96 kHz files fit the same radius within 1 mm; the front level 0 dB over
+  200 Hz-8 kHz.
+- **Repeats and distance:** a repeated direction is the average of its measurements; a set measured under 1 m gets a
+  warning.
 - **SOFA reader and `hrtf-convert`** (`SofaTests.cs`, SOFA files written in the test with PureHDF): spherical
   degrees/radians, cartesian cm, float and double, chunked + deflated and contiguous, Data.Delay `[I R]` and `[M R]`,
   swapped receivers, a turned and a moved listener, FIR-E, missing optional attributes; every refusal of section 4.2;
@@ -281,7 +306,8 @@ Pass: `0 failure(s)`.
   crossfade share one pass over the mono input); the fractional delay is a 24-tap Kaiser-windowed sinc (flat to
   0.42 x the rate; a 4-tap Lagrange loses 3 dB at 16 kHz); a direction crossfade lasts the first 64 frames of the
   sub-block; a triangle change alone does not crossfade (the weights are continuous across edges).
-- The converter's onsets use the minimum-phase cross-correlation, not a -20 dB threshold (hrtf_format.h explains).
+- The converter's onsets are the excess-phase slope over 200-1500 Hz (section 4.1), not a -20 dB threshold nor a
+  full-band cross-correlation (both miss the low-frequency timing of a shadowed ear).
 - **Data and reader (done 2026-11-24, with the user's go for both downloads):**
   - `D1_HRIR_SOFA.zip` from Zenodo record 12092466, pinned by size, MD5 and SHA-256 (`scripts/fetch-hrtf.ps1`,
     `docs/THIRD_PARTY.md`); `native/binaural/data/sadie2_ku100.dcshrtf` generated from it and committed with
@@ -289,16 +315,17 @@ Pass: `0 failure(s)`.
   - PureHDF 2.2.0 (NuGet, MIT) for `SofaReader` (SOFA/HDF5 -> `HrirSet`, section 4.2) and the
     `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> [--name] [--source] [--generic]` command (`SofaConversion`).
   - The real data changed two expectations of the harness, both written in A14 above: the repeats merged (8,703
-    directions, not 8,802) and the fitted radius (0.119 m, not 0.08-0.095 m); and one limit of the renderer, the ITD
+    directions, not 8,802) and the fitted radius (0.119 m then, not 0.08-0.095 m; 0.0943 m since the excess-phase
+    onsets, section 4.1); and one limit of the renderer, the ITD
     radius range (0.04-0.15 m, section 4.1). The set's base delay (`delayBase`) covers a 0.12 m head as before and at
     least the head-size maximum 66 / 57 (`kMaxHeadSizeScale`), so the synthetic harness is unchanged.
   - Two radii: the ITD radius (`Config.headRadiusM`, `SetHeadRadius`: the set's fit x C / 57 cm) only scales the
     delays; the near-field ear positions use the head's real radius (`Config.earRadiusM`, `SetEarRadius`:
     `HeadRadiusFromCircumferenceCm`, 0.06-0.12 m), which the module sets from the same circumference. On the KU100 the
-    ears sat at 0.119 m before (the fit), now at 0.0907 m for 57 cm.
+    ears sat at 0.119 m before (the fit then), now at 0.0907 m for 57 cm.
   - Near field switched on or off fades over 20 ms (`kNearFieldFadeS`): on the KU100 at 0.3 m, switching inside one
     480-frame call let the per-ear delays jump by several samples (A10 step 1.05e-3 at 57 cm, 1.20e-3 at 66 cm, limit
-    1e-3); faded, 3.2e-4 to 4.0e-4.
+    1e-3); faded, 3.2e-4 to 4.0e-4 (4.1e-4 to 4.8e-4 on the set with the excess-phase onsets).
   - A14 adds, on the real set at 48, 57 and 66 cm: the near-field off -> on crossfade (A10 limit), a live head-size
     change from 57 cm (A10 limit) and the parallax angles from the real ear positions (A7, +-0.5 degrees).
 

@@ -4,7 +4,7 @@ namespace DcsVr.Core.Hrtf;
 
 /// <summary>
 /// The converter's DSP: FFT, minimum phase from a magnitude (real cepstrum, the same steps as native/binaural/src/dsp.h),
-/// onset delays and fractional-octave smoothing. Pure functions; deterministic.
+/// onset delays (excess-phase slope) and fractional-octave smoothing. Pure functions; deterministic.
 /// </summary>
 public static class HrtfDsp
 {
@@ -90,47 +90,55 @@ public static class HrtfDsp
         return output;
     }
 
+    /// <summary>Low edge of the band the onset delays are fitted in (hertz).</summary>
+    public const double DelayBandLowHz = 200;
+    /// <summary>High edge of that band: below it the phase difference between the ears carries the time cue (hearing
+    /// follows fine-structure timing up to about 1.5 kHz); above it the pinna's lobes and notches make the phase useless.</summary>
+    public const double DelayBandHighHz = 1500;
+
     /// <summary>
-    /// Onset delay of an impulse response in samples (fractional), as the renderer models it: the lag that best aligns
-    /// the response with its own minimum-phase version (cross-correlation, 8x band-limited upsampling). For a response
-    /// that is exactly minimum phase plus a delay this is that delay; unlike a level threshold it is not pulled early by
-    /// the pre-ringing of a band-limited onset nor late by a shadowed (low-passed) ear (Nam, Abel and Smith, "A method
-    /// for estimating interaural time difference for binaural synthesis", AES 125th Convention, 2008).
+    /// Onset delay of `ir` in samples (fractional), as the renderer models it: `reference` (the minimum-phase IR that is
+    /// played) followed by a pure delay. It is the slope of the excess phase, phase(ir) - phase(reference), fitted by least
+    /// squares (with an offset) over 200-1500 Hz, so that the rendered response keeps the measured phase difference between
+    /// the ears where hearing uses it. A full-band cross-correlation (the earlier method) locks onto the high-frequency
+    /// lobes of a shadowed ear: 120 us RMS off the measured low-frequency ITD of SADIE II's KU100, the front 150 us to the
+    /// left, and jumps of 200 us between neighbouring directions. In the low band the measured response is close to
+    /// minimum phase plus a delay, so its excess phase is almost linear and smooth across directions.
     /// </summary>
-    public static double MinimumPhaseDelay(ReadOnlySpan<float> ir)
+    public static double ExcessPhaseDelay(ReadOnlySpan<float> ir, ReadOnlySpan<float> reference, double sampleRate)
     {
-        var n = NextPow2(Math.Max(ir.Length, 16) * 2);
+        // Bins at most ~12 Hz apart: about a hundred points in the band at any rate.
+        var n = NextPow2(Math.Max(Math.Max(ir.Length, reference.Length) * 2, (int)Math.Ceiling(sampleRate / 12)));
         var a = new Complex[n];
-        for (var i = 0; i < ir.Length; i++) a[i] = ir[i];
-        Fft(a, false);
-        var mag = new double[n / 2 + 1];
-        for (var k = 0; k <= n / 2; k++) mag[k] = a[k].Magnitude;
-        var mp = MinimumPhase(mag, n, n);
         var b = new Complex[n];
-        for (var i = 0; i < n; i++) b[i] = mp[i];
+        for (var i = 0; i < ir.Length; i++) a[i] = ir[i];
+        for (var i = 0; i < reference.Length; i++) b[i] = reference[i];
+        Fft(a, false);
         Fft(b, false);
-        const int up = 8;
-        var x = new Complex[n * up];  // cross-spectrum, zero-padded: the cross-correlation upsampled 8x
-        for (var k = 0; k <= n / 2; k++)
+        var hi = (int)Math.Floor(DelayBandHighHz * n / sampleRate);
+        // Unwrapped from DC upwards (between bins the excess phase moves by far less than pi: 4 ms at 12 Hz is 0.3 rad).
+        double previous = 0, unwrapped = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+        var count = 0;
+        for (var k = 0; k <= hi; k++)
         {
-            var v = a[k] * Complex.Conjugate(b[k]);
-            if (k == n / 2) { x[k] = v / 2; x[n * up - k] = Complex.Conjugate(v) / 2; }
-            else { x[k] = v; if (k > 0) x[n * up - k] = Complex.Conjugate(v); }
+            var p = (a[k] * Complex.Conjugate(b[k])).Phase;
+            if (k == 0) unwrapped = p;
+            else
+            {
+                var step = p - previous;
+                unwrapped += step - 2 * Math.PI * Math.Round(step / (2 * Math.PI));
+            }
+            previous = p;
+            var f = k * sampleRate / n;
+            if (f < DelayBandLowHz) continue;
+            var w = 2 * Math.PI * f;
+            sx += w; sy += unwrapped; sxx += w * w; sxy += w * unwrapped; count++;
         }
-        Fft(x, true);
-        int best = 0; var bestValue = double.MinValue;
-        for (var i = 0; i < x.Length; i++)
-        {
-            var lag = i <= x.Length / 2 ? i : i - x.Length;
-            if (lag < -up * 4) continue;  // a minimum-phase response leads the measured one: lags are >= 0 (a few samples of slack)
-            if (x[i].Real > bestValue) { bestValue = x[i].Real; best = lag; }
-        }
-        // Parabolic refinement between the upsampled points.
-        int Idx(int lag) => ((lag % x.Length) + x.Length) % x.Length;
-        double y0 = x[Idx(best - 1)].Real, y1 = x[Idx(best)].Real, y2 = x[Idx(best + 1)].Real, den = y0 - 2 * y1 + y2;
-        var frac = Math.Abs(den) > 1e-30 ? 0.5 * (y0 - y2) / den : 0;
-        return Math.Max(0, (best + frac) / up);
+        var den = count * sxx - sx * sx;
+        var slope = den > 0 ? (count * sxy - sx * sy) / den : 0;  // phase per angular frequency: minus the delay in seconds
+        return -slope * sampleRate;
     }
+
 
     /// <summary>Power spectrum smoothed over 1/`fraction` octave (centred, bins 1..n/2; bin 0 kept).</summary>
     public static double[] SmoothFractionalOctave(double[] power, int n, double sampleRate, double fraction)

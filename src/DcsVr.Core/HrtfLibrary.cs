@@ -160,8 +160,8 @@ public sealed record HrtfFacts(string Title, string Source, int SampleRate, int 
         if (!Above || !Below) list.Add(!Above && !Below ? "The measurements cover little above or below you: height will sound vague." : !Above ? "The measurements cover little above you: sounds overhead will sound vague." : "The measurements cover little below you.");
         if (Directions < 100) list.Add("Few measured directions: directions between them are guessed.");
         if (Horizontal < 12) list.Add("Few measurements around you at ear height: left, right and behind may be less exact.");
-        // The radius is a Woodworth fit of the measured onsets, larger than the head itself (SADIE II's KU100: 119 mm, about
-        // 0.9 ms between the ears): unusual below 70 mm or above 140 mm (about 0.52 and 1.05 ms).
+        // The radius is a Woodworth fit of the onsets, close to the head's own size (SADIE II's KU100: 94 mm, about
+        // 0.71 ms between the ears): unusual below 70 mm or above 140 mm (about 0.52 and 1.05 ms).
         if (HeadRadiusMm is < 70 or > 140) list.Add($"The time difference between the ears in the file (up to {MaxItdMs:0.00} ms) is unusual. Check that it is your own measurement.");
         return list;
     }

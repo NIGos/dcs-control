@@ -146,20 +146,63 @@ static class HrtfTests
             require(worstDb <= 1.0, $"magnitude error {worstDb:0.000} dB");
             require(worstUs <= 10.0, $"ITD error {worstUs:0.00} us");
             require(Math.Abs(conv.Report.FittedHeadRadiusM - HeadRadius) <= 0.002, $"radius {conv.Report.FittedHeadRadiusM}");
-            // Front normalised: the interpolated front IRs carry unit energy per ear (on average).
-            var dirs = Enumerable.Range(0, d.DirectionCount).Select(i => Dir(d, (uint)i)).ToArray();
-            var (v, w) = HrtfConverter.Locate(dirs, d.Triangles.Select(x => (int)x).ToArray(), [1, 0, 0]);
-            var energy = 0.0;
-            for (var e = 0; e < 2; e++)
-                for (var k = 0; k < d.Taps; k++)
-                {
-                    var s = 0.0;
-                    for (var j = 0; j < 3; j++) s += w[j] * d.Ir[(v[j] * 2 + e) * d.Taps + k];
-                    energy += 0.5 * s * s;
-                }
-            require(Math.Abs(10 * Math.Log10(energy)) < 0.01, $"front energy {10 * Math.Log10(energy):0.000} dB");
+            // Front normalised: noise from the interpolated front IRs comes out at 0 dB over 200 Hz-8 kHz (mean of the ears).
+            var energy = FrontBandEnergy(d);
+            require(Math.Abs(10 * Math.Log10(energy)) < 0.05, $"front energy {10 * Math.Log10(energy):0.000} dB");
             // Diffuse-field EQ: limited to +-15 dB.
             require(conv.DiffuseFieldEqDb.All(x => x >= -15 && x <= 15), "EQ limit");
+        });
+
+        test("HRTF converter: onsets follow the low-band timing, not a strong late high-frequency lobe (ITD within 10 us)", () =>
+        {
+            // The earlier full-band cross-correlation locked onto such lobes (on SADIE II's KU100: 120 us RMS off, the
+            // front 150 us to the left). Here every ear gets a 12 kHz burst 0.5 ms after its onset, as strong as the IR.
+            var set = Synthetic(LatLong(10, 10));
+            var rate = set.SampleRate;
+            var lobed = new float[set.Ir.Length][][];
+            for (var i = 0; i < set.Ir.Length; i++)
+            {
+                lobed[i] = new float[2][];
+                for (var e = 0; e < 2; e++)
+                {
+                    var ir = (float[])set.Ir[i][e].Clone();
+                    var peak = ir.Max(v => Math.Abs(v));
+                    var start = (int)Math.Round(10 + EarDelay(set.Directions[i], e) * rate + 0.0005 * rate);
+                    for (var k = 0; k < 32 && start + k < ir.Length; k++)
+                        ir[start + k] += (float)(peak * 0.5 * (1 - Math.Cos(2 * Math.PI * k / 32)) * Math.Sin(2 * Math.PI * 12000 * k / rate));
+                    lobed[i][e] = ir;
+                }
+            }
+            var d = DcsHrtfFile.Read(HrtfConverter.Convert(new HrirSet { SampleRate = rate, Directions = set.Directions, Ir = lobed }, personal: false).File);
+            double worst = 0, worstEar = 0;
+            var earliest = Enumerable.Range(0, set.Directions.Length * 2).Min(j => EarDelay(set.Directions[j / 2], j % 2));
+            for (var i = 0; i < d.DirectionCount; i++)
+            {
+                var itd = (d.Delays[i * 2 + 1] - d.Delays[i * 2]) / d.SampleRate;
+                worst = Math.Max(worst, Math.Abs(itd - (EarDelay(set.Directions[i], 1) - EarDelay(set.Directions[i], 0))) * 1e6);
+                // Each ear's own onset (the renderer looks each ear up from its own direction in the near field).
+                for (var e = 0; e < 2; e++) worstEar = Math.Max(worstEar, Math.Abs(d.Delays[i * 2 + e] / d.SampleRate - (EarDelay(set.Directions[i], e) - earliest)) * 1e6);
+            }
+            Console.WriteLine($"  HRTF converter with high-frequency lobes: worst ITD error {worst:0.00} us, worst onset error per ear {worstEar:0.00} us");
+            require(worst <= 10 && worstEar <= 10, $"ITD error {worst:0.00} us, onset error {worstEar:0.00} us");
+        });
+
+        test("HRTF converter: a repeated direction is the average of its measurements; a set measured under 1 m is flagged", () =>
+        {
+            var set = Synthetic(LatLong(15, 15), length: 64);
+            const int r = 40;
+            var half = set.Ir[r].Select(e => e.Select(v => v * 0.5f).ToArray()).ToArray();
+            var repeated = new HrirSet { SampleRate = 48000, Directions = [.. set.Directions, (double[])set.Directions[r].Clone()], Ir = [.. set.Ir, half] };
+            var averaged = set.Ir.Select(m => m.Select(e => e.ToArray()).ToArray()).ToArray();
+            averaged[r] = set.Ir[r].Select(e => e.Select(v => (float)(0.75 * v)).ToArray()).ToArray();
+            var a = HrtfConverter.Convert(repeated, personal: true);
+            var b = HrtfConverter.Convert(new HrirSet { SampleRate = 48000, Directions = set.Directions, Ir = averaged }, personal: true);
+            require(a.Report.MergedDuplicates == 1, "merged " + a.Report.MergedDuplicates);
+            DcsHrtfFile.Data da = DcsHrtfFile.Read(a.File), db = DcsHrtfFile.Read(b.File);
+            require(da.Ir.AsSpan().SequenceEqual(db.Ir) && da.Delays.AsSpan().SequenceEqual(db.Delays), "the repeat is not the average of the two measurements");
+            var near = HrtfConverter.Convert(new HrirSet { SampleRate = 48000, Directions = set.Directions, Ir = set.Ir, MeasurementDistanceM = 0.5 }, personal: true);
+            require(near.Report.Warnings.Any(w => w.StartsWith("Measured at 0.5 m", StringComparison.Ordinal)), string.Join("; ", near.Report.Warnings));
+            require(!b.Report.Warnings.Any(w => w.StartsWith("Measured at", StringComparison.Ordinal)), "1.2 m is far field");
         });
 
         test("HRTF converter: rejects bad input with a clear reason", () =>
@@ -233,4 +276,27 @@ static class HrtfTests
     }
 
     static double[] Dir(DcsHrtfFile.Data d, uint i) => [d.Directions[i * 3], d.Directions[i * 3 + 1], d.Directions[i * 3 + 2]];
+
+    /// <summary>Mean power per bin over 200 Hz-8 kHz of the interpolated front IRs, both ears (1 = 0 dB).</summary>
+    internal static double FrontBandEnergy(DcsHrtfFile.Data d)
+    {
+        var dirs = Enumerable.Range(0, d.DirectionCount).Select(i => Dir(d, (uint)i)).ToArray();
+        var (v, w) = HrtfConverter.Locate(dirs, d.Triangles.Select(x => (int)x).ToArray(), [1, 0, 0]);
+        const int n = 4096;
+        double sum = 0; var count = 0;
+        for (var e = 0; e < 2; e++)
+        {
+            var front = new float[d.Taps];
+            for (var k = 0; k < d.Taps; k++)
+                for (var j = 0; j < 3; j++) front[k] += (float)(w[j] * d.Ir[(v[j] * 2 + e) * d.Taps + k]);
+            var mag = HrtfDsp.Magnitude(front, n);
+            for (var k = 1; k <= n / 2; k++)
+            {
+                var f = k * (double)d.SampleRate / n;
+                if (f < HrtfConverter.FrontBandLowHz || f > HrtfConverter.FrontBandHighHz) continue;
+                sum += mag[k] * mag[k]; count++;
+            }
+        }
+        return sum / count;
+    }
 }
