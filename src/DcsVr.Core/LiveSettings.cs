@@ -135,6 +135,8 @@ public static class LiveSettings
             // filled (foveated_uncovered_fill), which OFXR reads at start: the whole file waits.
             Kind.Flow => launch.FrameGen == FrameGeneration.Nvidia && (f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen),
             Kind.Panel => launch.UsesHeadsetPanel,
+            // With Soft focus edge on, Hide the focus edge also switches dcsvr_edge_match, which Quad Views reads at start.
+            Kind.Quad => f.Name != "quadHideFocusEdge" || !launch.QuadEdgeMatch,
             _ => true
         }).Select(f => f.Name)];
     }

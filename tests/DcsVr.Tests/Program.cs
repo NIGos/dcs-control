@@ -7077,6 +7077,9 @@ Test("Live 0.7: Hide the focus edge and its parts switch live with a 0.7 install
     // the switch then waits for the next launch and the Quad Views file is left as it is (default profiles have it off).
     var h = E2e("live-07-edge-match"); var soft = draft with { QuadEdgeMatch = true }; h.Service.SyncApplied(soft, E2eInventory(h));
     var softEntry = LiveEntry(h, LiveSettings.QuadFile);
+    var softApplied = h.Service.ReadAppliedProfile()!;
+    Require(!LiveSettings.AvailableFields(softApplied.Profile, softApplied.Journal).Contains("quadHideFocusEdge")
+        && LiveSettings.AvailableFields(softApplied.Profile with { QuadEdgeMatch = false }, softApplied.Journal).Contains("quadHideFocusEdge"), "no Live tag with Soft focus edge on, Live without it");
     var softOff = WhileDcsRuns(h, () => h.Service.ApplyLive(soft with { QuadHideFocusEdge = false }, E2eInventory(h)));
     Require(softOff.Written.Count == 0 && softOff.Applied.Count == 0 && softOff.Waiting.SequenceEqual(["quadHideFocusEdge"]) && Hashing.FileSha256(softEntry.Path) == softEntry.InstalledSha256, softOff.Message);
     Require(QuadEdgeLine(ConfigurationWriters.QuadViews(soft)) == "0.6" && QuadEdgeLine(ConfigurationWriters.QuadViews(soft with { QuadHideFocusEdge = false })) == "0", "the launch then writes edge match off");
