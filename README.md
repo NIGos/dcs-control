@@ -22,8 +22,8 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 
 **New in 0.7.0:** 0.6.7 was never released, so coming from 0.6.6 all of this is new. Full list: [release notes](docs/RELEASE_NOTES.md).
 
-- **Foveated frame generation** (experimental, off by default): the focus area and the rest of the view get their generated frames separately, for about half the GPU time and less video memory.
-- **Quest 3 VD**: a new route for a Meta Quest 3 through Virtual Desktop (VDXR), contributed in GitHub PR #29.
+- **Foveated frame generation** (experimental, off by default): the focus area and the rest of the view get their generated frames separately, for less than half the GPU time and less video memory.
+- **Quest 3 VD**: a new route for a Meta Quest 3 through Virtual Desktop (VDXR), contributed by @Mav87th in GitHub PR #29.
 - **Hide the focus edge** (on by default): the short flash at the edge of the focus area when you look somewhere else is much smaller.
 - **Eye-tracking options** from @Heartbreak-1 (GitHub PR #26): **Soft focus edge**, **Stay ahead until your eyes land** and **Slide back when tracking is lost** (experimental).
 - **Go back** to the version you had before an update.
@@ -34,13 +34,13 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 - **GPU savings** on the Engine page: **Skip hidden water** and **Skip unused effects** (experimental, off by default).
 - **Both eyes at once** for frame generation and **Match brightness** for DLSS 5 (both off by default).
 - **Lighter pages**: each card shows its main settings, the rest sit in folds that say what is set.
-- More settings apply in flight, fewer requirements for Sharp HUD, Far depth, Pupil shift and Eye-focus blur, and fixes for GitHub #21, #24, #27 and #30-#33.
+- More settings apply in flight, fewer requirements for Sharp HUD, Far depth, Pupil shift and Eye-focus blur, the Vertical offset requested in GitHub #24, and fixes for GitHub #21, #27 and #30-#33.
 
 ## What it does
 
 **For every pilot, on a monitor or with any headset**
 
-- **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR: about **+50-60 % FPS** and **p95 frame time −34 %**. How much you gain depends on how CPU-bound you are. It also fixes a DCS terrain loop that wastes CPU time.
+- **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR (in 0.5): about **+50-60 % FPS** and **p95 frame time −34 %**. How much you gain depends on how CPU-bound you are. It also fixes a DCS terrain loop that wastes CPU time.
 - **GPU savings** on the same page: Faster terrain and shader paths (on), and Cache distant shadows, Skip hidden water and Skip unused effects (experimental, off by default).
 - **CPU Boost:** gives DCS priority and its fastest cores while it runs.
 - **Free VRAM:** closes memory-hungry apps before the flight and reopens them after.
@@ -90,7 +90,7 @@ Engine Optimizations then stay on whenever DCS starts. The VR features and CPU B
 
 ## Good to know
 
-- **Multiplayer is at your own risk.** Only single player is tested. With DLSS 5 or Foveated Super Resolution the app places a `dxgi.dll` loader and Cheeky's files in DCS's `bin` folder; with Engine Optimizations, and with frame generation in VR, Depth boost, Far depth or the Visual realism effects, it adds a hook and a module in `Saved Games\DCS\Scripts`. Without DLSS 5 nothing in the DCS install changes. Pilots report that Integrity Check is not affected; if a server refuses you, use Back to stock DCS before joining it.
+- **Multiplayer is at your own risk.** Only single player is tested. With DLSS 5 or Foveated Super Resolution the app places a `dxgi.dll` loader and Cheeky's files in DCS's `bin` folder; with Engine Optimizations, and with frame generation in VR, Depth boost, Far depth or the Visual realism effects, it adds a hook and a module in `Saved Games\DCS\Scripts`. Without DLSS 5 nothing in the DCS install changes. Integrity Check has not been tested; if a server refuses you, use Back to stock DCS before joining it.
 - **Frame generation adds latency while it generates frames**, more in 3× than in 2×. With *Only when needed* (the default) that happens only while DCS can't keep up; DCS Control sets DCS's frame limit to the refresh rate for it. The mouse cursor moves at DCS's own frame rate unless **Smooth mouse cursor** is on.
 - **Try new features one at a time.** Visual realism, Sharp HUD, the Perception features, foveated frame generation and the Engine page's experimental GPU savings are off by default. Turn them on one by one and tell us what you see.
 - **Pimax Play changed its scales in 2026-10.** DCS Control reads the new ones. If you came from 0.5.10, your bundled Quad Views focus may look smaller with the same Pimax Play sliders: raise Horizontal/Vertical FOV there.
@@ -109,7 +109,7 @@ DCS Control's own code is licensed under the GNU General Public License v3.0 or 
 - **Sboys CustomHeadsetOpenVR** (GPL-2.0 source; downloaded from its official release, not bundled)
 - **AMD FidelityFX SDK** (MIT), **Microsoft .NET** and the **WebView2 SDK**
 
-Code contributions in 0.7: the Quest 3 VD route (GitHub PR #29) and the eye-tracking options from @Heartbreak-1 (GitHub PR #26). Thank you.
+Code contributions in 0.7: the Quest 3 VD route from @Mav87th (GitHub PR #29) and the eye-tracking options from @Heartbreak-1 (GitHub PR #26). Thank you.
 
 The NVIDIA DLSS runtime is not included. Every release has a sources ZIP with the complete corresponding source. Details are in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md). DCS World is a trademark of Eagle Dynamics; Pimax, NVIDIA and DLSS are trademarks of their owners. This project isn't affiliated with any of them.
 

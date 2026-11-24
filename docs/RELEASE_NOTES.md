@@ -2,12 +2,12 @@
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.
 
-**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. The focus area and the rest of the view get their generated frames separately: about half the GPU time for generated frames, and 4 GB less video memory on the test PC.
-- The two are joined into one image before the headset gets it, so there is no line or flicker at the edge of the focus area (about 0.13 ms of GPU per frame).
+**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. The focus area and the rest of the view get their generated frames separately: less than half the GPU time for generated frames (3.9 instead of 9.75 ms on the test PC) and about 3 GB less video memory.
+- The two are joined into one image before the headset gets it, so there is no line or flicker at the edge of the focus area (about 0.14 ms of GPU per frame).
 - It helps most with a small focus area; with a very large one it can cost more than it saves.
 - It needs bundled Quad Views, NVIDIA frame generation and the Pimax or Quest 3 VD route. It gets ready on the loading screen, which pauses once for half a second.
 
-**Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop (VDXR), contributed in GitHub PR #29 and flown with an RTX 5070 Ti.
+**Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop (VDXR), contributed by @Mav87th in GitHub PR #29 and flown with an RTX 5070 Ti.
 - Quad Views uses a fixed focus in the centre (the Quest 3 has no eye tracking), 55% × 75% of the view to start with, so the instruments stay sharp.
 - Frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off.
 - Refresh rate 72, 80, 90 or 120 Hz, as set in Virtual Desktop. Keep Synchronous Spacewarp off there; Checks reminds you.
@@ -38,7 +38,7 @@
 - If Pimax Play is on a preset, the first Launch DCS after the update writes the new values and says so. With Custom nothing changes.
 - The Quad Views page, the Coverage preview and the Overview show the focus size in percent of the view.
 
-**Vertical offset for the focus area (GitHub #24).** With Focus area values on *Set here*, **Vertical offset** moves the focus area below (negative) or above where you look. About -10 to -20 keeps the gauges sharp while you look outside. It uses Pimax Play's scale (100 is a quarter of the view's height).
+**Vertical offset for the focus area (GitHub #24, requested by @jeffgreenhut).** With Focus area values on *Set here*, **Vertical offset** moves the focus area below (negative) or above where you look. About -10 to -20 keeps the gauges sharp while you look outside. It uses Pimax Play's scale (100 is a quarter of the view's height).
 
 **A stuck DCS shows on every page (GitHub #21).** The status at the top of every page says **DCS has no window**, **DCS is not responding** or **DCS has crashed** (its crash window is still open), with **End DCS** next to it. End DCS also works on a DCS running with administrator rights: it asks Windows once.
 
