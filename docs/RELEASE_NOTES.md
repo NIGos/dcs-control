@@ -77,6 +77,9 @@
 - The engine's test suite no longer stops at once on a headset without quad views. It compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
 - AltGr+Shift+F11 works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt (GitHub #32).
 - Diagnostic package: a PC named after its user ("JOHN-PC") shows as `<pc>`, not `<user>-PC` (GitHub #31, reported by @Mav87th).
+- Diagnostic package: the headset serial number is also removed where a log writes it right next to other letters.
+- With FidelityFX frame generation, a damaged optical flow value no longer blocks Launch DCS with a link to a setting you can't see: those checks apply only to NVIDIA frame generation.
+- Launch DCS after setting a live change back now says "settings changed live are set back", instead of a reason that read like an app update.
 - The DLSS page and the guide say plainly that NVIDIA does not offer `nvngx_dlssnr.dll` on its own and that DCS Control cannot provide it. With a patched copy on an RTX 50 card, the page says to use NVIDIA's original file (GitHub #33, reported by @Mav87th).
 - For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
 - With DLSS 5 (Cheeky) hooked into DCS's DLSS first, the Focus and Periphery DLSS presets could stay at DCS's own preset. Both work now.
