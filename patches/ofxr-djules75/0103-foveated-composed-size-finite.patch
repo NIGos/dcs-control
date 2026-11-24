@@ -1,0 +1,122 @@
+Foveated single layer (0099): without a recommended view size from the runtime, composed_size takes each side of the
+composed image from the periphery's field of view at the focus layer's pixel density. A field of view that is not
+finite gave a NaN span, which went through std::clamp (NaN passes it) into std::lround: a 0 wide composed swapchain
+(MSVC, /O2; an infinite span gave 8192). Now a span that is not finite counts as none (the periphery image's own size, as with no focus span), and a
+periphery image wider than 8192 no longer gives std::clamp a low bound above its high one. The size math moves to
+xrfg::foveated_composed_side (d3d12_foveated_composer.hpp) so it can be tested; same result for finite spans.
+foveated_composer_tests checks it first (12 cases): before, the NaN (0) and infinite (8192) cases fail; after, all pass.
+diff --git a/include/xrfg/d3d12_foveated_composer.hpp b/include/xrfg/d3d12_foveated_composer.hpp
+--- a/include/xrfg/d3d12_foveated_composer.hpp
++++ b/include/xrfg/d3d12_foveated_composer.hpp
+@@ -10,7 +10,9 @@
+ #include <d3d12.h>
+ #include <wrl/client.h>
+ 
++#include <algorithm>
+ #include <array>
++#include <cmath>
+ #include <cstdint>
+ #include <memory>
+ #include <mutex>
+@@ -129,4 +131,20 @@ private:
+     std::unique_ptr<Impl> impl_;
+ };
+ 
++// DCS Control (0103): one side of the composed image when the runtime gives no
++// recommended view size: the periphery's span (a difference of tangents) at the
++// focus layer's pixel density, times `scale`, never smaller than the periphery
++// image (nor 16), at most 8192. A span that is not finite (a field of view that
++// is not) counts as none: the periphery image's own size, never a NaN reaching
++// std::clamp and std::lround.
++[[nodiscard]] inline std::uint32_t foveated_composed_side(double periphery_span, double focus_span,
++    std::int32_t focus_pixels, std::int32_t periphery_pixels, double scale) noexcept {
++    const double low = static_cast<double>(std::clamp(periphery_pixels, 16, 8192));
++    double pixels = std::isfinite(periphery_span) && std::isfinite(focus_span) && focus_span > 1.0e-6
++        ? periphery_span / focus_span * focus_pixels * scale
++        : 0.0;
++    if (!std::isfinite(pixels)) pixels = 0.0;
++    return static_cast<std::uint32_t>(std::lround(std::clamp(pixels, low, 8192.0)));
++}
++
+ } // namespace xrfg
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -10057,13 +10057,9 @@ void note_single_layer(SessionState& session, std::uint32_t state, std::uint32_t
+     const double py = span(periphery.fov.angleDown, periphery.fov.angleUp);
+     const double fx = span(focus.fov.angleLeft, focus.fov.angleRight);
+     const double fy = span(focus.fov.angleDown, focus.fov.angleUp);
+-    const auto side = [&](double periphery_span, double focus_span, std::int32_t focus_pixels, std::int32_t periphery_pixels) {
+-        double pixels = focus_span > 1.0e-6 && std::isfinite(focus_span) ? periphery_span / focus_span * focus_pixels : 0.0;
+-        pixels = std::clamp(pixels * scale, static_cast<double>(std::max(periphery_pixels, 16)), 8192.0);
+-        return static_cast<std::uint32_t>(std::lround(pixels));
+-    };
+-    return {side(px, fx, focus.subImage.imageRect.extent.width, periphery.subImage.imageRect.extent.width),
+-        side(py, fy, focus.subImage.imageRect.extent.height, periphery.subImage.imageRect.extent.height)};
++    // DCS Control (0103): a field of view that is not finite gives the periphery image's size (foveated_composed_side).
++    return {xrfg::foveated_composed_side(px, fx, focus.subImage.imageRect.extent.width, periphery.subImage.imageRect.extent.width, scale),
++        xrfg::foveated_composed_side(py, fy, focus.subImage.imageRect.extent.height, periphery.subImage.imageRect.extent.height, scale)};
+ }
+ 
+ [[nodiscard]] bool compose_foveated_single_layer(
+diff --git a/tests/foveated_composer_tests.cpp b/tests/foveated_composer_tests.cpp
+--- a/tests/foveated_composer_tests.cpp
++++ b/tests/foveated_composer_tests.cpp
+@@ -30,6 +30,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <limits>
+ #include <random>
+ #include <span>
+ #include <stdexcept>
+@@ -623,6 +624,37 @@ int run_bench() {
+     return 0;
+ }
+ 
++// DCS Control (0103): the composed size without a recommended view size. A
++// field of view that is not finite gives the periphery image's size, never a
++// NaN through std::clamp and std::lround (a 2^31 or 0 wide swapchain).
++bool composed_size_checks() {
++    const double nan = std::numeric_limits<double>::quiet_NaN();
++    const double inf = std::numeric_limits<double>::infinity();
++    struct Case {
++        double periphery_span, focus_span;
++        std::int32_t focus_pixels, periphery_pixels;
++        double scale;
++        std::uint32_t expected;
++        const char* name;
++    };
++    bool ok = true;
++    for (const Case c : {Case{3.2, 0.8, 1952, 1076, 1.0, 7808, "Quad Views geometry"},
++             Case{3.2, 0.8, 1952, 1076, 0.5, 3904, "50 % scale"}, Case{3.2, 0.1, 1952, 1076, 1.0, 8192, "at most 8192"},
++             Case{0.4, 0.8, 1952, 1076, 1.0, 1076, "never below the periphery"}, Case{3.2, 0.0, 1952, 1076, 1.0, 1076, "no focus span"},
++             Case{nan, 0.8, 1952, 1076, 1.0, 1076, "periphery span NaN"}, Case{inf, 0.8, 1952, 1076, 1.0, 1076, "periphery span infinite"},
++             Case{3.2, nan, 1952, 1076, 1.0, 1076, "focus span NaN"}, Case{3.2, inf, 1952, 1076, 1.0, 1076, "focus span infinite"},
++             Case{-inf, 0.8, 1952, 1076, 1.0, 1076, "periphery span -infinite"}, Case{3.2, 0.8, 1952, 9000, 1.0, 8192, "periphery over 8192"},
++             Case{3.2, 0.8, 1952, 8, 0.001, 16, "at least 16"}}) {
++        const std::uint32_t got = xrfg::foveated_composed_side(c.periphery_span, c.focus_span, c.focus_pixels, c.periphery_pixels, c.scale);
++        if (got != c.expected) {
++            std::printf("composed size, %s: %u, expected %u -> FAILED\n", c.name, got, c.expected);
++            ok = false;
++        }
++    }
++    std::printf(ok ? "composed size without a recommended size: all checks passed\n" : "composed size FAILED\n");
++    return ok;
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -632,7 +664,10 @@ int main() {
+         const bool want_bench = _dupenv_s(&bench, &length, "XRFG_TEST_FOVEATED_COMPOSE_BENCH") == 0 && bench != nullptr &&
+             std::string(bench) == "1";
+         std::free(bench);
+-        return want_bench ? run_bench() : run_tests();
++        if (want_bench) return run_bench();
++        const bool sizes = composed_size_checks();
++        const int composition = run_tests();
++        return sizes ? composition : 1;
+     } catch (const std::exception& error) {
+         std::printf("error: %s\n", error.what());
+         return 2;

@@ -128,6 +128,14 @@ Test("Foveated Super Resolution is stereo only: Quad Views turns it off and neve
 });
 Test("Sboys cannot use native Pimax Quad Views", () => Require(ProfileValidation.Validate(new() { Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "quad-runtime")));
 Test("Unknown profile schema and invalid numbers rejected", () => { var p = new VrProfile { SchemaVersion = 99, FoveaWidth = double.NaN, NeuralIntensity = 2 }; Require(ProfileValidation.Validate(p).Count(i => i.Severity == IssueSeverity.Error) == 3); });
+Test("Optical flow checks only with NVIDIA frame generation (their fold is hidden otherwise)", () =>
+{
+    var bad = new VrProfile { NvidiaFlowScale = 60, FlowPreset = (NvidiaFlowPreset)9 };
+    bool Flow(VrProfile p) => ProfileValidation.Validate(p).Any(i => i.Code is "flow-scale" or "flow-preset");
+    Require(Flow(bad with { FrameGen = FrameGeneration.Nvidia }), "NVIDIA: checked");
+    Require(!Flow(bad with { FrameGen = FrameGeneration.FidelityFx }), "FidelityFX: not checked");
+    Require(!Flow(bad with { FrameGen = FrameGeneration.Off }), "Off: not checked");
+});
 Test("Profile JSON roundtrip", () => Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(ProfilePresets.All[1])) == ProfilePresets.All[1]));
 Test("Advanced DLSS 5 tuning reaches the renderer", () =>
 {
@@ -2013,6 +2021,9 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     Require(serials.Count == 0 && placeholder.Contains("serial: <serial>") && placeholder.Contains("sn=<serial>") && placeholder.Contains("frame 1000000 took 12345678 us") && placeholder.Contains("2.9.31.1234567"), placeholder);
     var real = learnt("serial: 20230417 | seen 20230417 | id 920230417 | 202304170 | map 20230417platMap");
     Require(serials.SetEquals(["20230417"]) && real == "serial: <serial> | seen <serial> | id 920230417 | 202304170 | map <serial>platMap", real);
+    // A serial that starts or ends with a letter is removed also where it touches a word; words and longer numbers stay.
+    var glued = learnt("serial: PSX7TEST0042A | devPSX7TEST0042A | PSX7TEST0042Aplatmap | 9PSX7TEST0042A | Testing stays | test0042 stays");
+    Require(glued == "serial: <serial> | dev<serial> | <serial>platmap | 9<serial> | Testing stays | test0042 stays", glued);
 });
 Test("The diagnostic package removes a headset serial everywhere, also where it is bare and was written before its label, and network addresses", () =>
 {
@@ -3286,7 +3297,7 @@ Test("Custom quality controls target supported provider fields", () =>
 Test("Invalid quality controls cannot be deployed", () =>
 {
     var invalid = new[] { new VrProfile { QuadFocusScale = double.NaN }, new VrProfile { QuadFocusScale = 2.01 }, new VrProfile { QuadSharpening = -1 },
-        new VrProfile { QuadEdgeBlend = .51 }, new VrProfile { FlowPreset = (NvidiaFlowPreset)99 } };
+        new VrProfile { QuadEdgeBlend = .51 }, new VrProfile { FrameGen = FrameGeneration.Nvidia, FlowPreset = (NvidiaFlowPreset)99 } };
     foreach (var p in invalid) Require(ProfileValidation.Validate(p).Any(i => i.Severity == IssueSeverity.Error));
 });
 Test("Steam libraries detect escaped paths and ignore app IDs", () =>
@@ -6810,6 +6821,7 @@ Test("Live: refused without the applied profile; a draft set back is applied aga
     // Set back to the applied values: the draft is the applied profile again, but its file is not; Launch DCS sees it.
     var back = f.Service.SyncApplied(draft, inventory);
     Require(back.Kind == LaunchSyncKind.Applied && File.ReadAllBytes(engine).AsSpan().SequenceEqual(launched), back.Message);
+    Require(back.Message.Contains("(settings changed live are set back)"), "the reason names the live change, not an app update: " + back.Message);
     Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Unchanged);
     // Back to stock DCS after a live apply: complete, nothing left.
     WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { ColorFixSaturation = 0.9, DepthBoostNearM = 1.3 }, inventory));

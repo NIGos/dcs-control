@@ -493,7 +493,10 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                      && inventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable")?.Trim() == "true") reason = "DCS's custom IPD was changed in DCS";
             // Before the frame limit: a new default (Frame generation only when needed) also changes the Match refresh
             // limit, and that is not the headset's doing. The component settings never depend on the refresh rate.
-            else if (WritersChanged(draft, inventory, applied.Journal, out planned, out var writers)) reason = writers;
+            // Settings written live and then set back in the draft also differ from the recorded files: said as such, not
+            // as an app update.
+            else if (WritersChanged(draft, inventory, applied.Journal, out planned, out var writers))
+                reason = LiveChangesInEffect(applied) ? "settings changed live are set back" : writers;
             else if (FrameCapChanged(draft, applied.Journal, inventory)) reason = "the headset's refresh rate changed";
             else
             {
@@ -694,6 +697,10 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { return System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile))!.AsObject(); }
         return effective;
     }
+
+    /// <summary>Settings written live since the launch are still in effect (<see cref="InEffect"/> differs from profile.json).</summary>
+    private bool LiveChangesInEffect(AppliedProfile applied) =>
+        !System.Text.Json.Nodes.JsonNode.DeepEquals(InEffect(applied), System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile)));
 
     private void SaveInEffect(VrProfile applied, TransactionJournal journal, System.Text.Json.Nodes.JsonObject effective)
     {
