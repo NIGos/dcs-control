@@ -128,6 +128,14 @@ Test("Foveated Super Resolution is stereo only: Quad Views turns it off and neve
 });
 Test("Sboys cannot use native Pimax Quad Views", () => Require(ProfileValidation.Validate(new() { Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "quad-runtime")));
 Test("Unknown profile schema and invalid numbers rejected", () => { var p = new VrProfile { SchemaVersion = 99, FoveaWidth = double.NaN, NeuralIntensity = 2 }; Require(ProfileValidation.Validate(p).Count(i => i.Severity == IssueSeverity.Error) == 3); });
+Test("Optical flow checks only with NVIDIA frame generation (their fold is hidden otherwise)", () =>
+{
+    var bad = new VrProfile { NvidiaFlowScale = 60, FlowPreset = (NvidiaFlowPreset)9 };
+    bool Flow(VrProfile p) => ProfileValidation.Validate(p).Any(i => i.Code is "flow-scale" or "flow-preset");
+    Require(Flow(bad with { FrameGen = FrameGeneration.Nvidia }), "NVIDIA: checked");
+    Require(!Flow(bad with { FrameGen = FrameGeneration.FidelityFx }), "FidelityFX: not checked");
+    Require(!Flow(bad with { FrameGen = FrameGeneration.Off }), "Off: not checked");
+});
 Test("Profile JSON roundtrip", () => Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(ProfilePresets.All[1])) == ProfilePresets.All[1]));
 Test("Advanced DLSS 5 tuning reaches the renderer", () =>
 {
@@ -3286,7 +3294,7 @@ Test("Custom quality controls target supported provider fields", () =>
 Test("Invalid quality controls cannot be deployed", () =>
 {
     var invalid = new[] { new VrProfile { QuadFocusScale = double.NaN }, new VrProfile { QuadFocusScale = 2.01 }, new VrProfile { QuadSharpening = -1 },
-        new VrProfile { QuadEdgeBlend = .51 }, new VrProfile { FlowPreset = (NvidiaFlowPreset)99 } };
+        new VrProfile { QuadEdgeBlend = .51 }, new VrProfile { FrameGen = FrameGeneration.Nvidia, FlowPreset = (NvidiaFlowPreset)99 } };
     foreach (var p in invalid) Require(ProfileValidation.Validate(p).Any(i => i.Severity == IssueSeverity.Error));
 });
 Test("Steam libraries detect escaped paths and ignore app IDs", () =>
