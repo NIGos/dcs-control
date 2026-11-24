@@ -275,7 +275,7 @@ static class SofaTests
             require(!File.ReadAllText(Path.Combine(library.Folder, "my ears.json")).Contains("My measurements", StringComparison.Ordinal), "the folder is not kept");
             var bad = Path.Combine(folder, "refused.sofa"); File.WriteAllText(bad, "no");
             try { library.Import(bad, "refused", new CliHrtfConverter(directory)); throw new Exception("not refused"); }
-            catch (HrtfConversionException e) { require(e.Message.StartsWith("The SOFA file was not converted: This is not a SOFA file", StringComparison.Ordinal), e.Message); }
+            catch (HrtfConversionException e) { require(e.Message.StartsWith("The SOFA file was not converted: this is not a SOFA file", StringComparison.Ordinal), e.Message); }
             require(library.List().Count == 1 && Directory.GetFiles(library.Folder).Length == 2, "nothing kept for the refused file");
         });
 

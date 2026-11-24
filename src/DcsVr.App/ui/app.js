@@ -1475,9 +1475,9 @@ async function importHrtf(name) {
     // The offline verification has no file dialog: its smoke test names a fixture file.
     const data = name ? {name} : hrtfFixture ? {fixture:hrtfFixture} : {};
     const r = await request('hrtfImport', data);
-    if (r.cancelled) return;
+    if (r.cancelled) { form.hidden = true; return; }
     if (r.hrtfSets) state.hrtfSets = r.hrtfSets;
-    if (r.needName) { form.hidden = false; $('hrtfNameLabel').textContent = `You already have "${r.taken}". Name for this one:`; $('hrtfNameInput').value = r.suggested; $('hrtfNameInput').focus(); return; }
+    if (r.needName) { form.hidden = false; $('hrtfNameLabel').textContent = r.invalid ? `${r.invalid} Name for this one:` : `You already have "${r.taken}". Name for this one:`; $('hrtfNameInput').value = r.suggested; $('hrtfNameInput').focus(); return; }
     form.hidden = true;
     if (r.refused) { box.hidden = false; box.classList.add('warn'); box.dataset.fresh = profile.binauralHrtf; box.dataset.html = ''; box.innerHTML = `<p>${escape(r.refused)}</p>`; $('status').textContent = 'The SOFA file was not imported.'; return; }
     const f = fields.find(x => x.path === 'binauralHrtf');
@@ -1514,13 +1514,13 @@ async function refreshAudio() {
 }
 /** DCS's speaker layout ids (options.lua sound.main_layout) as its Audio options name them (Binaural.LayoutName). */
 const LAYOUT_NAMES = {'':'Auto', stereo:'Stereo', mono:'Mono', stereo_2_1:'2.1', quadraphonic:'Quadraphonic', suround_5_1:'5.1', surround_5_1:'5.1', suround_7_1:'7.1', surround_7_1:'7.1', spatial_8_1_4_4:'Spatial 8.1.4.4'};
-const AUDIO_STATE = {'not-installed':['Not installed',''], waiting:['Ready: starts with DCS',''], running:['Running','loaded'], 'switched-off':['Switched off',''], off:['Off','failed']};
+const AUDIO_STATE = {'not-installed':['Not installed',''], disabled:['Off in this profile',''], unavailable:['Not available',''], waiting:['Ready: starts with DCS',''], running:['Running','loaded'], 'switched-off':['Switched off',''], off:['Off','failed']};
 function renderAudio() {
   const box = $('audioStatus'); if (!box) return;
   const r = audioStatus, s = r?.status;
   if (!r) { box.innerHTML = '<p class="fine">Reading the status…</p>'; $('audioToggleNow').disabled = true; return; }
   const [label, tone] = s ? AUDIO_STATE[s.state] || [s.state,''] : ['Unknown',''];
-  const pending = profile && Boolean(profile.binauralAudio) !== Boolean(r.applied) ? `<p class="fine">${profile.binauralAudio ? 'Launch DCS turns it on with this profile.' : 'Launch DCS turns it off with this profile.'}</p>` : '';
+  const pending = profile && state?.audioUsable !== false && Boolean(profile.binauralAudio) !== Boolean(r.applied) ? `<p class="fine">${profile.binauralAudio ? 'Launch DCS turns it on with this profile.' : 'Launch DCS turns it off with this profile.'}</p>` : '';
   const key = parseKey(profile?.audioToggleKey ?? HOTKEYS.audioToggleKey.fallback), keyText = key && key[0] ? keyLabel(key) : null;
   const layout = state?.inventory?.dcsSettings?.['sound.main_layout'], layoutValue = String(layout ?? '').replace(/"/g,'').trim().toLowerCase();
   const rows = s && ['running','switched-off'].includes(s.state) ? [
@@ -2129,7 +2129,7 @@ function renderFlight() {
   if (f.audio) {
     const a = f.audio, running = a.state === 'running';
     rows.push(['3D audio',running ? 'On' : a.state === 'switched-off' ? 'Switched off' : 'Off',running ? [a.sounds != null ? `${a.sounds} sounds` : null, a.costMs != null ? `${fmt(a.costMs,2)} ms p99` : null, a.backoffs ? `fewer sounds ${a.backoffs}× to stay in its CPU budget` : null].filter(Boolean).join(' · ') || 'All flight'
-      : a.state === 'switched-off' ? 'With its key; DCS\'s own sound since' : `${a.reason || 'see the module log'}; DCS's own sound played`, running ? (a.backoffs ? true : 'ok') : a.state === 'switched-off' ? 'off' : true]);
+      : a.state === 'switched-off' ? (a.switchedOffBy === 'settings' ? 'In the settings; DCS\'s own sound since' : 'With its key; DCS\'s own sound since') : `${a.reason || 'see the module log'}; DCS's own sound played`, running ? (a.backoffs ? true : 'ok') : a.state === 'switched-off' ? 'off' : true]);
   }
   // A frame rate held by the headset software (motion smoothing at half the refresh rate, for example): CPU and GPU
   // have headroom, so no setting here can raise it. Not with frame generation (DCS runs at a fraction of the refresh

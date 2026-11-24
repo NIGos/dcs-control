@@ -477,14 +477,18 @@ others only append.
   - "Follow the head between frames" switch;
   - Advanced fold: Near field, Max sounds, Level trim, CPU budget;
   - Diagnostics fold: Log voices;
-  - status from the module log: "Running · 32 sounds · 0.2 ms" / "Off: <reason>".
+  - status from the module log: "Running · 32 sounds · 0.2 ms" / "Off: <reason>"; "Off in this profile" when the
+    module is installed for other features and the deployed DcsQvCull.ini has no `[Audio] Binaural=1`; "Not available"
+    when the applied profile has it on but there is no HRTF set (nothing of it was deployed); "Switched off" for the key,
+    the flag or `audio: off (binaural is off in the settings)` (turned off live: not a failure, no Checks warning).
 - **UI text:** short and plain, for example "Sounds come from where they are: front, back, above. For headphones."
 - **Model and writers:**
   - `VrProfile` fields → `ConfigurationWriters` → `[Audio]` in DcsQvCull.ini, and `[HeadPose] Publish` in
     PupilShift.ini;
   - `written-keys.txt`, `contracts.json`, `module-only-keys.txt` as the scripts require;
   - `LiveSettings` category "Audio" (every key).
-- **Kill switch:** a key in Keys & headset panel (`AudioToggle`) and the `toggle_audio.flag` action.
+- **Kill switch:** a key in Keys & headset panel (`AudioToggle`) and the `toggle_audio.flag` action. Launch DCS removes
+  a flag the module never took (DCS closed right after the button), so the next session does not start switched off.
 - **Back to stock:** section 7.
 - **Checks lines:**
   - DCS output not stereo (with the fix);
@@ -604,4 +608,5 @@ replace `CliHrtfConverter` with an in-process call. The SOFA file and its folder
 **Checks codes:** `audio-hrtf`, `audio-head-size`, `audio-max-sounds`, `audio-level`, `audio-cpu` (ranges, errors),
 `audio-contexts`, `audio-hotkey`, `audio-layout` (info), `audio-spatial`, `audio-hrtf-missing`, `audio-head-pose`,
 `audio-status`, `audio-backoff` (readiness, from the log). The diagnostic package adds `dcs-control/audio.txt` (the library's
-sets and the audio log lines; never a SOFA file, its path, or a `.dcshrtf`).
+sets and the audio log lines; never a SOFA file, its path, or a `.dcshrtf`). The pilot's set names (often a person's) are
+"personal set N" everywhere in the package: audio.txt, the module's log, DcsQvCull.ini, the profiles in report.json.

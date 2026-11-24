@@ -898,6 +898,9 @@ window.runWebSmoke = async function() {
         && $('hrtfReport').textContent.includes('Fixture warning') && !$('hrtfRemove').hidden);
       await ui.importHrtf(); await waitIdle();
       check('Importing under a name already taken asks for another one, with a free name proposed',!$('hrtfNameForm').hidden && $('hrtfNameInput').value === 'My ears 2' && $('hrtfNameLabel').textContent.includes('My ears') && ui.profile.binauralHrtf === 'My ears');
+      // A name the library refuses asks again with the rule, and keeps the file picked.
+      $('hrtfNameInput').value = 'default'; $('hrtfNameForm').requestSubmit(); await sleep(50); await waitIdle();
+      check('A name that cannot be used asks again with the reason, keeping the file',!$('hrtfNameForm').hidden && $('hrtfNameLabel').textContent.startsWith('Use a name of') && ui.state.hrtfSets.length === 1);
       $('hrtfNameInput').value = 'Second set'; $('hrtfNameForm').requestSubmit(); await sleep(50); await waitIdle();
       check('The new name imports it',$('hrtfNameForm').hidden && ui.profile.binauralHrtf === 'Second set' && ui.state.hrtfSets.length === 2);
       ui.hrtfFixture = window.offlineFixture.sofaRejected; await ui.importHrtf(); await waitIdle();
