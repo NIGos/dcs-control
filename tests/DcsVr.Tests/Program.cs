@@ -891,10 +891,12 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(ProfileValidation.Validate(new VrProfile { QuadPeripheryContrast = 1.5 }).Any(i => i.Code == "quad-periphery-contrast"));
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_sharpen_taper=1") && ConfigurationWriters.QuadViews(new VrProfile { QuadSharpenTaper = false }).Contains("dcsvr_sharpen_taper=0"));
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Split('\n').Any(l => l.Trim() == "dcsvr_edge_match=0") && ConfigurationWriters.QuadViews(new VrProfile { QuadEdgeMatch = true }).Contains("dcsvr_edge_match=0.6"), "edge match off by default, 0.6 when on");
+    // Soft focus edge is part of Hide the focus edge (Fine-tune): off with it, whatever its own switch says.
+    Require(ConfigurationWriters.QuadViews(new VrProfile { QuadEdgeMatch = true, QuadHideFocusEdge = false }).Split('\n').Any(l => l.Trim() == "dcsvr_edge_match=0"), "edge match off while Hide the focus edge is off");
     // Quad Views 0035-0037 (focus edge when the eyes jump): off by default, written as set, live.
     static bool QLine(string text, string line) => text.Split('\n').Any(l => l.Trim() == line);
-    var jumpOff = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked, QuadHideFocusEdge = false, QuadBandMatchColor = true });
-    Require(QLine(jumpOff, "dcsvr_temporal_saccade_reset=1") && QLine(jumpOff, "dcsvr_gaze_glide_ms=0") && QLine(jumpOff, "dcsvr_focus_fade_in=0")
+    var jumpOff = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked, QuadHideFocusEdge = false, QuadBandMatchColor = true, QuadEdgeMatch = true });
+    Require(QLine(jumpOff, "dcsvr_edge_match=0") && QLine(jumpOff, "dcsvr_temporal_saccade_reset=1") && QLine(jumpOff, "dcsvr_gaze_glide_ms=0") && QLine(jumpOff, "dcsvr_focus_fade_in=0")
         && QLine(jumpOff, "dcsvr_band_match=0") && QLine(jumpOff, "dcsvr_band_match_color=0"), "Hide the focus edge off: Quad Views as before, whatever the parts say");
     var jumpDefault = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked });
     Require(new VrProfile().QuadHideFocusEdge && QLine(jumpDefault, "dcsvr_temporal_saccade_reset=0") && QLine(jumpDefault, "dcsvr_gaze_glide_ms=40") && QLine(jumpDefault, "dcsvr_focus_fade_in=2")
@@ -7070,6 +7072,18 @@ Test("Live 0.7: Hide the focus edge and its parts switch live with a 0.7 install
     var waits = WhileDcsRuns(g, () => g.Service.ApplyLive(draft with { QuadHideFocusEdge = false, QuadSharpening = 0.45 }, E2eInventory(g)));
     Require(waits.Waiting.Contains("quadHideFocusEdge") && !waits.Applied.Contains("quadHideFocusEdge") && Hashing.FileSha256(old.Path) == old.InstalledSha256, waits.Message);
     Require(!LiveSettings.AvailableFields(g.Service.ReadAppliedProfile()!.Profile, g.Service.ReadAppliedProfile()!.Journal).Contains("quadHideFocusEdge"), "no Live tag");
+
+    // With Soft focus edge on, Hide the focus edge also switches dcsvr_edge_match, which Quad Views reads only at start:
+    // the switch then waits for the next launch and the Quad Views file is left as it is (default profiles have it off).
+    var h = E2e("live-07-edge-match"); var soft = draft with { QuadEdgeMatch = true }; h.Service.SyncApplied(soft, E2eInventory(h));
+    var softEntry = LiveEntry(h, LiveSettings.QuadFile);
+    var softApplied = h.Service.ReadAppliedProfile()!;
+    Require(!LiveSettings.AvailableFields(softApplied.Profile, softApplied.Journal).Contains("quadHideFocusEdge")
+        && LiveSettings.AvailableFields(softApplied.Profile with { QuadEdgeMatch = false }, softApplied.Journal).Contains("quadHideFocusEdge"), "no Live tag with Soft focus edge on, Live without it");
+    var softOff = WhileDcsRuns(h, () => h.Service.ApplyLive(soft with { QuadHideFocusEdge = false }, E2eInventory(h)));
+    Require(softOff.Written.Count == 0 && softOff.Applied.Count == 0 && softOff.Waiting.SequenceEqual(["quadHideFocusEdge"]) && Hashing.FileSha256(softEntry.Path) == softEntry.InstalledSha256, softOff.Message);
+    Require(QuadEdgeLine(ConfigurationWriters.QuadViews(soft)) == "0.6" && QuadEdgeLine(ConfigurationWriters.QuadViews(soft with { QuadHideFocusEdge = false })) == "0", "the launch then writes edge match off");
+    static string? QuadEdgeLine(string text) => text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith("dcsvr_edge_match=", StringComparison.Ordinal))?.Split('=')[1];
 });
 Test("Live phase 2: Cheeky's DLSS 5 tuning is written live into its own INI, its saves tolerated, a dropped value written once more", () =>
 {

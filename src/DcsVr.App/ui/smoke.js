@@ -6,11 +6,11 @@ window.runWebSmoke = async function() {
   // Smoothness buffer and stays in the profile file only.
   const PROFILE_FIELDS = [
     'quadViews','gaze','quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
-    'quadEdgeBlend','quadEdgeMatch','quadRoundFocus','quadHideFocusEdge','quadGazeGlideMs','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
-    'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
+    'quadHideFocusEdge','quadGazeGlideMs','quadEdgeMatch','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor','quadEdgeBlend','quadRoundFocus','quadSharpening','quadPeripheryContrast','quadSharpenTaper',
+    'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','neuralWorkingScale','neuralIntensity','neuralStyle','quadNeuralEdgeFade','neuralBeforeUpscaling',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenFoveated','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -28,8 +28,9 @@ window.runWebSmoke = async function() {
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
-  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadGazeGlideMs','neuralAdvanced','showOverlay','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
-    'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftVirtualImageM','depthBoostFarStartM','runtimeManifestPath'];
+  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','nvidiaFlowScale','showOverlay',
+    'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
+    'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
   const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
     return missing.length || extra.length || twice.length || expected.length !== actual.length ? ` (missing: ${missing.join(', ') || 'none'}; extra: ${extra.join(', ') || 'none'}${twice.length ? '; twice: '+twice.join(', ') : ''})` : ''; };
@@ -289,7 +290,7 @@ window.runWebSmoke = async function() {
       { const b = $('setting-frameGenDeepPipeline').querySelector('.more-toggle'); b.click(); const opened = !$('more-frameGenDeepPipeline').hidden && b.getAttribute('aria-expanded') === 'true' && b.textContent === 'Less';
         b.click(); check('More shows the detail and Less hides it again',opened && $('more-frameGenDeepPipeline').hidden && b.getAttribute('aria-expanded') === 'false' && b.textContent === 'More'); }
       { const b = $('stabilityControls').querySelector('.card-heading .more-toggle'), detail = b && $(b.getAttribute('aria-controls')); b?.click(); const opened = detail && !detail.hidden && detail.textContent.includes('power lines');
-        b?.click(); check('A card subtitle keeps its detail behind More too',opened && detail.hidden && $('stabilityControls').textContent.includes('Calms shimmering')); }
+        b?.click(); check('A card subtitle keeps its detail behind More too',opened && detail.hidden && $('stabilityControls').textContent.includes('EXPERIMENTAL')); }
       $('searchOpen').click(); $('searchInput').value = 'arriving late'; $('searchInput').dispatchEvent(new Event('input'));
       check('Search also finds the words behind More',[...$('searchResults').querySelectorAll('b')].some(b => b.textContent === 'Smoothness buffer')); $('searchDialog').close();
       { const diag = $('setting-showOverlay').closest('details'), value = () => diag.querySelector(':scope > summary > .fold-value').textContent, keys = ['showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm'];
@@ -332,15 +333,38 @@ window.runWebSmoke = async function() {
       { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, gpu = ['engineFastShaderPaths','engineShadowCache','engineWaterSkip','engineIdleEffectSkip'].filter(k => ui.profile[k]).length;
         const tracked = ui.profile.quadViews === 'QuadViewsFoveated' && !ui.profile.quadViewsLayerDirectory && ui.profile.gaze === 'EyeTracked', gaze = ['quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase'].filter(k => ui.profile[k]).length;
         check('The GPU savings fold counts its switches; the eye-tracking fold counts its own, or says it needs eye tracking',value('engineWaterSkip') === `${gpu} of 4 on` && $('setting-engineFastShaderPaths').closest('details') === $('setting-engineWaterSkip').closest('details') && value('quadSaccadeLead') === (tracked ? `${gaze} of 4 on` : 'Eye tracked only')); }
+      { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, p = ui.profile, fg = p.frameGen, desktop = p.desktop;
+        const shape = value('quadEdgeBlend') === (p.quadRoundFocus ? 'Round · ' : 'Rounded rectangle · ')+(ui.effectiveFovea(p).blend > 0 ? 'Edge '+Number(ui.effectiveFovea(p).blend.toFixed(4)) : ui.effectiveFovea(p).pimax ? 'Hard edge (Pimax Play)' : 'Hard edge');
+        const nrDefaults = !p.neuralRendering ? value('quadNeuralEdgeFade') === 'Off' : !p.quadNeuralEdgeFade || !p.neuralBeforeUpscaling || value('quadNeuralEdgeFade') === 'Defaults';
+        const fgDefaults = p.frameGen === 'Off' ? value('frameGenPassThrough') === 'Off' : p.frameGenPassThrough !== 'Balanced' || !p.frameGenDeepPipeline || p.frameGenParallelEyes || value('frameGenPassThrough') === 'Defaults';
+        edit('frameGenDeepPipeline',!p.frameGenDeepPipeline); const deepSaid = p.frameGen === 'Off' || value('frameGenPassThrough').includes('No smoothness buffer') === !p.frameGenDeepPipeline; edit('frameGenDeepPipeline',!p.frameGenDeepPipeline);
+        const boostKeys = [!desktop && p.runtime === 'Pimax' && 'boostMoveVrRuntime','boostMoveBackgroundApps','boostElevated'].filter(Boolean), boostCount = value('boostMoveVrRuntime') === (p.cpuBoost ? `${boostKeys.filter(k => p[k]).length} of ${boostKeys.length} on` : 'Off');
+        const flowFold = $('setting-nvidiaFlowScale').closest('details'); edit('frameGen','Nvidia'); const nvidia = !flowFold.hidden; edit('frameGen','FidelityFx'); const gone = flowFold.hidden && !$('setting-smoothCursor').hidden; edit('frameGen',fg);
+        const panelWanted = !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel), panel = panelWanted ? value('diagnosticOverlayAtStart').includes(p.diagnosticOverlayAtStart ? 'Shown at start' : 'Hidden at start') : value('diagnosticOverlayAtStart') === 'Off';
+        const reopen = p.freeVram ? value('freeVramReopen').startsWith(p.freeVramReopen ? 'Reopened after the flight' : 'Not reopened') : value('freeVramReopen') === 'Off';
+        const pupil = /^Radius .+ · Image .+/.test(value('pupilShiftEyeRadiusMm')) && $('setting-pupilShiftEyeRadiusMm').closest('details') === $('setting-pupilShiftVirtualImageM').closest('details');
+        check('The new folds show their values, or Off with their switch off: shape and edge, DLSS 5 and frame generation defaults, CPU Boost count, panel, reopen, pupil',shape && nrDefaults && fgDefaults && deepSaid && boostCount && panel && reopen && pupil);
+        check('The optical flow fold is there with NVIDIA and gone with FidelityFX; Smooth mouse cursor stays',nvidia && gone && !$('setting-smoothCursor').closest('details'));
+        check('Each card shows its main switches first: the moved settings sit in folds, the ones pilots change stay in sight',['quadEdgeBlend','quadRoundFocus','quadNeuralEdgeFade','neuralBeforeUpscaling','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','nvidiaFlowScale','flowPreset','bidirectionalFlow','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVramReopen','freeVramForce','pupilShiftEyeRadiusMm','diagnosticOverlayAtStart','diagnosticVram','headsetPanelPosition'].every(k => $('setting-'+k).closest('details.advanced'))
+          && ['quadHideFocusEdge','quadSharpening','quadPeripheryContrast','quadSharpenTaper','keepOtherDxgi','neuralRendering','neuralRuntimePath','neuralFocusArea','neuralWorkingScale','neuralIntensity','neuralStyle','frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','fpsLimit','headsetRefreshHz','frameGenHudSymbology','smoothCursor','cpuBoost','boostDcsPriority','freeVram','freeVramApps','pauseTobiiDesktop','lowerMonitor','pupilShift','headsetPanel','dcs','options'].every(k => !$('setting-'+k).closest('details'))
+          && $('setting-frameGenFoveated').compareDocumentPosition($('setting-frameGenPassThrough')) & Node.DOCUMENT_POSITION_FOLLOWING); }
+      // Soft focus edge is one of Hide the focus edge's parts: in its Fine-tune fold, greyed out with it, counted by it. The fold
+      // counts only the parts that can work (as their rows say), so the glide row, hidden on Quest 3 VD, is not counted there.
+      { const fold = $('setting-quadGazeGlideMs').closest('details'), value = () => fold.querySelector(':scope > summary > .fold-value').textContent, provider = ui.profile.quadViews, hide = ui.profile.quadHideFocusEdge, blend = ui.profile.quadEdgeBlend;
+        edit('quadViews','QuadViewsFoveated'); edit('quadHideFocusEdge',true); const p = ui.profile, parts = ['quadGazeGlideMs','quadEdgeMatch','quadFocusFadeIn','quadKeepHistoryOnSaccade','quadBandMatch','quadBandMatchColor'], usable = ui.HIDE_PARTS.filter(([,can]) => can(p));
+        const counted = value() === (usable.length ? `${usable.filter(([on]) => on(p)).length} of ${usable.length} on` : 'None in use') && parts.every((k,i) => ui.HIDE_PARTS[i][1](p) === (!$('input-'+k).disabled && !$('setting-'+k).hidden));
+        const tracked = Object.assign({},p,{gaze:'EyeTracked',quadViewsLayerDirectory:''}), vd = !ui.HIDE_PARTS[0][1](Object.assign({},tracked,{runtime:'VirtualDesktop'})) && ui.HIDE_PARTS[0][1](Object.assign({},tracked,{runtime:'Pimax'})); edit('quadHideFocusEdge',false); const off = value() === 'Off' && $('input-quadEdgeMatch').disabled && $('why-quadEdgeMatch').textContent.includes('Hide the focus edge'); edit('quadHideFocusEdge',hide); edit('quadViews',provider);
+        check('Soft focus edge sits in Hide the focus edge\'s Fine-tune fold, greyed out while it is off, and the fold counts the parts that can work (not the glide on Quest 3 VD)',$('setting-quadEdgeMatch').closest('details') === fold && fold.contains($('setting-quadBandMatchColor')) && counted && vd && off && ui.profile.quadEdgeBlend === blend); }
       { const cards = ['engineControls','pupilControls','stabilityControls','farDepthControls','panelControls','packageCard','updatesCard','dlssFocusCard'];
         const bad = cards.filter(id => { const card = $(id), b = card?.querySelector('.card-heading .more-toggle'), detail = b && $(b.getAttribute('aria-controls'));
           return !b || b.type !== 'button' || b.getAttribute('aria-expanded') !== 'false' || !detail || !detail.hidden || !detail.textContent.trim() || !card.querySelector('.card-heading').contains(detail); });
         check('Card subtitles with more to say keep it behind More'+(bad.length ? ' ('+bad.join(', ')+')' : ''),!bad.length);
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
-      // 0.7: foveated frame generation and the rest fly well; no setting, card or guide section says experimental any more.
-      { const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL');
-        check('No EXPERIMENTAL tag or experimental wording on any page',!tags.length && !/experimental/i.test($('pages').textContent)); }
+      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated',
+          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
+        const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
+        check('EXPERIMENTAL stays on exactly its fifteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -400,7 +424,7 @@ window.runWebSmoke = async function() {
       press(27); edit('engineOptimizations',was); }
     { const was = {pupilShift:ui.profile.pupilShift, quadViews:ui.profile.quadViews, gaze:ui.profile.gaze, engine:ui.profile.engineOptimizations}; edit('engineOptimizations',true);
       edit('pupilShift',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); ui.navigate('pupil'); const k = $('input-pupilShiftToggleKey');
-      check('Pupil shift has its own page, with its switch as a capture field (Ctrl+Shift+F10)',!$('page-pupil').hidden && $('pupilControls').textContent.includes('Pupil shift') && $('pupilNeeds').hidden && ui.fields.find(f => f.path === 'pupilShiftToggleKey').type === 'hotkey' && ui.profile.pupilShiftToggleKey === '121:5' && k.textContent === 'Ctrl+Shift+F10');
+      check('Pupil shift has its own page, marked experimental, with its switch as a capture field (Ctrl+Shift+F10)',!$('page-pupil').hidden && $('pupilControls').textContent.includes('EXPERIMENTAL') && $('pupilNeeds').hidden && ui.fields.find(f => f.path === 'pupilShiftToggleKey').type === 'hotkey' && ui.profile.pupilShiftToggleKey === '121:5' && k.textContent === 'Ctrl+Shift+F10');
       k.click(); press(122,'as'); check('The pupil shift switch refuses a key another switch uses',k.classList.contains('capturing') && ui.profile.pupilShiftToggleKey === '121:5'); press(27);
       edit('gaze','Fixed'); ui.navigate('pupil'); check('A fixed focus on the Pimax runtime needs nothing: the layer reads the OpenXR eye gaze',$('pupilNeeds').hidden);
       const route = ui.profile.runtime; document.querySelector('#routeSwitch [data-route="SboysSteamVr"]').click(); edit('gaze','Fixed'); ui.navigate('pupil');
@@ -410,7 +434,7 @@ window.runWebSmoke = async function() {
       await new Promise(r => setTimeout(r,300)); check('The pupil shift status reads the log through the bridge',!!$('pupilStatus').querySelector('.engine-state')); }
     { const was = {on:ui.profile.peripheryStability, quadViews:ui.profile.quadViews, strength:ui.profile.peripheryStabilityStrength, neural:ui.profile.neuralRendering, foveated:ui.profile.foveatedDlss}; ui.navigate('foveation');
       const f = ui.fields.find(x => x.path === 'peripheryStabilityStrength');
-      check('Periphery stability is a card on the Quad Views page, off by default',f.page === 'foveation' && $('stabilityControls').textContent.includes('Periphery stability') && (was.on || f.input.disabled) && ui.fields.find(x => x.path === 'peripheryStability').type === 'toggle');
+      check('Periphery stability is a card on the Quad Views page, off by default, marked experimental',f.page === 'foveation' && $('stabilityControls').textContent.includes('Periphery stability') && $('stabilityControls').textContent.includes('EXPERIMENTAL') && (was.on || f.input.disabled) && ui.fields.find(x => x.path === 'peripheryStability').type === 'toggle');
       edit('peripheryStability',true); edit('quadViews','QuadViewsFoveated'); edit('peripheryStabilityStrength','0.25');
       check('With the bundled Quad Views it needs nothing and its strength is editable',$('stabilityNeeds').hidden && !f.input.disabled && ui.profile.peripheryStabilityStrength === 0.25);
       // Pimax native needs DLSS 5 and Foveated DLSS off (they force the bundled provider).
@@ -421,8 +445,8 @@ window.runWebSmoke = async function() {
       check('Depth boost is off by default and its settings wait for it',ui.profile.depthBoost === false && ui.profile.depthBoostMax === 1.4 && ui.profile.depthBoostMode === 'Realistic' && ui.profile.depthBoostRealisticMax === 1.25 && $('input-depthBoostMax').disabled && $('setting-depthBoostMax').classList.contains('inactive') && $('input-depthBoostMode').disabled);
       edit('engineOptimizations',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); edit('pupilShift',true); edit('depthBoost',true); ui.navigate('pupil');
       const k = $('input-depthBoostToggleKey');
-      check('Depth boost has its card on the Perception page, with its switch as a capture field (Alt+Shift+F10)',!$('page-pupil').hidden && $('depthControls')
-        && $('depthControls').closest('#page-pupil') && $('depthControls').textContent.includes('landings')
+      check('Depth boost has its card on the Perception page, marked experimental, with its switch as a capture field (Alt+Shift+F10)',!$('page-pupil').hidden && $('depthControls')
+        && $('depthControls').closest('#page-pupil') && $('depthControls').textContent.includes('EXPERIMENTAL') && $('depthControls').textContent.includes('landings')
         && ui.fields.find(f => f.path === 'depthBoostToggleKey').type === 'hotkey' && ui.profile.depthBoostToggleKey === '121:6' && k.textContent === 'Alt+Shift+F10' && !$('input-depthBoostRealisticMax').disabled && $('input-depthBoostMax').disabled);
       k.click(); press(121,'cs'); check('The Depth boost switch refuses the pupil shift switch',k.classList.contains('capturing') && ui.profile.depthBoostToggleKey === '121:6'); press(27);
       check('No transition choice or transition key: the dual camera only moves the depth smoothly',!$('input-depthBoostTransition') && !$('input-depthBoostTransitionKey') && !$('input-ownAircraftTrueDepth').disabled && ui.profile.ownAircraftTrueDepth === true);
@@ -484,7 +508,14 @@ window.runWebSmoke = async function() {
       Object.assign(ui.state.pimax,{preset:true,presetName:'Off',level:-1,quadViewsOff:true,short:'Quad View Off',presetNote:'Off: own values.',converted:saved.converted}); show();
       check('Quad View Off in Pimax still uses this profile\u2019s own values',!ui.effectiveFovea(ui.profile).pimax && !$('pimaxFocusSize') && box.textContent.includes('Off: own values.'));
       Object.keys(ui.state.pimax).forEach(k => delete ui.state.pimax[k]); Object.assign(ui.state.pimax,saved); show();
-      check('Custom is back as read',$('coverageDetail').textContent === 'Pimax Play '+expectedShort+' · focus '+pct(focusW,focusH) && ui.effectiveFovea(ui.profile).pimax); }
+      check('Custom is back as read',$('coverageDetail').textContent === 'Pimax Play '+expectedShort+' · focus '+pct(focusW,focusH) && ui.effectiveFovea(ui.profile).pimax);
+      // Pimax Play's Transition Mode Off: a hard edge whatever Focus edge blending says. The fold says so, and Soft focus edge
+      // sends the pilot to the focus area values, not to Focus edge blending.
+      { const was = ui.state.pimax.converted.transition, hide = ui.profile.quadHideFocusEdge; ui.state.pimax.converted.transition = false; edit('quadHideFocusEdge',true); show();
+        const fold = $('setting-quadEdgeBlend').closest('details').querySelector(':scope > summary > .fold-value').textContent, why = $('why-quadEdgeMatch');
+        const hard = fold.endsWith(' · Hard edge (Pimax Play)') && $('input-quadEdgeMatch').disabled && why.textContent.includes('Transition Mode') && why.querySelector('[data-reveal=foveaSource]') && !why.querySelector('[data-reveal=quadEdgeBlend]');
+        ui.state.pimax.converted.transition = was; edit('quadHideFocusEdge',hide); show();
+        check('With Pimax Play’s Transition Mode Off the edge fold says Hard edge and Soft focus edge links to the focus area values',hard); } }
     // This profile: Pimax Quick units, converted exactly like Pimax Quick, without touching values the user does not edit.
     { const before = {w:ui.profile.foveaWidth,h:ui.profile.foveaHeight,c:ui.profile.quadFocusScale,p:ui.profile.peripheralScale};
       edit('foveaSource','Profile'); check('This profile shows the editable focus fields in Pimax Quick units',!$('setting-pimaxHorizontalFov').hidden && !$('setting-quadFocusScale').hidden && $('setting-foveaWidth').hidden && $('pimaxFovea').hidden && $('input-pimaxHorizontalFov').value === String(Math.round(before.w*100)));
@@ -521,10 +552,17 @@ window.runWebSmoke = async function() {
     check('Free VRAM refuses to close a process that starts DCS',ui.state.issues.some(i => i.code === 'boost-launcher' && i.severity === 'Error'));
     ui.navigate('diagnostics');
     { const fix = [...$('checkGroups').querySelectorAll('.check-fix .check-row')], row = fix.find(r => r.textContent.includes('CPU Boost app lists'));
-      check('Checks lists the problem once under Must fix, one line with a link to the fix',row && row.querySelector('[data-open-page=boost]') && getComputedStyle(row.querySelector('.check-line')).whiteSpace === 'nowrap' && fix.filter(r => r.textContent.includes('CPU Boost app lists')).length === 1);
+      check('Checks lists the problem once under Must fix, one line with a link to the list it names',row && row.querySelector('[data-reveal=freeVramApps]') && getComputedStyle(row.querySelector('.check-line')).whiteSpace === 'nowrap' && fix.filter(r => r.textContent.includes('CPU Boost app lists')).length === 1);
       check('Checks groups Must fix, Check yourself and OK, with OK folded',$('checkGroups').querySelector('.check-group.check-fix h3').textContent.includes('Must fix') && $('checkGroups').querySelector('.check-group.check-check h3').textContent.includes('Check yourself') && (!$('checkGroups').querySelector('details.check-ok') || !$('checkGroups').querySelector('details.check-ok').open));
       row.querySelector('.check-line').click(); check('A click shows the whole text',row.classList.contains('expanded'));
       ui.navigate('overview'); check('Overview counts what to fix and links to Checks',$('dashStatus').querySelector('.dash-chip.fix[data-open-page=diagnostics]')?.textContent.includes('must fix')); }
+    // The same message for CPU Boost's Background apps opens that list, inside the closed Other programs fold.
+    { const boost = ui.profile.cpuBoost, move = ui.profile.boostMoveBackgroundApps, apps = (ui.profile.boostBackgroundApps || []).join('\n'), fold = $('setting-boostBackgroundApps').closest('details');
+      edit('cpuBoost',true); edit('boostMoveBackgroundApps',true); edit('boostBackgroundApps','steam'); await ui.run('refresh');
+      const items = ui.checkItems().filter(c => c.id === 'boost-launcher'), bg = items.find(c => c.text.startsWith('CPU Boost')), vram = items.find(c => c.text.startsWith('Free VRAM'));
+      fold.open = false; ui.revealSetting(ui.fields.find(f => f.path === bg?.action?.reveal)); const opened = fold.open && !$('input-boostBackgroundApps').hidden;
+      edit('boostBackgroundApps',apps); edit('boostMoveBackgroundApps',move); edit('cpuBoost',boost); fold.open = false; await ui.run('refresh');
+      check('Each CPU Boost app-list check opens the list it names, inside its fold',bg?.action?.reveal === 'boostBackgroundApps' && vram?.action?.reveal === 'freeVramApps' && bg.title === 'CPU Boost app lists' && opened); }
     edit('freeVramApps',vramDefaults); edit('freeVram',false); const boostPlan = await ui.request('boostPlan',ui.draft());
     // What happens at launch is fetched again for Boost and route edits, not for other edits.
     ui.navigate('boost'); await sleep(450); let requests = ui.boostRequests; edit('quadSharpening',.61); edit('neuralIntensity',.8); await sleep(450);

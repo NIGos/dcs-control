@@ -660,6 +660,12 @@ const headsetPanelWanted = p => Boolean(!p.desktop && (p.frameGen !== 'Off' || p
 const usesHeadsetPanel = p => Boolean(!p.desktop && (p.frameGen !== 'Off' || (p.headsetPanel && (p.diagnosticOverlayAtStart || parseKey(p.diagnosticOverlayKey ?? 'Alt+Shift+F12')?.[0]))));
 /** Periphery stability runs (VrProfile.UsesPeripheryStability) and Far depth runs (VrProfile.UsesFarDepth). */
 const usesPeripheryStability = p => Boolean(p.peripheryStability && !p.desktop && quad(p));
+/** Hide the focus edge's parts in its Fine-tune fold: [is on, can work in this profile] (as each row's enabled test; the
+ *  glide row is hidden on the Quest 3 VD route). */
+const HIDE_PARTS = [
+  [p => p.quadGazeGlideMs > 0, p => quad(p) && p.gaze === 'EyeTracked' && !vdRoute(p)], [p => p.quadEdgeMatch, p => effectiveFovea(p).blend > 0],
+  [p => p.quadFocusFadeIn > 0, p => usesFoveatedFg(p)], [p => p.quadKeepHistoryOnSaccade, usesPeripheryStability],
+  [p => p.quadBandMatch > 0, p => usesFoveatedFg(p)], [p => p.quadBandMatchColor, p => usesFoveatedFg(p) && p.quadBandMatch > 0]];
 const usesFarDepth = p => Boolean(p.farDepth && !p.desktop && quad(p));
 /** The recorders can run on emulated command lists (a recorder is on), and do (VrProfile.UsesRecordersEmulatedLists). */
 const emulatedListsCan = p => Boolean(p.engineOptimizations && (p.engineShadowRecorder || p.engineGBufferRecorder));
@@ -696,9 +702,9 @@ function buildFields() {
   more.dataset.hide = 'gaze';
   let toggles = toggleList(more);
   field(toggles,'quadSaccadeLead','Focus ahead of fast eye movements',['Lands you in full detail after a fast eye jump.','When your eyes jump, the focus area reaches ahead along the jump for a moment, instead of waiting a frame or two (most noticeable with frame generation). No GPU cost: for that moment the focus area is a little less sharp.'],'toggle',null,tracked,'',vdRoute);
-  field(toggles,'quadSaccadeTail','Stay ahead until your eyes land',['Keeps the focus area ahead of your eyes until they stop.','Eyes slow down just before they land. The focus area stays ahead of them through that last part of the jump and is back to its normal size as soon as they have landed.'],'toggle',null,p => tracked(p) && p.quadSaccadeLead,'',vdRoute);
+  field(toggles,'quadSaccadeTail','<span class="tag">EXPERIMENTAL</span> Stay ahead until your eyes land',['Keeps the focus area ahead of your eyes until they stop.','Eyes slow down just before they land. The focus area stays ahead of them through that last part of the jump and is back to its normal size as soon as they have landed.'],'toggle',null,p => tracked(p) && p.quadSaccadeLead,'',vdRoute);
   field(toggles,'quadGazeStabilize','Steady focus while looking',['Stops the focus edge shimmering while your eyes rest.','Movements under half a degree are ignored, so eye-tracker noise does not move the focus area. Real eye movements are followed at once.'],'toggle',null,tracked,'',vdRoute);
-  field(toggles,'quadLostGazeEase','Slide back when tracking is lost',['The focus area slides to the center instead of jumping.','When the eye tracker loses your eyes for more than a moment (a long blink, the headset shifting), the focus area moves to the center over 150 ms. When your eyes are found again it follows them at once.'],'toggle',null,p => tracked(p),'',vdRoute);
+  field(toggles,'quadLostGazeEase','<span class="tag">EXPERIMENTAL</span> Slide back when tracking is lost',['The focus area slides to the center instead of jumping.','When the eye tracker loses your eyes for more than a moment (a long blink, the headset shifting), the focus area moves to the center over 150 ms. When your eyes are found again it follows them at once.'],'toggle',null,p => tracked(p),'',vdRoute);
   field(c,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one. Not with frame generation, which paces the frames itself.'],'toggle',null,p => quad(p) && p.frameGen === 'Off','',devHidden);
   more = disclosure(c,'Alternative provider','Only to test another Quad Views build.',p => p.quadViews !== 'QuadViewsFoveated' ? 'Not used' : p.quadViewsLayerDirectory ? p.quadViewsLayerDirectory.split(/[\\/]/).filter(Boolean).pop() : 'Bundled'); more.dataset.dev = '1';
   field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 needs.','path',null,p => p.quadViews === 'QuadViewsFoveated');
@@ -712,22 +718,29 @@ function buildFields() {
   field(c,'pimaxHorizontalFov','Horizontal FOV',['The focus area\'s share of the view\'s width.','As in Pimax Play\'s Quick mode: 25% is a focus area a quarter of the view wide.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
   field(c,'pimaxVerticalFov','Vertical FOV',['The focus area\'s share of the view\'s height.','As in Pimax Play\'s Quick mode, top to bottom.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
   field(c,'pimaxVerticalOffset','Vertical offset',['Moves the focus area down (negative) or up from where you look.','As Pimax Play\'s Vertical Offset: 100 is a quarter of the view\'s height. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. With a fixed focus area it moves from the center of the view.'],'number',[-100,100,1],quad,'',ownFocusHidden,{prop:'quadVerticalOffset',get:p => whole(PIMAX.offsetFromStored(Number(p.quadVerticalOffset) || 0)),set:(p,v) => p.quadVerticalOffset = PIMAX.storedFromOffset(v)});
-  field(c,'quadEdgeBlend','Focus edge blending',['How softly the focus area fades into the periphery.','Wider is softer but leaves a little less area in full detail. With values from Pimax Play and its Transition Mode Off, the edge is hard (0).'],'number',[0,.5,.01],quad,'ratio');
-  field(c,'quadEdgeMatch','Soft focus edge',['Makes the ring around where you look harder to see.','In the edge band the focus area first loses detail down to the periphery\'s resolution, then fades out, so you see one image getting softer instead of a sharp one over a blurry one. The finest detail near the edge is a little softer.'],'toggle',null,p => quad(p) && effectiveFovea(p).blend > 0);
-  field(c,'quadRoundFocus','Round focus area',['On: a circle. Off: a rounded rectangle, with more detail in the corners.','Either way its edge fades out over Focus edge blending. A central DLSS 5 area follows the same shape.'],'toggle',null,quad);
-  // Quad Views 0035-0037: one switch hides the focus edge when the eyes move (on by default); its four parts below.
-  field(c,'quadHideFocusEdge','Hide the focus edge',['Makes the edge of the focus area harder to notice when your eyes move.','Softens the short flash at the edge after you look somewhere else. The parts are under Fine-tune.'],'toggle',null,quad);
+  // Quad Views 0035-0037: one switch hides the focus edge when the eyes move (on by default); its parts, Soft focus edge
+  // among them, in Fine-tune below, all off while it is off (ConfigurationWriters.QuadViews).
+  field(c,'quadHideFocusEdge','Hide the focus edge',['Makes the edge of the focus area harder to notice.','Softens the short flash at the edge after you look somewhere else. Soft focus edge and the other parts are under Fine-tune.'],'toggle',null,quad);
   const hiding = p => quad(p) && p.quadHideFocusEdge;
-  more = disclosure(c,'Fine-tune','How the focus edge is hidden.',p => !hiding(p) ? 'Off' : 'On');
+  // Its value counts the parts that can work in this profile (HIDE_PARTS: a greyed-out or hidden part is left out).
+  more = disclosure(c,'Fine-tune','How the focus edge is hidden.',p => { if (!hiding(p)) return 'Off'; const usable = HIDE_PARTS.filter(([,can]) => can(p));
+    return usable.length ? `${usable.filter(([on]) => on(p)).length} of ${usable.length} on` : 'None in use'; });
   field(more,'quadGazeGlideMs','Smooth small moves',['Small moves of the focus area are spread over a few frames.','Only the small corrections while you look at something. Eye jumps are never delayed, so the focus area is always where you look. 0 is off.'],'number',[0,100,5],p => hiding(p) && tracked(p),'ms',vdRoute);
+  field(more,'quadEdgeMatch','<span class="tag">EXPERIMENTAL</span> Soft focus edge',['Makes the ring around where you look harder to see.','In the edge band the focus area first loses detail down to the periphery\'s resolution, then fades out, so you see one image getting softer instead of a sharp one over a blurry one. The finest detail near the edge is a little softer.'],'toggle',null,p => hiding(p) && effectiveFovea(p).blend > 0);
   field(more,'quadFocusFadeIn','Fade in',['New parts of the focus area fade in instead of popping in.','Over this many frames. 0 is off. Works with foveated frame generation.'],'number',[0,3,.5],p => hiding(p) && usesFoveatedFg(p),'frames');
   field(more,'quadKeepHistoryOnSaccade','Steady periphery through eye jumps','Periphery stability carries on when your eyes jump, instead of starting over.','toggle',null,p => hiding(p) && usesPeripheryStability(p));
   field(more,'quadBandMatch','Match brightness at the edge',['Evens out the brightness where the focus area meets the periphery.','Helps when the focus area looks brighter or darker than around it, as DLSS 5 can make it. 0 is off. Works with foveated frame generation.'],'number',[0,1,.05],p => hiding(p) && usesFoveatedFg(p),'ratio');
   field(more,'quadBandMatchColor','Match color too','Also evens out the color at the edge.','toggle',null,p => hiding(p) && usesFoveatedFg(p) && p.quadBandMatch > 0);
+  // How the edge fades and the shape: set once, folded. The value gives the edge in use (hard with Pimax Play's
+  // Transition Mode Off, whatever Focus edge blending says).
+  more = disclosure(c,'Shape and edge','How the focus area fades out, and its shape.',p => { const e = effectiveFovea(p);
+    return `${p.quadRoundFocus ? 'Round' : 'Rounded rectangle'} · ${e.blend > 0 ? 'Edge '+num(e.blend) : e.pimax ? 'Hard edge (Pimax Play)' : 'Hard edge'}`; });
+  field(more,'quadEdgeBlend','Focus edge blending',['How softly the focus area fades into the periphery.','Wider is softer but leaves a little less area in full detail. With values from Pimax Play and its Transition Mode Off, the edge is hard (0).'],'number',[0,.5,.01],quad,'ratio');
+  field(more,'quadRoundFocus','Round focus area',['On: a circle. Off: a rounded rectangle, with more detail in the corners.','Either way its edge fades out over Focus edge blending. A central DLSS 5 area follows the same shape.'],'toggle',null,quad);
   c = card('sharpnessControls','Sharpness','Detail in and around the focus area. Almost no GPU cost.');
   field(c,'quadSharpening','Focus sharpening','Extra sharpening inside the focus area. 0 is off.','number',[0,1,.01],quad,'ratio');
-  field(c,'quadSharpenTaper','Sharpening fades at the edge',['Fades the sharpening toward the focus edge, so the edge is harder to see.','Detail steps down gradually. Almost no GPU cost.'],'toggle',null,quad);
   field(c,'quadPeripheryContrast','Periphery contrast',['Makes the periphery look less blurry. 0 is off.','Brings back the local contrast the periphery loses at its lower resolution. Almost no GPU cost. Raise it slowly: too much makes the periphery shimmer (Periphery stability calms that).'],'number',[0,1,.05],quad,'ratio');
+  field(c,'quadSharpenTaper','Sharpening fades at the edge',['Fades the sharpening toward the focus edge, so the edge is harder to see.','Detail steps down gradually. Almost no GPU cost.'],'toggle',null,quad);
   // DLSS page: DLSS 5 (on/off, runtime file, the dxgi switch) and its image, then DCS's DLSS presets, then Foveated Super
   // Resolution (stereo only) with the focus area it uses without Quad Views.
   c = card('dlssControls','DLSS 5','NVIDIA\'s neural rendering. You provide its runtime file.');
@@ -738,11 +751,13 @@ function buildFields() {
   // Area first (the biggest GPU cost), then resolution, then the look.
   c = card('dlssProcessing','DLSS 5 image','Area and working scale set the GPU cost; intensity and style the look.');
   field(c,'neuralFocusArea','DLSS 5 area',['How much of the focus area DLSS 5 processes.','Around it the image is normal DLSS. Times are GPU time for both eyes, measured on an RTX 5090 (1764×2480 per eye, full working scale).'],'select',[[100,'Whole focus area · 10.8 ms · default'],[90,'Central 90% · about 9.3 ms (estimated)'],[80,'Central 80% · 7.9 ms'],[70,'Central 70% · 6.4 ms'],[50,'Central 50% · 4.8 ms']],p => nr(p) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter);
-  field(c,'quadNeuralEdgeFade','DLSS 5 fades at the focus edge',['The DLSS 5 look fades toward the focus edge, so it does not stand out. No GPU cost.','Tone, color and detail fade out toward the edge of the focus area.'],'toggle',null,p => nr(p) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter && p.neuralFocusArea >= 100 && effectiveFovea(p).blend > 0);
   field(c,'neuralWorkingScale','Working scale','The resolution DLSS 5 works at. Lower costs less GPU and gives less detail.','number',[.1,1,.01],nr,'ratio');
-  field(c,'neuralBeforeUpscaling','Process at render resolution','On: faster, before DLSS upscaling. Off: at output resolution, more detail, more GPU.','toggle',null,nr);
   field(c,'neuralIntensity','Intensity','How strongly the DLSS 5 image is blended in. Default 1.','number',[0,1,.01],nr,'ratio');
   segmented(field(c,'neuralStyle','Model style','The look of the DLSS 5 model.','select',[['Standard','Standard · default'],['Natural','Natural'],['Cinematic','Cinematic']],nr),{Standard:'Standard',Natural:'Natural',Cinematic:'Cinematic'});
+  more = disclosure(c,'Advanced','Edge fade and where DLSS 5 runs. The defaults suit most pilots.',p => !nr(p) ? 'Off' : [!p.quadNeuralEdgeFade && 'No edge fade', !p.neuralBeforeUpscaling && 'Output resolution'].filter(Boolean).join(' · ') || 'Defaults');
+  toggles = toggleList(more);
+  field(toggles,'quadNeuralEdgeFade','DLSS 5 fades at the focus edge',['The DLSS 5 look fades toward the focus edge, so it does not stand out. No GPU cost.','Tone, color and detail fade out toward the edge of the focus area.'],'toggle',null,p => nr(p) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter && p.neuralFocusArea >= 100 && effectiveFovea(p).blend > 0);
+  field(toggles,'neuralBeforeUpscaling','Process at render resolution','On: faster, before DLSS upscaling. Off: at output resolution, more detail, more GPU.','toggle',null,nr);
   // The DLSS model DCS upscales with: the focus area first, then around it.
   c = card('dlssPresets','DLSS presets','The DLSS model DCS upscales with, for the focus area and around it.');
   field(c,'focusDlssPreset','Focus DLSS preset','The DLSS model for the focus area. K, L and M are sharper and cost a little more.','select',[[0,'Same as DCS · default'],[11,'K'],[12,'L'],[13,'M'],[5,'E']],p => ((nr(p) || p.foveatedDlss) && p.quadViews === 'QuadViewsFoveated' && p.quadFocusAdapter) || usesPeripheryDlssPreset(p));
@@ -784,12 +799,14 @@ function buildFields() {
   segmented(field(c,'frameGen','Method','NVIDIA Optical Flow needs an RTX card. FidelityFX runs on other cards.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow · RTX cards'],['FidelityFx','FidelityFX Optical Flow · other cards']]),{Off:'Off',Nvidia:'NVIDIA',FidelityFx:'FidelityFX'});
   segmented(field(c,'frameGenFactor','Generated frames',['Auto: frames are generated only as much as DCS needs.','Without Only when needed, DCS renders half the refresh rate, a third while it falls behind. 2× or 3×: fixed, DCS renders half or a third. 3× adds latency and smearing in sideways motion.'],'select',[[0,'Auto · default'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off'),{0:'Auto',2:'2×',3:'3×'});
   field(c,'frameGenAdaptiveCadence','Only when needed',['Generates frames only while DCS falls behind, for lower latency.','DCS renders at the full refresh rate, so latency is lower whenever it keeps up. Needs Generated frames on Auto. With the frame limit on Keep, it is set to the refresh rate for you.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
-  segmented(field(c,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that barely holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while, and after a few failed tries not until the next mission or a few clean minutes.'],'select',[['Steady','Steady'],['Balanced','Balanced · default'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
-  // Right after the cadence choices: it decides how much GPU the generated frames take. Greyed out until it can run, but
+  // Right after Only when needed: it decides how much GPU the generated frames take. Greyed out until it can run, but
   // never while it is on (ProfileValidation's foveated-fg-needs says why), so it can be turned off.
-  field(c,'frameGenFoveated','Foveated frame generation',['About half the GPU time for generated frames, and less video memory.','The focus area and the rest of the view get their own generated frames. Needs bundled Quad Views, the Pimax or Quest 3 VD route and NVIDIA frame generation. Saves most with a small focus area; a very large one can cost more than it saves. The loading screen pauses once for half a second.'],'toggle',null,p => p.frameGen !== 'Off' && (foveatedFgCan(p) || p.frameGenFoveated));
-  field(c,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
-  field(c,'frameGenParallelEyes','Both eyes at once',['Generated frames are ready about 1 ms sooner.','Each eye\'s frame is made on its own GPU queue instead of one after the other. The image is the same.'],'toggle',null,p => p.frameGen !== 'Off');
+  field(c,'frameGenFoveated','<span class="tag">EXPERIMENTAL</span> Foveated frame generation',['About half the GPU time for generated frames, and less video memory.','The focus area and the rest of the view get their own generated frames. Needs bundled Quad Views, the Pimax or Quest 3 VD route and NVIDIA frame generation. Saves most with a small focus area; a very large one can cost more than it saves. The loading screen pauses once for half a second.'],'toggle',null,p => p.frameGen !== 'Off' && (foveatedFgCan(p) || p.frameGenFoveated));
+  // When to stop generating and how frames are buffered: the defaults suit most pilots.
+  more = disclosure(c,'Advanced','When to stop generating, and how frames are buffered. The defaults suit most pilots.',p => p.frameGen === 'Off' ? 'Off' : [p.frameGenPassThrough !== 'Balanced' && 'Stop generating: '+shown('frameGenPassThrough'), !p.frameGenDeepPipeline && 'No smoothness buffer', p.frameGenParallelEyes && 'Both eyes at once'].filter(Boolean).join(' · ') || 'Defaults');
+  segmented(field(more,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that barely holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while, and after a few failed tries not until the next mission or a few clean minutes.'],'select',[['Steady','Steady'],['Balanced','Balanced · default'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
+  field(more,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
+  field(more,'frameGenParallelEyes','<span class="tag">EXPERIMENTAL</span> Both eyes at once',['Generated frames are ready about 1 ms sooner.','Each eye\'s frame is made on its own GPU queue instead of one after the other. The image is the same.'],'toggle',null,p => p.frameGen !== 'Off');
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
   // The custom limit right under the select that enables it; the refresh rate source before the value it replaces.
@@ -801,13 +818,14 @@ function buildFields() {
   field(c,'headsetRefreshHz','Headset refresh rate','The rate your headset runs at.','number',[50,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
   field(c,'disableDcsVSync','Desktop VSync off','Stops the monitor\'s VSync holding back the frame rate. The headset keeps its own sync.','toggle');
   c = card('pacingControls','Image quality','How generated frames look.');
-  field(c,'frameGenHudSymbology','Sharp HUD',['HUD and helmet symbols stay crisper in fast motion. The difference is small.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off');
+  field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['HUD and helmet symbols stay crisper in fast motion. The difference is small.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off');
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
-  segmented(field(c,'nvidiaFlowScale','Optical flow resolution',['The resolution motion is estimated at (NVIDIA only). Higher costs more GPU.','With Foveated frame generation this sets the focus area; the rest of the view always uses its own full resolution.'],'select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow,'',fidelity),{50:'50%',75:'75%',100:'100%'});
-  segmented(field(c,'flowPreset','Optical flow quality','How carefully motion is estimated. Slower costs more GPU.','select',[['Fast','Fast'],['Medium','Medium · default'],['Slow','Slow · most analysis']],flow,'',fidelity),{Fast:'Fast',Medium:'Medium',Slow:'Slow'});
-  field(c,'bidirectionalFlow','Bidirectional flow','Estimates motion forwards and backwards. Costs more GPU.','toggle',null,flow,'',fidelity);
+  more = disclosure(c,'Optical flow','How motion is estimated. NVIDIA only.',() => `${shown('nvidiaFlowScale')} · ${shown('flowPreset')}${profile.bidirectionalFlow ? ' · Both ways' : ''}`); more.dataset.hide = 'flow';
+  segmented(field(more,'nvidiaFlowScale','Optical flow resolution',['The resolution motion is estimated at (NVIDIA only). Higher costs more GPU.','With Foveated frame generation this sets the focus area; the rest of the view always uses its own full resolution.'],'select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow,'',fidelity),{50:'50%',75:'75%',100:'100%'});
+  segmented(field(more,'flowPreset','Optical flow quality','How carefully motion is estimated. Slower costs more GPU.','select',[['Fast','Fast'],['Medium','Medium · default'],['Slow','Slow · most analysis']],flow,'',fidelity),{Fast:'Fast',Medium:'Medium',Slow:'Slow'});
+  field(more,'bidirectionalFlow','Bidirectional flow','Estimates motion forwards and backwards. Costs more GPU.','toggle',null,flow,'',fidelity);
   more = disclosure(c,'Diagnostics','For tracking down a problem.',p => `${['showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm'].filter(k => p[k]).length} of 4 on`);
   toggles = toggleList(more);
   field(toggles,'showOverlay','FPS counter',['Frame generation\'s own FPS counter, always visible.','The headset panel (Keys & headset panel page) also shows FPS and can be hidden in flight.'],'toggle',null,p => p.frameGen !== 'Off');
@@ -818,19 +836,23 @@ function buildFields() {
   c = card('boostControls','CPU Boost','Applied by Launch DCS, undone when DCS exits.');
   field(c,'cpuBoost','CPU Boost','Gives DCS priority and its best CPU cores; other programs move aside.','toggle');
   segmented(field(c,'boostDcsPriority','DCS priority','Above normal suits most setups. High can starve audio, input and headset services when DCS uses every core.','select',[['Normal','Normal'],['AboveNormal','Above normal · recommended'],['High','High']],boost),{Normal:'Normal',AboveNormal:'Above normal',High:'High'});
+  // What moves aside while DCS runs; the count leaves out the VR runtime row where it cannot work (Pimax route only).
+  more = disclosure(c,'Other programs','What moves aside while DCS runs.',p => { if (!boost(p)) return 'Off'; const keys = [!p.desktop && p.runtime === 'Pimax' && 'boostMoveVrRuntime','boostMoveBackgroundApps','boostElevated'].filter(Boolean); return `${keys.filter(k => p[k]).length} of ${keys.length} on`; });
   // Pimax route only: BoostPlanner.VrRuntimeServices moves nothing on the SteamVR and Quest 3 VD routes (their compositors stay put).
-  field(c,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax\'s runtime and headset services off DCS\'s main and render cores.','toggle',null,p => boost(p) && !p.desktop && p.runtime === 'Pimax','',p => p.desktop);
-  field(c,'boostMoveBackgroundApps','Move background apps','Moves the apps below to the slowest cores, at below-normal priority, while DCS runs.','toggle',null,boost);
-  field(c,'boostBackgroundApps','Background apps','Names as in Task Manager\'s Details tab, one per line, without .exe.','list',null,p => boost(p) && p.boostMoveBackgroundApps);
-  field(c,'boostElevated','Administrator rights',['Lets system services be moved too (asks UAC when DCS starts).','DCS itself still runs as your user. Off: those services are left as they are.'],'toggle',null,boost);
+  field(more,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax\'s runtime and headset services off DCS\'s main and render cores.','toggle',null,p => boost(p) && !p.desktop && p.runtime === 'Pimax','',p => p.desktop);
+  field(more,'boostMoveBackgroundApps','Move background apps','Moves the apps below to the slowest cores, at below-normal priority, while DCS runs.','toggle',null,boost);
+  field(more,'boostBackgroundApps','Background apps','Names as in Task Manager\'s Details tab, one per line, without .exe.','list',null,p => boost(p) && p.boostMoveBackgroundApps);
+  field(more,'boostElevated','Administrator rights',['Lets system services be moved too (asks UAC when DCS starts).','DCS itself still runs as your user. Off: those services are left as they are.'],'toggle',null,boost);
   // Flight helpers: each one on its own, with or without CPU Boost; started with Launch DCS, undone when DCS exits.
   // At the top of the right column, above the plan; the VR-only helpers are hidden with Optimizations only.
   c = card('helperControls','Flight helpers','Each works on its own. Started by Launch DCS, undone when DCS exits.');
   field(c,'freeVram','Free VRAM before flight',['Closes the programs below when DCS starts, to free their video memory.','Each gets a normal close request first. No program or Windows setting is changed.'],'toggle');
   const vram = p => p.freeVram;
   field(c,'freeVramApps','Programs to close',['Names as in Task Manager\'s Details tab; * and ? are wildcards.','One per line, without .exe. Voice chat (Discord) and recording (OBS) are left out on purpose.'],'list',null,vram);
-  field(c,'freeVramReopen','Reopen after the flight','Starts the closed programs again, as your user, when DCS exits.','toggle',null,vram);
-  field(c,'freeVramForce','End programs that do not close','Ends a program that ignores the close request after 5 s; unsaved work in it is lost. Off: it keeps running.','toggle',null,vram);
+  more = disclosure(c,'Close and reopen','What happens to the closed programs.',p => !vram(p) ? 'Off' : [p.freeVramReopen ? 'Reopened after the flight' : 'Not reopened', p.freeVramForce && 'Ended if stuck'].filter(Boolean).join(' · '));
+  toggles = toggleList(more);
+  field(toggles,'freeVramReopen','Reopen after the flight','Starts the closed programs again, as your user, when DCS exits.','toggle',null,vram);
+  field(toggles,'freeVramForce','End programs that do not close','Ends a program that ignores the close request after 5 s; unsaved work in it is lost. Off: it keeps running.','toggle',null,vram);
   field(c,'pauseTobiiDesktop','Pause the desktop Tobii eye tracker',['Stops a desktop Tobii taking over the headset\'s eye tracking.','For a desktop Tobii (Eye Tracker 5 or 4C) next to a Pimax Crystal: it is paused while DCS runs. Asks for administrator rights.'],'toggle',null,p => !p.desktop,'',p => p.desktop || vdRoute(p));
   field(c,'smallDcsWindow','Small DCS window in VR',['A 1280×720 window on the monitor saves some VRAM and GPU time.','Windowed. The headset image does not change. Back to stock DCS puts your window settings back.'],'toggle',null,p => !p.desktop,'',p => p.desktop);
   field(c,'lowerMonitor','Lower the monitor while flying',['Switches the monitor to the mode below while DCS runs.','It switches back when DCS exits. It is never saved as a Windows setting, so a restart also brings your mode back. HDR is left as it is.'],'toggle',null,p => !p.desktop,'',p => p.desktop);
@@ -842,7 +864,7 @@ function buildFields() {
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30 and 2.9.31, single player.'],'toggle');
   // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
   // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
-  field(c,'engineRecordersEmulatedLists','Multi-threading without driver support',['Multi-threaded shadows and G-buffer for AMD Radeon and other cards without D3D11 command lists. A smaller gain than on NVIDIA.','Runs them on the command lists Windows emulates. Applies at the next DCS start.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
+  field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threading without driver support',['Multi-threaded shadows and G-buffer for AMD Radeon and other cards without D3D11 command lists. A smaller gain than on NVIDIA.','Runs them on the command lists Windows emulates. Applies at the next DCS start.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
   // The parts, biggest measured gain first, folded: all on is the tested set.
   // The fold counts like the Engine row on the Overview: the terrain prefetch fix is one more part when it skips repeats.
   more = disclosure(c,'Individual optimizations','All on is best. Turn one off only if a problem points to it.',p => `${ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0)} of ${ENGINE_PARTS.length + 1} on`);
@@ -866,12 +888,12 @@ function buildFields() {
   // rows at its top pushed the parts below the fold. Faster terrain and shader paths first (on by default).
   const gpuFold = toggleList(disclosure(c,'GPU savings','Less GPU time in some scenes. Some are off by default.',p => `${GPU_SAVINGS.filter(k => p[k]).length} of ${GPU_SAVINGS.length} on`));
   field(gpuFold,'engineFastShaderPaths','Faster terrain and shader paths','GPU shortcuts that give the same image. Turn off only if a problem points to it.','toggle',null,engine);
-  field(gpuFold,'engineShadowCache','Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames.'],'toggle',null,engine);
+  field(gpuFold,'engineShadowCache','<span class="tag">EXPERIMENTAL</span> Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames.'],'toggle',null,engine);
   // 0.7, off by default: [Water]
   // SkipHiddenWater=3 (no-submit, not exact for a few frames) and [D3D] EarlyShaders=3 (SSAO water skip + hot-air idle
   // skip, both the stock picture; small, so one switch). Live like the other engine parts.
-  field(gpuFold,'engineWaterSkip','Skip hidden water',['Less GPU time while no water is in view.','DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late.'],'toggle',null,engine);
-  field(gpuFold,'engineIdleEffectSkip','Skip unused effects',['A small GPU saving over the sea and away from engine heat. Same image.','Skips shading work on water that changes nothing, and the heat-haze passes when nothing is hot.'],'toggle',null,engine);
+  field(gpuFold,'engineWaterSkip','<span class="tag">EXPERIMENTAL</span> Skip hidden water',['Less GPU time while no water is in view.','DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late.'],'toggle',null,engine);
+  field(gpuFold,'engineIdleEffectSkip','<span class="tag">EXPERIMENTAL</span> Skip unused effects',['A small GPU saving over the sea and away from engine heat. Same image.','Skips shading work on water that changes nothing, and the heat-haze passes when nothing is hot.'],'toggle',null,engine);
   // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
   more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
   field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);
@@ -894,23 +916,23 @@ function buildFields() {
   segmented(field(c,'eyeDistance','Eye distance',['The headset\'s own value gives the world its true size and depth. DCS\'s custom IPD changes the size of everything.','Measured, or set in Pimax Play or SteamVR. Leave DCS\'s custom IPD off unless you have a reason. Back to stock DCS restores DCS\'s own setting.'],'select',[['Headset','The headset\'s own (recommended)'],['DcsCustom','DCS\'s custom IPD (as set in DCS)'],['Manual','Set here']],p => !p.desktop),{Headset:'Headset\'s own',DcsCustom:'DCS custom IPD',Manual:'Set here'});
   field(c,'eyeDistanceMm','Eye distance value','Used when Eye distance is Set here.','number',[50,80,.5],p => !p.desktop && p.eyeDistance === 'Manual','mm');
   { const ipd = document.createElement('p'); ipd.className = 'pimax-note card-note'; ipd.id = 'pupilIpd'; ipd.hidden = true; c.append(ipd); }
-  c = card('pupilControls','Pupil shift',['Each eye is rendered from where its pupil is, so the cockpit stays still when only your eyes move.','Your pupils move a little when your eyes turn. If the cockpit seems to move, turn it off.']);
+  c = card('pupilControls','<span class="tag">EXPERIMENTAL</span> Pupil shift',['Each eye is rendered from where its pupil is, so the cockpit stays still when only your eyes move.','Your pupils move a little when your eyes turn. If the cockpit seems to move, turn it off.']);
   needsNote(c,'pupilNeeds');
   // Pupil shift and Depth boost follow the eyes: Quest 3 VD has no eye tracking (fixed focus), so they are greyed out there.
   field(c,'pupilShift','Pupil shift','No GPU cost. Needs eye tracking, so not on Quest 3 VD.','toggle',null,p => !vdRoute(p));
-  field(c,'pupilShiftEyeRadiusMm','Eye rotation radius',['10 to 11 mm fits most people.','How far the pupil sits from the point the eye turns around.'],'number',[5,15,.5],pupil,'mm');
-  more = disclosure(c,'Advanced','Rarely needs changing.',() => shown('pupilShiftVirtualImageM'));
+  more = disclosure(c,'Advanced','Rarely needs changing.',() => `Radius ${shown('pupilShiftEyeRadiusMm')} · Image ${shown('pupilShiftVirtualImageM')}`);
+  field(more,'pupilShiftEyeRadiusMm','Eye rotation radius',['10 to 11 mm fits most people.','How far the pupil sits from the point the eye turns around.'],'number',[5,15,.5],pupil,'mm');
   field(more,'pupilShiftVirtualImageM','Lens image distance','How far away the lens shows the image. 1 to 2 m is typical; it barely matters.','number',[.5,5,.1],pupil,'m');
   // Periphery stability (native/quadviews/dcsvr_perception.h): a pass in the bundled Quad Views, fixed or eye-tracked focus.
   const stability = p => p.peripheryStability;
-  c = card('stabilityControls','Periphery stability',['Calms shimmering thin lines around the focus area. Bundled Quad Views only.','Canopy frames, power lines and the horizon. The focus area itself is not touched.']);
+  c = card('stabilityControls','<span class="tag">EXPERIMENTAL</span> Periphery stability',['Calms shimmering thin lines around the focus area. Bundled Quad Views only.','Canopy frames, power lines and the horizon. The focus area itself is not touched.']);
   field(c,'peripheryStability','Periphery stability','Steadies the periphery from frame to frame. Almost no GPU cost.','toggle');
   field(c,'peripheryStabilityStrength','Strength','Higher is steadier; 0.5 is a good start. Moving scenery can leave a faint trail.','number',[0,1,.05],stability,'ratio');
   // Depth boost (same layer, its own switch): the render IPD rises while you look far and returns in the cockpit.
   const depth = p => p.depthBoost, realistic = p => p.depthBoost && p.depthBoostMode !== 'Enhanced', enhanced = p => p.depthBoost && p.depthBoostMode === 'Enhanced';
   // Only the selected mode's strength and distances are shown, so the card never shows two Strength sliders.
   const enhancedMode = p => p.depthBoostMode === 'Enhanced';
-  c = card('depthControls','Depth boost','More depth for the world outside, following where you look. Needs eye tracking.');
+  c = card('depthControls','<span class="tag">EXPERIMENTAL</span> Depth boost','More depth for the world outside, following where you look. Needs eye tracking.');
   needsNote(c,'depthNeeds');
   field(c,'depthBoost','Depth boost',['More depth where you look; the cockpit keeps your real eye distance. Needs eye tracking, so not on Quest 3 VD.','The world is rendered with the eyes a bit further apart, changing slowly. Cockpit displays, lighting and the HUD are unchanged. Turn it off for landings.'],'toggle',null,p => !vdRoute(p));
   segmented(field(c,'depthBoostMode','Mode',['Realistic: more depth beyond 150 m. Enhanced: from 3 m, stronger.','Realistic adds depth only where the headset shows less than your eyes would. Enhanced is not realistic: the world looks smaller.'],'select',[['Realistic','Realistic (recommended)'],['Enhanced','Enhanced: more depth, not realistic']],depth),{Realistic:'Realistic',Enhanced:'Enhanced'});
@@ -922,7 +944,7 @@ function buildFields() {
   field(more,'depthBoostNearM','Cockpit distance','Looking closer than this counts as looking at the cockpit: the world keeps the depth it had. The cockpit itself always keeps your real eye distance.','number',[.5,5,.1],depth,'m');
   field(more,'ownAircraftTrueDepth','Own aircraft at true depth','Helicopters and two-seaters: the other crew station or the front seat outside your cockpit stays at its real distance instead of looking closer.','toggle',null,depth);
   // Far depth (docs/FAR_DEPTH.md): bundled Quad Views shifts each eye's image with the depth the engine module measures.
-  c = card('farDepthControls','Far depth',['More depth for distant aircraft, ships and terrain. No eye tracking needed.','From 50 m to 2 km. Works alone or with Depth boost.']);
+  c = card('farDepthControls','<span class="tag">EXPERIMENTAL</span> Far depth',['More depth for distant aircraft, ships and terrain. No eye tracking needed.','From 50 m to 2 km. Works alone or with Depth boost.']);
   needsNote(c,'farDepthNeeds');
   field(c,'farDepth','Far depth','The cockpit stays exactly as it is. Costs under 0.1 ms per frame.','toggle');
   segmented(field(c,'farDepthPreset','Strength','Start with Default.','select',[['Subtle','Subtle'],['Default','Default'],['Strong','Strong']],p => p.farDepth),{Subtle:'Subtle',Default:'Default',Strong:'Strong'});
@@ -972,7 +994,7 @@ function buildFields() {
   field(more,'gVisionTolerance','G tolerance','The sustained G at which you black out; grey-out starts about 1.2 G lower. 7.5: g-suit and straining. About 5: relaxed, no g-suit.','number',[4,10,.5],gVisionOn,'G');
   field(more,'gVisionRedout','Red-out (negative G)','A red tint below about −2 G, when G vision does all of it (Full, or Auto with DCS\'s G effect off).','toggle',null,gVisionOn);
   field(more,'gVisionUseGaze','Follow my eyes','The tunnel moves with your eyes. Needs eye tracking; without it the tunnel stays straight ahead.','toggle',null,gVisionOn,'',vdRoute);
-  c = card('gazeDofControls','Eye-focus blur','Nearer or farther things go slightly soft, like a real eye. Needs eye tracking.');
+  c = card('gazeDofControls','<span class="tag">EXPERIMENTAL</span> Eye-focus blur','Nearer or farther things go slightly soft, like a real eye. Needs eye tracking.');
   needsNote(c,'gazeDofNeeds');
   field(c,'gazeDof','Eye-focus blur',['Subtle, and clears at once when your eyes move. Some people find it uncomfortable. About 0.18 ms.','Blurs what is at a different distance from the point you look at. Try it for a few minutes.'],'toggle',null,p => layerGaze(p) || Boolean(p.gazeDof),'',vdRoute);
   field(c,'gazeDofStrength','Blur strength','0.5 is subtle; 1 is what a real eye would see.','number',[0,1,.05],usesGazeDof,'ratio');
@@ -989,9 +1011,10 @@ function buildFields() {
   c = card('panelControls','Headset panel (OSD)',['A small status panel in the headset. Its key shows or hides it in flight.','It shows FPS, DLSS 5, Engine Optimizations, Pupil shift, Depth boost and Far depth.']);
   field(c,'headsetPanel','Headset panel','Without Frame generation, turn this on to show the panel. Your frames are not touched.','toggle',null,p => !p.desktop && p.frameGen === 'Off','',p => p.frameGen !== 'Off');
   { const always = document.createElement('p'); always.className = 'fine'; always.id = 'headsetPanelAlways'; always.textContent = 'The headset panel is always on with Frame generation.'; $('setting-headsetPanel').after(always); }
-  field(c,'diagnosticOverlayAtStart','Visible at start','Each flight starts with the panel shown.','toggle',null,panelOn);
-  field(c,'diagnosticVram','VRAM counter','Adds the video memory in use to the panel.','toggle',null,panelOn);
-  field(c,'headsetPanelPosition','Position','The corner of your view the panel sits in.','select',[['UpperRight','Upper right · default'],['UpperLeft','Upper left'],['LowerRight','Lower right'],['LowerLeft','Lower left']],panelOn);
+  more = disclosure(c,'Panel options','Where it sits and what it shows.',p => !panelOn(p) ? 'Off' : `${shown('headsetPanelPosition')} · ${p.diagnosticOverlayAtStart ? 'Shown at start' : 'Hidden at start'}${p.diagnosticVram ? ' · VRAM counter' : ''}`);
+  field(more,'diagnosticOverlayAtStart','Visible at start','Each flight starts with the panel shown.','toggle',null,panelOn);
+  field(more,'diagnosticVram','VRAM counter','Adds the video memory in use to the panel.','toggle',null,panelOn);
+  field(more,'headsetPanelPosition','Position','The corner of your view the panel sits in.','select',[['UpperRight','Upper right · default'],['UpperLeft','Upper left'],['LowerRight','Lower right'],['LowerLeft','Lower left']],panelOn);
   // Every in-flight key in one card, in the rail's order: capture fields, greyed out while their feature is off in this
   // profile. With Optimizations only, the VR keys are hidden: only the Engine Optimizations key works on a monitor.
   const vrKey = p => p.desktop;
@@ -1021,11 +1044,14 @@ function buildFields() {
   because(at('quadSaccadeLead','quadGazeStabilize'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
   because(at('quadLostGazeEase'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
   for (const k of ['quadFocusFadeIn','quadBandMatch','quadBandMatchColor']) because(at(k),p => !quad(p) ? qvWhy(p) : !p.quadHideFocusEdge ? 'Turn on Hide the focus edge to use this.' : !usesFoveatedFg(p) ? 'Needs foveated frame generation.' : 'Set Match brightness at the edge above 0.');
-  because(at('quadEdgeMatch'),p => !quad(p) ? qvWhy(p) : 'Needs Focus edge blending above 0.');
+  // With Pimax Play's values and its Transition Mode Off the edge is hard whatever Focus edge blending says: the link
+  // then goes to the focus area values.
+  const noEdgeWhy = (p,text) => effectiveFovea(p).pimax ? ['Turn on Transition Mode in Pimax Play, or set the focus area here.','foveaSource'] : [text,'quadEdgeBlend'];
+  because(at('quadEdgeMatch'),p => !quad(p) ? qvWhy(p) : !p.quadHideFocusEdge ? 'Turn on Hide the focus edge to use this.' : noEdgeWhy(p,'Set Focus edge blending above 0.'));
   because(at('quadSaccadeTail'),p => !quad(p) ? qvWhy(p) : p.gaze !== 'EyeTracked' ? 'Needs Focus movement: Eye tracked.' : 'Turn on Focus ahead of fast eye movements to use this.');
   because(f => f.condition === quad,qvWhy);
   because(at('neuralFocusArea'),p => !nr(p) ? dlssWhy : p.quadViews !== 'QuadViewsFoveated' ? bundledWhy : null);
-  because(at('quadNeuralEdgeFade'),p => !nr(p) ? dlssWhy : p.quadViews !== 'QuadViewsFoveated' ? bundledWhy : p.neuralFocusArea < 100 ? 'Set DLSS 5 area to Whole focus area to use this.' : effectiveFovea(p).blend > 0 ? null : 'Needs Focus edge blending above 0 (Quad Views page).');
+  because(at('quadNeuralEdgeFade'),p => !nr(p) ? dlssWhy : p.quadViews !== 'QuadViewsFoveated' ? bundledWhy : p.neuralFocusArea < 100 ? 'Set DLSS 5 area to Whole focus area to use this.' : effectiveFovea(p).blend > 0 ? null : noEdgeWhy(p,'Set Focus edge blending above 0 on the Quad Views page.'));
   because(f => f.condition === nr,dlssWhy);
   because(at('keepOtherDxgi'),'Turn on DLSS 5 or Foveated Super Resolution to change this.');
   // Focus area without Quad Views: sized by DLSS 5 or Foveated Super Resolution; the periphery by Foveated Super Resolution only.
@@ -1746,7 +1772,6 @@ const CHECK_INFO = {
   'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}], 'quad-vertical-offset':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}], 'quad-offset-gaze':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}],
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],
   'quad-focus':['Focus adapter',null], 'pimax-native-replaced':['Quad Views provider',null], 'fovea-source':['Focus area source',{reveal:'foveaSource',label:'Open'}],
-  'boost-launcher':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-name':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-wildcard':['CPU Boost app lists',{page:'boost',label:'Open'}],
   'boost-choice':['CPU Boost',{page:'boost',label:'Open'}], 'engine-prefetch':['Terrain prefetch fix',{reveal:'boostPrefetch',label:'Open'}], 'monitor-mode':['Monitor mode in flight',{reveal:'flightDisplayMode',label:'Open'}], 'boost-high-priority':['DCS priority',{reveal:'boostDcsPriority',label:'Open'}],
   'framegen-factor':['Generated frames',{reveal:'frameGenFactor',label:'Open'}], 'flow-preset':['Optical flow',{reveal:'flowPreset',label:'Open'}], 'flow-scale':['Optical flow',{reveal:'nvidiaFlowScale',label:'Open'}],
   'fps-mode':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'fps-under-target':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'adaptive-cadence-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}],
@@ -1779,6 +1804,12 @@ function conflictInfo(text) {
     ['Engine Optimizations switch','engineToggleKey'],['DLSS 5 toggle','neuralToggleKey']].find(([name]) => String(text).startsWith('The '+name))?.[1] || 'diagnosticOverlayKey';
   return ['In-flight keys',{reveal:key,label:'Change'}];
 }
+/** An app-list check (ProfileValidation: "Free VRAM cannot close …", "Programs to close has …", "CPU Boost cannot move …",
+ *  "Background apps has …") opens the list it names, inside its fold if need be. */
+const APP_LIST_CHECKS = ['boost-launcher','boost-vd-stream','boost-app-name','boost-app-wildcard'];
+function listInfo(text) {
+  return ['CPU Boost app lists',{reveal:/^(Free VRAM|Programs to close)/.test(String(text)) ? 'freeVramApps' : 'boostBackgroundApps',label:'Open'}];
+}
 /** Visual realism's range checks are "visual-" + the field (ProfileValidation): they open that field. */
 function visualInfo(id) {
   const f = /^visual-/.test(id) ? fields.find(x => x.path === id.slice(7)) : null;
@@ -1788,7 +1819,7 @@ const GROUPS = [['fix','Must fix'],['check','Check yourself'],['ok','OK']];
 /** Profile issues (every edit) and, after Check this PC, the readiness checks; one entry per id. */
 function checkItems() {
   const items = [], seen = new Set();
-  const add = (id,group,title,text,guide) => { const key = id+'|'+text; if (seen.has(key)) return; seen.add(key); const info = id === 'hotkey-conflict' ? conflictInfo(text) : CHECK_INFO[id] ?? visualInfo(id); items.push({id,group,title:info?.[0] || title,text,action:info?.[1] || (guide && !['paths','recovery'].includes(guide) ? {guide,label:'Guide'} : null)}); };
+  const add = (id,group,title,text,guide) => { const key = id+'|'+text; if (seen.has(key)) return; seen.add(key); const info = id === 'hotkey-conflict' ? conflictInfo(text) : APP_LIST_CHECKS.includes(id) ? listInfo(text) : CHECK_INFO[id] ?? visualInfo(id); items.push({id,group,title:info?.[0] || title,text,action:info?.[1] || (guide && !['paths','recovery'].includes(guide) ? {guide,label:'Guide'} : null)}); };
   // Profile checks follow the draft; readiness repeats them under the generic "Settings" title (Setup.cs).
   for (const i of state?.issues || []) add(i.code, i.severity === 'Error' ? 'fix' : i.severity === 'Warning' ? 'check' : 'ok', 'Profile', i.message);
   for (const c of state?.readiness?.checks || []) if (!(c.title === 'Settings' && (state.issues || []).some(i => i.code === c.id)))
@@ -1870,7 +1901,7 @@ function loadFlight(delay = 0) {
     try { const result = await request('lastFlight'); if (mine === flightSequence) { flight = result; renderFlight(); } } catch { }
   }, delay);
 }
-/** A field title without any markup, for search. */
+/** A field title without its markup (the EXPERIMENTAL tag), for search. */
 const plainTitle = title => String(title).replace(/<[^>]+>/g,'').trim();
 const fmt = (v,d = 0) => Number(v).toLocaleString('en-US',{maximumFractionDigits:d,minimumFractionDigits:d});
 const share = v => Math.round(v*100)+'%';
@@ -2015,7 +2046,7 @@ function renderSearch() {
 const GUIDE_SECTIONS = [
   ['every','Every pilot','On a monitor or any headset.'],
   ['vr','VR','Pimax, Sboys (SteamVR) and Quest 3 through Virtual Desktop.'],
-  ['perception','Perception','More depth and a calmer image. Off by default; try one at a time.'],
+  ['perception','Perception','Experimental: new, off by default, and still being tuned. Feedback welcome.'],
   ['visual','Visual realism','Off by default. The color mode key switches color modes in flight.'],
   ['safety','Safety net','']
 ];
@@ -2424,7 +2455,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,pollDcs,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,goBack,renderUpdates,set updates(v){updates = v;},setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,pollDcs,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,goBack,renderUpdates,set updates(v){updates = v;},setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,HIDE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;
