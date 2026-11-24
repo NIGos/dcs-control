@@ -2021,6 +2021,9 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     Require(serials.Count == 0 && placeholder.Contains("serial: <serial>") && placeholder.Contains("sn=<serial>") && placeholder.Contains("frame 1000000 took 12345678 us") && placeholder.Contains("2.9.31.1234567"), placeholder);
     var real = learnt("serial: 20230417 | seen 20230417 | id 920230417 | 202304170 | map 20230417platMap");
     Require(serials.SetEquals(["20230417"]) && real == "serial: <serial> | seen <serial> | id 920230417 | 202304170 | map <serial>platMap", real);
+    // A serial that starts or ends with a letter is removed also where it touches a word; words and longer numbers stay.
+    var glued = learnt("serial: PSX7TEST0042A | devPSX7TEST0042A | PSX7TEST0042Aplatmap | 9PSX7TEST0042A | Testing stays | test0042 stays");
+    Require(glued == "serial: <serial> | dev<serial> | <serial>platmap | 9<serial> | Testing stays | test0042 stays", glued);
 });
 Test("The diagnostic package removes a headset serial everywhere, also where it is bare and was written before its label, and network addresses", () =>
 {

@@ -313,9 +313,9 @@ public static partial class Diagnostics
             text = TokenRegex().Replace(text, "${key}${sep}<token>");
             text = AccountRegex().Replace(text, "${key}${sep}<id>");
             // A serial number seen once (next to its label) is removed wherever else it appears, also in later files.
-            // Next to its label always; elsewhere only where it starts and ends a token (never inside a longer number or
-            // word: a digit edge must not touch another digit, a letter edge another letter; Pimax writes a serial glued
-            // to a word, "<serial>platMap").
+            // Next to its label always; elsewhere also glued to letters (Pimax writes "<serial>platMap", and a serial that
+            // starts or ends with a letter may touch a word), but never inside a longer number: a digit edge must not touch
+            // another digit. A learnt serial always holds a digit, so no plain word can contain it.
             LearnSerials(text, serials);
             text = SerialRegex().Replace(text, "${key}${sep}<serial>");
             text = SteamVrSerialRegex().Replace(text, m => m.Value[..(m.Groups["serial"].Index - m.Index)] + "<serial>");
@@ -343,11 +343,8 @@ public static partial class Diagnostics
         foreach (Match m in SerialRegex().Matches(text)) if (LooksLikeSerial(m.Groups["serial"].Value)) serials.Add(m.Groups["serial"].Value);
         foreach (Match m in SteamVrSerialRegex().Matches(text)) if (LooksLikeSerial(m.Groups["serial"].Value)) serials.Add(m.Groups["serial"].Value);
     }
-    private static string SerialEdge(char edge, bool before)
-    {
-        var cls = char.IsAsciiDigit(edge) ? "[0-9]" : char.IsAsciiLetter(edge) ? "[A-Za-z]" : null;
-        return cls is null ? "" : before ? $"(?<!{cls})" : $"(?!{cls})";
-    }
+    private static string SerialEdge(char edge, bool before) =>
+        !char.IsAsciiDigit(edge) ? "" : before ? "(?<![0-9])" : "(?![0-9])";
     private static bool LooksLikeSerial(string value) =>
         value.Length >= 8 && value.Where(char.IsAsciiLetterOrDigit).Select(char.ToUpperInvariant).Distinct().Count() > 1;
 
