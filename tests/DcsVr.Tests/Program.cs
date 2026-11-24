@@ -6821,6 +6821,7 @@ Test("Live: refused without the applied profile; a draft set back is applied aga
     // Set back to the applied values: the draft is the applied profile again, but its file is not; Launch DCS sees it.
     var back = f.Service.SyncApplied(draft, inventory);
     Require(back.Kind == LaunchSyncKind.Applied && File.ReadAllBytes(engine).AsSpan().SequenceEqual(launched), back.Message);
+    Require(back.Message.Contains("(settings changed live are set back)"), "the reason names the live change, not an app update: " + back.Message);
     Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Unchanged);
     // Back to stock DCS after a live apply: complete, nothing left.
     WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { ColorFixSaturation = 0.9, DepthBoostNearM = 1.3 }, inventory));
