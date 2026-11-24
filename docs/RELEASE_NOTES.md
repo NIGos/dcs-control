@@ -14,7 +14,7 @@
 - DLSS 5 and foveated frame generation are offered but not yet flown on this route. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
 
 **Hide the focus edge.** On by default, in the Focus area card of the Quad Views page, and it applies in flight. When you look somewhere else, the short flash at the edge of the focus area is much smaller.
-- Its parts are under **Fine-tune**: Smooth small moves (eye jumps are never delayed), Soft focus edge, Fade in, Steady periphery through eye jumps, and Match brightness (and color) at the edge. Fade in and the matching work with foveated frame generation.
+- Its parts are under **Fine-tune**: Smooth small moves (eye jumps are never delayed), Soft focus edge, Fade in, Steady periphery through eye jumps, and Match brightness (and color) at the edge. Fade in and the matching need foveated frame generation.
 - With DLSS 5, Local tone 0 removes most of what is left, at the cost of some local contrast.
 
 **Eye-tracking options from @Heartbreak-1 (GitHub PR #26).**

@@ -136,7 +136,8 @@ public sealed record VrProfile
     public bool UsesHudSymbology => FrameGenHudSymbology && FrameGen != FrameGeneration.Off && !Desktop;
     /// <summary>Foveated frame generation: the bundled Quad Views submits the focus area and the rest of the view as two
     /// projection layers (dcsvr_two_layers) and OFXR generates each on its own (foveated_layers), instead of generating
-    /// the composed full image. Measured 2026-11-15: about half the GPU time per generated pair and 4-5 GB less video
+    /// the composed full image; OFXR then joins them into one image per eye for the runtime (foveated_single_layer,
+    /// patches 0099/0101; a refused join sends that frame as two layers). Measured 2026-11-15, before the join: about half the GPU time per generated pair and 4-5 GB less video
     /// memory. Probed and flown on the Pimax runtime with NVIDIA Optical Flow only; also offered on Quest 3 VD (VDXR takes
     /// projection layers like any OpenXR runtime), not yet flown there. The Smoothness buffer keeps the pilot's choice
     /// (fork patch 0080 tests it with the buffer at fixed 2x, 3x and Auto between them). Experimental, off by default.</summary>
