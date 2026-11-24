@@ -61,6 +61,15 @@ function Update-PinnedText([string]$text, [string]$anchor, [string]$replacement,
 $pixCmakePath = Join-Path $sdkRoot 'sdk/libs/pix/CMakeLists.txt'
 $pixCmake = [IO.File]::ReadAllText($pixCmakePath)
 [IO.File]::WriteAllText($pixCmakePath, (Update-PinnedText $pixCmake '${CMAKE_GENERATOR_PLATFORM}' '${CMAKE_VS_PLATFORM_NAME}' $pixCmakePath))
+# The SDK's platform check wants the linker flags to be exactly "/machine:x64". That holds on a first configuration
+# only: the toolchain runs before project() makes the cache entry, which then holds "/Brepro /machine:x64", so every
+# later configuration of the same folder (a second build, Ninja's own re-run) stopped with "Unsupported target
+# platform". The check takes /machine:x64 among other flags instead.
+$sdkCmakePath = Join-Path $sdkRoot 'sdk/CMakeLists.txt'
+$sdkCmake = [IO.File]::ReadAllText($sdkCmakePath)
+$sdkCmakePatched = Update-PinnedText $sdkCmake 'CMAKE_EXE_LINKER_FLAGS STREQUAL "/machine:x64")' 'CMAKE_EXE_LINKER_FLAGS MATCHES "(^| )/machine:x64( |$)")' $sdkCmakePath
+# Written only when it changes: a rewrite would make Ninja configure the folder again on every build.
+if ($sdkCmakePatched -ne $sdkCmake) { [IO.File]::WriteAllText($sdkCmakePath, $sdkCmakePatched) }
 $sdkBuild = Join-Path $workspaceRoot 'artifacts/native/fidelityfx'
 # SDK 1.1.4 appends output paths to the output-variable name itself. Ninja
 # correctly rejects the resulting literal dependency. Preserve the name and
