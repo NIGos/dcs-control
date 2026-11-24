@@ -32,7 +32,7 @@
 
 #include "audio_voice.h"
 #include "binaural_core.h"
-#include "head_pose_shm.h"
+#include "head_pose_reader.h"  // head_pose_shm.h and its checked readers (staleness, writer, speed guards)
 
 namespace audr {
 
@@ -162,7 +162,7 @@ struct EvRing {
 struct Counters {
   std::atomic<uint64_t> blocks{0}, armedBlocks{0}, candidateCalls{0}, hrtfCalls{0}, repanCalls{0}, fadeIns{0},
       fadeOuts{0}, steady{0}, passCandidates{0}, coreRejected{0}, orphanTagged{0}, nonFinite{0}, framesTooLong{0},
-      voiceEnded{0}, unarmedCalls{0}, overruns{0};
+      voiceEnded{0}, unarmedCalls{0}, overruns{0}, poseBlocks{0};
   std::atomic<uint64_t> panCalls{0}, panSolves{0}, panMismatch{0}, panMedian{0}, ownedVoiceFrames{0}, simFrames{0};
   std::atomic<uint32_t> ownedNow{0}, limitNow{binaural::kMaxSources}, activeLastBlock{0};
   // Block time of our own DSP, microseconds x 10, the last 1024 armed blocks (single writer: the render thread).
@@ -172,8 +172,8 @@ struct Counters {
   void Reset() {  // the module's install (and the tests): every counter back to its start value
     for (std::atomic<uint64_t>* c : {&blocks, &armedBlocks, &candidateCalls, &hrtfCalls, &repanCalls, &fadeIns, &fadeOuts,
                                      &steady, &passCandidates, &coreRejected, &orphanTagged, &nonFinite, &framesTooLong,
-                                     &voiceEnded, &unarmedCalls, &overruns, &panCalls, &panSolves, &panMismatch, &panMedian,
-                                     &ownedVoiceFrames, &simFrames})
+                                     &voiceEnded, &unarmedCalls, &overruns, &poseBlocks, &panCalls, &panSolves,
+                                     &panMismatch, &panMedian, &ownedVoiceFrames, &simFrames})
       c->store(0, std::memory_order_relaxed);
     ownedNow.store(0, std::memory_order_relaxed);
     limitNow.store(binaural::kMaxSources, std::memory_order_relaxed);

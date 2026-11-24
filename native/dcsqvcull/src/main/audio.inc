@@ -32,7 +32,15 @@ std::atomic<bool> g_stopping{false};      // Stop is fading everything back befo
 enum OffReason : int { kOffNone = 0, kOffOverruns = 1, kOffPanLaw = 2 };
 std::atomic<int> g_offReason{kOffNone};   // binaural off for the rest of the DCS session
 std::atomic<dcsvr_headpose::Block*> g_pose{nullptr};
+std::atomic<uint32_t> g_selfPid{0};       // the pose block's writer must be this process (set by Start)
 thread_local audr::Block* t_block = nullptr;
+
+// The head pose readers' limits (head_pose_reader.h): 150 ms staleness, 50 ms horizon, speed guards, this process.
+inline dcsvr_headpose::ReaderLimits PoseLimits() {
+  dcsvr_headpose::ReaderLimits l;
+  l.expectedPid = g_selfPid.load(std::memory_order_relaxed);
+  return l;
+}
 
 // Runtime settings the real-time threads read (control writes, seqlock).
 struct Rt {
@@ -134,9 +142,10 @@ void SimFrame(uint32_t f) {
   e.freq = QpcFreq();
   e.poseValid = false;
   dcsvr_headpose::Block* pb = rt.late ? g_pose.load(std::memory_order_acquire) : nullptr;
-  dcsvr_headpose::Entry pe;
-  if (pb && dcsvr_headpose::ReadLatest(pb, pe) && (pe.flags & dcsvr_headpose::entry_flags::orientation_valid) &&
-      e.now - pe.qpcLocate < e.freq / 5) {
+  dcsvr_headpose::PredictedPose pp;
+  // The pose DCS used for this frame: the newest checked entry as it is (its extrapolation is not used here).
+  if (pb && dcsvr_headpose::ReadPredicted(pb, e.now, e.now, PoseLimits(), pp) == dcsvr_headpose::PoseStatus::kOk) {
+    const dcsvr_headpose::Entry& pe = pp.entry;
     e.poseValid = true;
     memcpy(e.q, pe.orientation, sizeof(e.q));
     memcpy(e.t, pe.position, sizeof(e.t));
@@ -243,15 +252,16 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
   const int64_t now = Qpc(), freq = QpcFreq();
   if (rt.late) {
     dcsvr_headpose::Block* pb = g_pose.load(std::memory_order_acquire);
-    dcsvr_headpose::Entry e;
-    if (pb && dcsvr_headpose::ReadLatest(pb, e) && (e.flags & dcsvr_headpose::entry_flags::orientation_valid) &&
-        now - e.qpcLocate < freq / 5) {
-      // The newest head pose, predicted to the end of this block (when its last sample leaves our hands).
-      const int64_t target = now + static_cast<int64_t>(static_cast<double>(frames) / b->rate * static_cast<double>(freq));
+    // The newest head pose, predicted to the end of this block (when its last sample leaves our hands): checked for
+    // staleness, writer and plausible speeds, extrapolated at most 50 ms (head_pose_reader.h).
+    const int64_t target = now + static_cast<int64_t>(static_cast<double>(frames) / b->rate * static_cast<double>(freq));
+    dcsvr_headpose::PredictedPose pp;
+    if (pb && dcsvr_headpose::ReadPredicted(pb, now, target, PoseLimits(), pp) == dcsvr_headpose::PoseStatus::kOk) {
       blk.pose.valid = true;
-      blk.pose.q = dcsvr_headpose::PredictOrientation(e, target, pb->qpcFrequency ? pb->qpcFrequency : freq);
-      blk.pose.t = dcsvr_headpose::PositionOf(e);
-      blk.pose.base = e.baseSpace;
+      blk.pose.q = pp.orientation;
+      blk.pose.t = pp.position;
+      blk.pose.base = pp.entry.baseSpace;
+      g_cnt.poseBlocks.fetch_add(1, std::memory_order_relaxed);
     }
   }
   t_block = &blk;
@@ -738,7 +748,7 @@ void LogListenerVsPose() {
 std::wstring g_voicesCsv;
 void LogVoicesTick() {
   if (!g_cfgRead.cfg.logVoices || !g_installed.load()) return;
-  if (g_voicesCsv.empty()) g_voicesCsv = g_dir + L"DcsQvCullAudioVoices.csv";
+  if (g_voicesCsv.empty()) g_voicesCsv = g_dir + L"audio_voices.csv";
   WIN32_FILE_ATTRIBUTE_DATA fa{};
   const bool exists = GetFileAttributesExW(g_voicesCsv.c_str(), GetFileExInfoStandard, &fa) != 0;
   if (exists && (static_cast<uint64_t>(fa.nFileSizeHigh) << 32 | fa.nFileSizeLow) > (8ull << 20)) return;
@@ -776,7 +786,7 @@ void PoseTick() {
 struct Loop {
   ULONGLONG lastFlag = 0, lastStats = 0, lastCtx = 0, lastDiag = 0, lastVoices = 0, lastInstall = 0, lastCfg = 0;
   bool keyWas = false;
-  uint64_t statsHrtf = 0;
+  uint64_t statsHrtf = 0, statsPose = 0;
 };
 Loop g_loop;
 
@@ -853,16 +863,21 @@ void ControlTick() {
     if (hc != L.statsHrtf) {
       audr::Binding* b = g_binding.load();
       const double budgetMs = b && b->rate ? 10.0 * g_cfgRead.cfg.cpuBudgetPercent / 100.0 : 0;
+      // Head pose: "on" when blocks since the last line had the headset's pose (LateHeadTracking), "off" when it is
+      // asked for and none came, "unused" when LateHeadTracking=0. The app shows it next to "Follow the head".
+      const uint64_t pc = g_cnt.poseBlocks.load();
+      const char* pose = !g_cfgRead.cfg.lateHeadTracking ? "unused" : pc != L.statsPose ? "on" : "off";
+      L.statsPose = pc;
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
           "%u; fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu, pan solves %llu (median %llu, mismatch "
-          "%llu), overruns %llu",
+          "%llu), overruns %llu; head pose %s",
           g_cnt.ownedNow.load(), P99Ms(), g_cfgRead.cfg.cpuBudgetPercent, budgetMs,
           std::min<uint32_t>(g_cnt.limitNow.load(), static_cast<uint32_t>(g_cfgRead.cfg.maxObjects)),
           static_cast<unsigned long long>(g_cnt.fadeIns.load()), static_cast<unsigned long long>(g_cnt.fadeOuts.load()),
           static_cast<unsigned long long>(g_cnt.repanCalls.load()), static_cast<unsigned long long>(g_cnt.coreRejected.load()),
           static_cast<unsigned long long>(g_meta.torn.load()), static_cast<unsigned long long>(g_cnt.panSolves.load()),
           static_cast<unsigned long long>(g_cnt.panMedian.load()), static_cast<unsigned long long>(g_cnt.panMismatch.load()),
-          static_cast<unsigned long long>(g_cnt.overruns.load()));
+          static_cast<unsigned long long>(g_cnt.overruns.load()), pose);
       L.statsHrtf = hc;
     }
   }
@@ -893,6 +908,7 @@ DWORD WINAPI AudioThread(void*) {
 void Start() {
   g_quit = false;
   g_stopping = false;
+  g_selfPid.store(GetCurrentProcessId());
   if (g_testNoThread.load()) return;
   g_thread = CreateThread(nullptr, 0, qvexit::Thread<AudioThread>, nullptr, 0, nullptr);
 }

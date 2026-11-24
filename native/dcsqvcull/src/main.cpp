@@ -40,6 +40,7 @@
 #include "binaural_config.h"
 #include "binaural_core.h"
 #include "head_pose_shm.h"
+#include "head_pose_reader.h"
 
 #include "loader_api.h"
 #include "log_utf8.h"
