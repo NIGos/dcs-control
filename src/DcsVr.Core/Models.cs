@@ -581,9 +581,13 @@ public sealed record VrProfile
     /// <summary>Depth boost runs: like Pupil shift, only for a VR flight with eye-tracked Quad Views.</summary>
     public bool UsesDepthBoost => DepthBoost && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
     /// <summary>The pupil shift layer (it carries Pupil shift and Depth boost, and publishes the gaze for Visual realism)
-    /// is deployed when any of them runs, and for the Periphery DLSS preset (it hides the driver's forced preset from
-    /// DLSS: it loads before DCS starts its renderer, the engine module only after).</summary>
-    public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost || UsesGazePublish || UsesPeripheryDlssPreset;
+    /// is deployed when any of them runs, for the Periphery DLSS preset (it hides the driver's forced preset from
+    /// DLSS: it loads before DCS starts its renderer, the engine module only after), and for the head pose of 3D audio's
+    /// late head tracking (<see cref="UsesHeadPosePublish"/>; without the component, 3D audio runs without it).</summary>
+    public bool UsesPerceptionLayer => PerceptionLayerRequired || UsesHeadPosePublish;
+    /// <summary>A feature that cannot run without the layer wants it. The head pose alone does not: a distribution without
+    /// the layer flies 3D audio with DCS's own head direction.</summary>
+    [JsonIgnore] public bool PerceptionLayerRequired => UsesPupilShift || UsesDepthBoost || UsesGazePublish || UsesPeripheryDlssPreset;
     /// <summary>The layer moves the eyes (Pupil shift or Depth boost), so it takes over DCS's custom IPD. Publishing the
     /// gaze alone moves nothing and leaves DCS's IPD as it is.</summary>
     public bool UsesLayerEyeDistance => UsesPupilShift || UsesDepthBoost;
@@ -593,11 +597,11 @@ public sealed record VrProfile
     /// <summary>The engine module is installed: for Engine Optimizations, or for Depth boost's dual camera and scene
     /// depth, a Visual realism feature, Far depth's depth or frame generation's cockpit exports (mask, depth, DCS's
     /// motion vectors, Sharp HUD) alone, in its Perception-only mode ([General] PerceptionOnly=1: none of the engine
-    /// optimizations, no test suite or engine keys).</summary>
+    /// optimizations, no test suite or engine keys). 3D headphone audio is part of the module too.</summary>
     public bool UsesEngineModule => EngineModuleRequired || (FrameGen != FrameGeneration.Off && !Desktop);
     /// <summary>A feature that cannot run without the module wants it. Frame generation's exports alone do not: without
     /// the component (a development distribution) frame generation runs without them, as before 0.7.</summary>
-    [JsonIgnore] public bool EngineModuleRequired => EngineOptimizations || UsesDepthBoost || UsesVisualRealism || UsesFarDepth;
+    [JsonIgnore] public bool EngineModuleRequired => EngineOptimizations || UsesDepthBoost || UsesVisualRealism || UsesFarDepth || UsesBinauralAudio;
     /// <summary>The eye distance DCS renders with. Headset (default): the IPD the headset measured or was set to, the
     /// realistic one; DCS's custom IPD is turned off while the profile is applied. DcsCustom: DCS's own custom IPD as it
     /// is (the pupil shift layer applies it itself when it runs). Manual: <see cref="EyeDistanceMm"/>. VR flights only;
@@ -668,6 +672,46 @@ public sealed record VrProfile
     /// <summary>The sustained G of a full blackout (7.5: g-suit and straining).</summary>
     public double GVisionTolerance { get; init; } = 7.5;
     public GVisionMode GVisionMode { get; init; }
+
+    // 3D headphone audio (docs/BINAURAL_AUDIO.md): the engine module's [Audio] section, every key re-read in flight. Off
+    // by default; a profile without these properties loads as off with the defaults below (binaural_config.h kKeys).
+    /// <summary>[Audio] Binaural: DCS's left/right panning of the mono 3D sounds of the world and the cockpit is replaced
+    /// by HRTF rendering (direction per ear: time, level and the ear's own colouring), so sounds come from front, back,
+    /// above. Radio and intercom stay as DCS plays them. For headphones; on a monitor too (with head tracking). Off by
+    /// default; Launch DCS installs the engine module for it, in its Perception-only mode when Engine Optimizations are off.</summary>
+    public bool BinauralAudio { get; init; }
+    /// <summary>[Audio] Hrtf: "default" (the generic SADIE II KU100 set embedded in the module) or the name of a set
+    /// imported from the pilot's own SOFA file (<see cref="HrtfLibrary"/>).</summary>
+    public string BinauralHrtf { get; init; } = Binaural.DefaultHrtf;
+    /// <summary>[Audio] HeadCircumferenceCm: the head size the time difference between the ears is scaled to (48 to 66;
+    /// 54, 57 and 60 are Small, Medium and Large).</summary>
+    public double HeadCircumferenceCm { get; init; } = Binaural.HeadCircumferenceDefault;
+    /// <summary>[Audio] LateHeadTracking: the head followed at audio rate between DCS frames, from the head pose the pupil
+    /// shift layer publishes (PupilShift.ini [HeadPose] Publish=1, VR only). On by default.</summary>
+    public bool BinauralLateHeadTracking { get; init; } = true;
+    /// <summary>[Audio] NearField: sources nearer than about 2 m (the cockpit) rendered per ear. On by default.</summary>
+    public bool BinauralNearField { get; init; } = true;
+    /// <summary>[Audio] MaxObjects: the most sounds rendered in 3D at once (the loudest); the rest keep DCS's panning.</summary>
+    public int BinauralMaxObjects { get; init; } = Binaural.MaxObjectsDefault;
+    /// <summary>[Audio] LevelTrimDb: level of the 3D sounds only, against DCS's own mix.</summary>
+    public double BinauralLevelTrimDb { get; init; }
+    /// <summary>[Audio] CpuBudgetPercent: the share of each audio block 3D audio may use before it renders fewer sounds.</summary>
+    public int BinauralCpuBudgetPercent { get; init; } = Binaural.CpuBudgetDefault;
+    /// <summary>[Audio] ExcludeContexts: DCS sound context ids (0 to 7, comma separated) left to DCS's panning. Profile file
+    /// only (for diagnosis: which id is which is only known from a live log); written only when set.</summary>
+    public string? BinauralExcludeContexts { get; init; }
+    /// <summary>[Audio] LogVoices: a per-sound CSV next to the module's log, for diagnosis. Off by default.</summary>
+    public bool BinauralLogVoices { get; init; }
+    /// <summary>[Hotkeys] AudioToggle: switches 3D audio off and back on in flight, to compare (DCS's own panning while
+    /// off). "virtual-key:modifiers"; "Off" disables it.</summary>
+    public string AudioToggleKey { get; init; } = NeuralHotkeys.AudioDefault;
+    /// <summary>3D audio runs: on, in VR or on a monitor (it needs no headset).</summary>
+    [JsonIgnore] public bool UsesBinauralAudio => BinauralAudio;
+    /// <summary>The pupil shift layer publishes the head pose for 3D audio's late head tracking: a VR flight with both on.</summary>
+    [JsonIgnore] public bool UsesHeadPosePublish => UsesBinauralAudio && BinauralLateHeadTracking && !Desktop;
+    /// <summary>The audio in-flight key is in use.</summary>
+    [JsonIgnore] public bool UsesAudioToggleKey => UsesBinauralAudio && NeuralHotkeys.TryParse(AudioToggleKey ?? NeuralHotkeys.AudioDefault, out var key) && !key.IsOff;
+
     /// <summary>The color mode hotkey is set (it can switch to any mode in flight).</summary>
     public bool UsesColorModeKey => !Desktop && NeuralHotkeys.TryParse(ColorModeKey ?? NeuralHotkeys.ColorModeDefault, out var key) && !key.IsOff;
     /// <summary>The module's color modes run, or can be switched on in flight: VR flights only (the module replaces the

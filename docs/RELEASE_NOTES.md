@@ -1,3 +1,7 @@
+# Unreleased
+
+**3D headphone audio (experimental).** A new **Audio** page, off by default: DCS's left/right panning of 3D sounds is replaced by real 3D sound for headphones, so engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head. Generic ears (Neumann KU100, SADIE II) out of the box, a head size control, and your own SOFA file if you have one; radio and intercom stay as DCS plays them. Works in VR and on a monitor; its key (Alt+Shift+F6) compares it with DCS's own sound in flight.
+
 # 0.7.0 preview
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.

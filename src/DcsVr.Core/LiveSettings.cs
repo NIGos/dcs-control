@@ -27,8 +27,10 @@ public static class LiveSettings
     /// Visual: a VR image effect of the engine module. Pupil: the pupil shift layer (and, for some, the module too).
     /// Quad: Quad Views' post-processing, eye-tracking refinements and Far depth's strength and key. Flow: OFXR's NVIDIA
     /// optical flow (DCS started with NVIDIA frame generation). Panel: OFXR's headset panel (whenever OFXR runs, with frame
-    /// generation or for the panel alone). Neural: Cheeky's DLSS 5 tuning.</summary>
-    public enum Kind { Engine, Visual, Pupil, Quad, Flow, Neural, Panel }
+    /// generation or for the panel alone). Neural: Cheeky's DLSS 5 tuning. Audio: 3D headphone audio ([Audio] and its key in
+    /// [Hotkeys]), live whenever the installed module has the audio part (<see cref="Binaural.PayloadHasAudio"/>), with or
+    /// without Engine Optimizations, in VR or on a monitor.</summary>
+    public enum Kind { Engine, Visual, Pupil, Quad, Flow, Neural, Panel, Audio }
 
     /// <summary>A live setting: its profile property (camelCase, as in profile.json and the interface's field ids) and the
     /// component files it lives in. A setting in two files is live only while both components run.</summary>
@@ -41,6 +43,7 @@ public static class LiveSettings
     private static Field F(string name) => new(name, Kind.Flow, FlowFile);
     private static Field H(string name) => new(name, Kind.Panel, FlowFile);
     private static Field N(string name) => new(name, Kind.Neural, NeuralFile);
+    private static Field A(string name) => new(name, Kind.Audio, EngineFile);
 
     /// <summary>Every live setting (docs: the live-reload map). Cost weights and Texture dedupe switch on and off live; the
     /// Model allocator too from R144 (before: off only); Diagnostic hooks only on (<see cref="IsLiveKey"/>). Quad Views'
@@ -84,6 +87,14 @@ public static class LiveSettings
         N("neuralIntensity"), N("neuralLocalTone"), N("neuralLocalStructure"), N("neuralSkinStructure"), N("neuralStyle"), N("neuralAutomaticMask"),
         N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralBrightnessMatch"), N("neuralDepth"),
         N("neuralMotionScaleX"), N("neuralMotionScaleY"),
+        // 3D headphone audio: every [Audio] key and its in-flight key (binaural_config.h: all Live; a new HRTF set is loaded
+        // on the module's control thread and crossfaded in). Turning it on or off live writes only [Audio] on a monitor; in
+        // VR it also deploys or removes the pupil shift layer's head pose (PupilShift.ini [HeadPose], read when DCS starts
+        // VR), which waits: the generic signature check in ControlService.ApplyLive finds that. A set imported since the
+        // launch is a new file next to the module, so picking it waits too. binauralExcludeContexts (profile file only, no
+        // interface field) is not in the table: an edit by hand waits for the next launch.
+        A("binauralAudio"), A("binauralHrtf"), A("headCircumferenceCm"), A("binauralLateHeadTracking"), A("binauralNearField"), A("binauralMaxObjects"),
+        A("binauralLevelTrimDb"), A("binauralCpuBudgetPercent"), A("binauralLogVoices"), A("audioToggleKey"),
     ];
 
     private static readonly Dictionary<string, Field> ByName = Fields.ToDictionary(f => f.Name, StringComparer.Ordinal);
@@ -102,6 +113,15 @@ public static class LiveSettings
     public static bool Current(TransactionJournal? journal) => InstalledSince(journal, ReloadVersion);
     /// <summary>The applied profile was installed by an app whose Quad Views and OFXR also reload <see cref="Live07"/>.</summary>
     public static bool Current07(TransactionJournal? journal) => InstalledSince(journal, Reload07Version);
+    /// <summary>The engine payload the applied profile installed has the audio part (<see cref="Binaural.PayloadHasAudio"/>):
+    /// only then does a live [Audio] write reach a module that reads it.</summary>
+    public static bool AudioInstalled(TransactionJournal? journal) =>
+        journal?.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals("DcsQvCullPayload.dll", StringComparison.OrdinalIgnoreCase)) is { } payload && Binaural.PayloadHasAudio(payload.Path);
+    /// <summary>The names of the personal HRTF sets the applied profile installed (Scripts\DcsQvCull\hrtf\&lt;name&gt;.dcshrtf).</summary>
+    public static IReadOnlySet<string> InstalledHrtfSets(TransactionJournal? journal) =>
+        (journal?.Entries ?? []).Where(e => e.Path.EndsWith(Binaural.HrtfExtension, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetFileName(Path.GetDirectoryName(e.Path)), Binaural.HrtfFolder, StringComparison.OrdinalIgnoreCase))
+            .Select(e => Path.GetFileNameWithoutExtension(e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
     private static bool InstalledSince(TransactionJournal? journal, string version) =>
         ReleaseVersion.Parse(journal?.AppVersion) is { } installed && installed.CompareTo(ReleaseVersion.Parse(version)) >= 0;
 
@@ -127,8 +147,10 @@ public static class LiveSettings
         var launch = applied.ForLaunch();
         var installed = journal.Entries.Select(e => Path.GetFileName(e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var current07 = Current07(journal);
+        var audio = AudioInstalled(journal);
         return [.. Fields.Where(f => f.In.All(file => installed.Contains(file) && Reloads(file, applied, journal)) && (current07 || !Live07.Contains(f.Name)) && f.Kind switch
         {
+            Kind.Audio => audio,
             Kind.Engine => launch.EngineOptimizations && (f.Name != "engineDiagnosticHooks" || Current(journal) && !launch.EngineDiagnosticHooks),
             Kind.Visual => !launch.Desktop,
             // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is
@@ -159,7 +181,10 @@ public static class LiveSettings
         // only flight time (180 s) and, once ended with kinds missing, opens again at the next mission load (regfix 82c5345).
         // So live, and the interface says the full gain can take a few minutes of flight.
         "D3D.ChainFast", "D3D.ShaderFast",
+        // 3D headphone audio (binaural_config.h: every key Live) and its in-flight key; only with an audio payload (audio).
+        "Audio.*", "Hotkeys.AudioToggle",
     };
+    private static bool IsAudioKey(string key) => key.StartsWith("Audio.", StringComparison.OrdinalIgnoreCase) || key.Equals("Hotkeys.AudioToggle", StringComparison.OrdinalIgnoreCase);
     // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze, QuadViewsFixedFocus or [DlssPreset] (instance creation).
     private static readonly HashSet<string> PupilKeys = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -213,8 +238,14 @@ public static class LiveSettings
     /// without it Quad Views, OFXR and Cheeky never reload, the Model allocator only switches off and Diagnostics waits.
     /// <paramref name="current07"/>: installed by a 0.7 app (<see cref="Current07"/>), for the 0.7 keys of Quad Views and
     /// OFXR's headset panel; <paramref name="nvidiaFlow"/>: DCS started with NVIDIA frame generation, for OFXR's flow keys.</summary>
-    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true)
+    /// <paramref name="audio"/>: the installed engine payload has the audio part (<see cref="AudioInstalled"/>), for [Audio].
+    /// <paramref name="hrtfSets"/>: the personal HRTF sets installed next to the module (<see cref="InstalledHrtfSets"/>);
+    /// [Audio] Hrtf naming another one waits, since its file comes only with the next launch. Null: not checked.
+    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null)
     {
+        if (file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase) && IsAudioKey(key))
+            return audio && !(key.Equals("Audio.Hrtf", StringComparison.OrdinalIgnoreCase) && hrtfSets is not null && value is not null
+                && !value.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && !hrtfSets.Contains(value));
         if (file.Equals(QuadFile, StringComparison.OrdinalIgnoreCase))
         {
             var name = key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key;

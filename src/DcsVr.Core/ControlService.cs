@@ -26,6 +26,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public const string LegacyStateFolder = "DcsVrControl";
     /// <summary>The app's saved copy of the user's DLSS 5 runtime (state root\runtimes).</summary>
     public NeuralRuntimeStore SavedRuntime => new(Path.Combine(StateRoot, "runtimes"));
+    /// <summary>The pilot's own HRTF sets for 3D headphone audio (state root\hrtf), imported from SOFA files.</summary>
+    public HrtfLibrary Hrtf => new(StateRoot);
 
     /// <summary>
     /// Journal folders of earlier versions: state root\transactions and, for the default state root, the private copies
@@ -277,13 +279,15 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 }
             }
             string? pupilShift = null;
-            if (profile.ForLaunch().UsesPerceptionLayer)
+            // 3D audio's head pose alone: optional (a distribution without the layer flies 3D audio without it).
+            if (profile.ForLaunch().UsesPerceptionLayer && (profile.ForLaunch().PerceptionLayerRequired || File.Exists(Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll"))))
             {
                 pupilShift = Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll");
                 if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
                     throw new InvalidDataException("The pupil shift layer is modified or incomplete.");
             }
-            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectoryFor(inventory.OptionsPath));
+            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectoryFor(inventory.OptionsPath),
+                profile.UsesBinauralAudio ? Hrtf.ForDeployment() : null);
         }
         string Import(string id)
         {
@@ -573,6 +577,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var current = LiveSettings.Current(journal);
         var current07 = LiveSettings.Current07(journal);
         var nvidiaFlow = applied.Profile.ForLaunch().FrameGen == FrameGeneration.Nvidia;
+        var audio = LiveSettings.AudioInstalled(journal); var hrtfSets = LiveSettings.InstalledHrtfSets(journal);
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
@@ -609,7 +614,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
             if (!LiveSettings.Reloads(name, applied.Profile, journal)
-                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow))) { blocked.Add(name); continue; }
+                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow, audio, hrtfSets))) { blocked.Add(name); continue; }
             if (!selfWritten) { updates.Add(new(entry.Path, wanted.Content, entry.InstalledSha256)); continue; }
             // Only the changed keys, in the file as it is now (Cheeky's learned calibration and formatting stay).
             var values = changed.Where(after.ContainsKey).ToDictionary(k => k, k => after[k], StringComparer.OrdinalIgnoreCase);

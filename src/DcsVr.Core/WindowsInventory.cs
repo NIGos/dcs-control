@@ -127,7 +127,7 @@ public sealed class WindowsInventory
             try
             {
                 var lua = new LuaOptions(File.ReadAllText(options));
-                foreach (var path in new[] { "VR.openxr_quadView", "VR.openxr_eyeGaze", "VR.pixel_density", "graphics.Upscaling", "graphics.DLSS_PerfQuality", "graphics.maxFPS", "graphics.sync", "VR.custom_IPD_enable", "VR.custom_IPD" })
+                foreach (var path in new[] { "VR.openxr_quadView", "VR.openxr_eyeGaze", "VR.pixel_density", "graphics.Upscaling", "graphics.DLSS_PerfQuality", "graphics.maxFPS", "graphics.sync", "VR.custom_IPD_enable", "VR.custom_IPD", "sound.main_layout", "sound.driver_name" })
                     if (lua.Get(path.Split('.')) is { } raw) settings[path] = raw;
             }
             catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { observations.Add(e.Message); }

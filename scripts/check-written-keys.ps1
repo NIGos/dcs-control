@@ -3,8 +3,10 @@
 # lists them (writer, section, key), made by DcsVr.Tests from ConfigurationWriters.cs over profiles that turn on every
 # optional block; that test fails when the list is out of date. This script looks for each key in the component's
 # sources (and the added lines of its patches):
-#   DcsQvCull  DcsQvCull.ini     native/dcsqvcull/src: the L"<section>", L"<key>" pair, else L"<key>" ([Dev] included)
-#   PupilShift PupilShift.ini    native/pupil_shift: L"<key>" (ini_float/ini_int name the section after the key)
+#   DcsQvCull  DcsQvCull.ini     native/dcsqvcull/src: the L"<section>", L"<key>" pair, else L"<key>" ([Dev] included);
+#                                [Audio] from native/binaural/include/binaural_config.h's key table
+#   PupilShift PupilShift.ini    native/pupil_shift: L"<key>" (ini_float/ini_int name the section after the key);
+#                                [HeadPose] Publish from binaural_config.h (kPosePublishSection, kPosePublishKey)
 #   Ofxr       ofxr_bridge.ini   external/ofxr-djules75/src + patches/ofxr-djules75, patches/ofxr: the pair, else L"<key>"
 #   QuadViews  settings.cfg      external/quadviews/openxr-api-layer + patches/quadviews + native/quadviews: "<key>"
 #   Cheeky     Cheeky's ini      external/cheeky/src and the sources in patches/cheeky: "<key>"
@@ -40,8 +42,10 @@ function Sources([string[]]$folders, [string[]]$patchFolders, [string]$checkout)
   return $text.ToString()
 }
 $readers = [ordered]@{
-  DcsQvCull  = @{ Text = Sources @('native/dcsqvcull/src') @(); Pair = $true }
-  PupilShift = @{ Text = Sources @('native/pupil_shift') @(); Pair = $false }
+  # native/binaural/include: binaural_config.h, the [Audio] key table the engine module's audio part and the pupil shift
+  # layer read their keys with (docs/BINAURAL_AUDIO.md section 7).
+  DcsQvCull  = @{ Text = Sources @('native/dcsqvcull/src', 'native/binaural/include') @(); Pair = $true }
+  PupilShift = @{ Text = Sources @('native/pupil_shift', 'native/binaural/include') @(); Pair = $false }
   Ofxr       = @{ Text = Sources @('external/ofxr-djules75/src') @('patches/ofxr-djules75', 'patches/ofxr') 'external/ofxr-djules75'; Pair = $true }
   QuadViews  = @{ Text = Sources @('external/quadviews/openxr-api-layer', 'native/quadviews') @('patches/quadviews') 'external/quadviews'; Pair = $false }
   Cheeky     = @{ Text = Sources @('external/cheeky/src', 'patches/cheeky') @() 'external/cheeky'; Pair = $false }
