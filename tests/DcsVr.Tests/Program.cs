@@ -219,6 +219,15 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
     var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
     Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
+    // Fork patch 0121: the occlusion fill, off by default, written only with NVIDIA frame generation (DCS's MVs).
+    Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\ndcs_motion=1\n") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\ndcs_motion_occlusion_fill=0\n")
+        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = true }).Contains("\ndcs_motion_occlusion_fill=1\n")
+        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = true, FrameGenOcclusionFillOverHud = true }).Contains("\ndcs_motion_occlusion_fill=2\n")
+        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFillOverHud = true }).Contains("\ndcs_motion_occlusion_fill=0\n")
+        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.FidelityFx, FrameGenOcclusionFill = true }).Contains("\ndcs_motion_occlusion_fill=0\n") && !new VrProfile().FrameGenOcclusionFill, "Occlusion fill: off by default, 1 (Sharp HUD only) or 2 (over the HUD) only with NVIDIA frame generation");
+    // Fork patch 0122: a profile saved with the fill off carries neither key, so 0.7.0 opens it.
+    var fillJson = System.Text.Json.JsonSerializer.Serialize(new VrProfile());
+    Require(!fillJson.Contains("FrameGenOcclusionFill") && System.Text.Json.JsonSerializer.Serialize(new VrProfile { FrameGenOcclusionFill = true }).Contains("FrameGenOcclusionFill"), "Occlusion fill keys only in profiles that turn them on");
 });
 Test("Explicit manifest keeps extension metadata", () =>
 {

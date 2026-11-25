@@ -1,0 +1,1365 @@
+Engine-data round, review fixes for 0121 (DCS Control, 2026-11-25). [ofxr] dcs_motion_occlusion_fill becomes a mode and
+the fill only acts on what it knows:
+- The frame taken must show the farther surface itself at the place it is read, by a known rank (the cockpit's class, no
+  MV, outside a rect, no previous class are unknown: no fill), and that place must not be the cockpit mask's.
+- No previous class atlas (a reset pair, no stencil in either frame, a previous frame without MVs): the fill bit is
+  cleared for the pair or view, the image is the one without the fill, byte for byte (tested).
+- The previous-class pass also reads the previous frame's own MVs and marks, per cell, where that frame's model is at
+  each output's instant (two-step fixed point along its MVs, bits 5 / 6 of the field's flags); with no nearer surface
+  around in the current frame (behind a model that moved on) a pixel the model still covers at the instant is not
+  filled (without it the fill painted the background over a model's trailing part). Where a nearer surface is around,
+  the pixel is not filled if it may be that surface within half a cell (five probes), or that surface's own MVs do not
+  hold (both frames differ along them at its cell: a rotor, propeller or afterburner), or the flow holds the pixel still
+  while the world moves (content over it the G-buffer does not hold).
+- Class texels past the class texture read as unknown, not as a surface.
+- Mode 0 off, 1 only on pairs whose HUD / helmet symbology was taken out (hud_symbology), 2 every pair: a HUD left in the
+  image, even semi-transparent, with an aircraft passing behind it, is moved by the one-frame sample (fixture: up to 9%
+  worse there in mode 2), so 1 is the safe one. Taken in live (0066's LiveFlow / Snapshot occlusion_fill, kLiveOcclusionFill
+  32, live_settings bits 40-41; a rebuild), the pass's pipeline and descriptor block made with dcs_motion whatever the key.
+- Counters: the MVs' own count (the backoff's) is taken before the fill, which counts apart (16 uints at byte 128 of the
+  counter buffer, CockpitMaskPairCounters::motion_filled_pixels).
+- The previous frame's class copy is noted as read by the pair (note_reader) where its mask was not bound, so its ring
+  entry is not reused under the GPU.
+- static_assert that the fill bit (4096) is clear of the cell, output and 0104 quality bits; key in layer/ofxr_bridge.ini.
+Fixtures (tests/fg_engine_data.inc): a previous camera turned 1.5 degrees (every frame drawn by its own camera, the MVs
+carrying the turn), the headset's cell (8), 3X's instants (1/3, 2/3), no previous class atlas, mode 1, and a day case with
+a spinning rotor (its look turns, its MVs say rigid) and a semi-transparent HUD (alpha 0.6) the aircraft passes behind.
+Day, MVs at the periphery's texel, sRGB mae without / with the fill: behind a model 17.4 / 8.0, ahead 12.0 / 8.8, all
+1.44 / 1.33; cell 8: behind 18.1 / 4.5, all 1.47 / 1.31; turned head: behind 17.1 / 6.8, all 1.51 / 1.40; t 1/3: behind
+22.7 / 12.7; t 2/3: behind 11.3 / 4.9; night: behind 3.8 / 2.8; rotor disc 10.5 / 10.8 (cell 8: 13.2 / 14.2); glass HUD
+24.0 / 24.5 (t 2/3: 24.9 / 27.2); without a previous atlas or in mode 1 identical. Cost (XRFG_TEST_FG_ENGINE_DATA_BENCH,
+5424 x 5356, both eyes, mode 2): composition 1157 -> 1245 us median per pair (0121 alone: 1214). cockpit_mask_tests: the live parse of
+the mode.
+Touched functions (for merges): frame_synthesis.hlsl dcs_motion_previous_rank, new dcs_motion_previous_model_reaches,
+dcs_motion_occlusion_fill (gates), dcs_motion_pixel's end (the fill after the count, its own count);
+dcs_motion_previous.hlsl (new helpers); synthesizer: create_root_signature_and_pipelines (pass made with dcs_motion),
+create_dcs_motion_resources (mode), kDcsMotionCounterBytes / harvest_dcs_motion (fill count), new
+clear_dcs_motion_fill_bits, record_dcs_motion_previous_class (mode 1, bits cleared, t0 the previous MVs, fractions),
+submit_pair (previous_class_read kept, note_reader); embedded_control (LiveFlow / Snapshot / adopt_live / live_flow_code
+/ live_flow_of: occlusion_fill beside 0104's fg_quality), implicit_layer (read_dcs_motion_occlusion_fill returns a mode,
+OfxrSectionValues::occlusion_fill, parse_ofxr_section), openxr_layer (session read, retire_async_arm's compare,
+apply_embedded_control's options and change), cockpit_mask.hpp (motion_filled_pixels).
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -291,6 +291,9 @@ struct CockpitMaskPairCounters {
+     std::atomic<std::uint64_t> motion_backoff_pairs{};
+     std::atomic<std::uint64_t> motion_pixels{};
+     std::atomic<std::uint64_t> motion_fallback_pixels{};
++    // DCS Control (0122): pixels the occlusion fill gave (not in the two above:
++    // the backoff judges the MVs alone).
++    std::atomic<std::uint64_t> motion_filled_pixels{};
+     // DCS Control (0040): the backoff itself, shared by every eye.
+     DcsMotionBackoff motion_backoff;
+     // DCS Control (0049): the HUD symbology (cockpit_mask result=20). Views
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -370,7 +370,13 @@ struct D3D12NvidiaOpticalFlowOptions {
+     // frame alone along the farther surface's vector, instead of the flow's
+     // blend of both (frame_synthesis.hlsl, dcs_motion_occlusion_fill).
+     // Without it the composition is exactly as before.
+-    bool dcs_motion_occlusion_fill{};
++    // DCS Control (0122): a mode. 0 off; 1 only on pairs whose HUD / helmet
++    // symbology was taken out (hud_symbology: a HUD left in the image, even
++    // semi-transparent, with an aircraft passing behind it, is moved by the
++    // one-frame sample); 2 on every pair. Taken in live (a rebuild). Only
++    // where the pair's previous frame carries its class atlas and both frames
++    // their stencil composition.
++    std::uint32_t dcs_motion_occlusion_fill{};
+ };
+ 
+ // Foveated layers: the Waits a command queue already has queued, by fence.
+diff --git a/include/xrfg/embedded_control.hpp b/include/xrfg/embedded_control.hpp
+--- a/include/xrfg/embedded_control.hpp
++++ b/include/xrfg/embedded_control.hpp
+@@ -25,6 +25,9 @@ struct Snapshot {
+     // value it read at its start. Not in Settings: the provider ABI's
+     // requests carry no such field, and one must not reset it.
+     std::int32_t occlusion_aware{-1};
++    // DCS Control (0122): [ofxr] dcs_motion_occlusion_fill as last taken in
++    // live (0-2); -1 while nothing has been (each session keeps its own).
++    std::int32_t occlusion_fill{-1};
+ };
+ Snapshot snapshot();
+ bool request(Settings settings); // persists only owned keys; false means INI write failed
+@@ -47,6 +50,7 @@ struct LiveFlow {
+     int scale{2}; // as Settings::scale
+     bool backward{};
+     std::uint32_t occlusion_aware{}; // 0 or 1
++    std::uint32_t occlusion_fill{}; // DCS Control (0122): dcs_motion_occlusion_fill, 0-2
+     bool operator==(const LiveFlow&) const = default;
+ };
+ // Bits of LiveAdoption::keys (and of the live_settings record's c).
+@@ -54,6 +58,7 @@ inline constexpr std::uint32_t kLivePreset = 1U;
+ inline constexpr std::uint32_t kLiveScale = 2U;
+ inline constexpr std::uint32_t kLiveBidirectional = 4U;
+ inline constexpr std::uint32_t kLiveOcclusion = 8U;
++inline constexpr std::uint32_t kLiveOcclusionFill = 32U; // DCS Control (0122) (16: 0104's quality keys)
+ struct LiveAdoption {
+     std::uint32_t keys{}; // what differed; 0: nothing taken in
+     LiveFlow before{}, after{};
+@@ -64,7 +69,7 @@ struct LiveAdoption {
+ LiveAdoption adopt_live(const LiveFlow& flow, bool first = false);
+ // The live_settings record's a and b: preset (Settings::preset) in bits 0-7,
+ // the input scale in percent (100, 75, 50) in bits 8-15, bidirectional in bit
+-// 16, occlusion_aware in bits 24-31.
++// 16, occlusion_aware in bits 24-31; DCS Control (0122): dcs_motion_occlusion_fill in bits 40-41.
+ [[nodiscard]] std::uint64_t live_flow_code(const LiveFlow& flow) noexcept;
+ 
+ // DCS Control (0095): `[ofxr] diag_vram` as the live watcher last read it (0
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -245,7 +245,9 @@ struct ConfiguredNvidiaOptions {
+ // background seen in one real frame only around a moving object is taken from
+ // that frame alone (by the MVs' class order) where the MVs did not hold. Off
+ // (0) by default and when the key is missing. Read once per session.
+-[[nodiscard]] bool read_dcs_motion_occlusion_fill(
++// DCS Control (0122): 0, 1 (only where the HUD symbology was taken out) or 2
++// (everywhere); above 2 reads as 2.
++[[nodiscard]] std::uint32_t read_dcs_motion_occlusion_fill(
+     const std::filesystem::path& module_directory) noexcept;
+ // DCS Control (0049). `[ofxr] hud_symbology`: with cockpit_mask, also read the
+ // HUD / helmet symbology the engine module shares beside the mask
+@@ -486,6 +488,7 @@ struct OfxrSectionValues {
+     bool found{};
+     ConfiguredNvidiaOptions nvidia{};
+     std::uint32_t occlusion_aware{};
++    std::uint32_t occlusion_fill{}; // DCS Control (0122): dcs_motion_occlusion_fill, 0-2
+     std::array<std::wstring, kOfxrStartOnlyKeys.size()> start_only{};
+ };
+ // `section`: GetPrivateProfileSectionW's buffer (key=value lines, each ended
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -27,6 +27,13 @@ cockpit_depth=0
+ ; sharp in generated frames; the optical flow covers everything they do not.
+ ; 1 on, 0 off (default). Read when the game starts its session.
+ dcs_motion=0
++; DCS, with dcs_motion=1: around a moving aircraft (or the world over the sky),
++; the background seen in one real frame only is taken from that frame alone,
++; by DCS's class atlas of both frames, instead of a smeared halo. 0 off
++; (default); 1 only where the HUD symbology was taken out (hud_symbology=1: a
++; HUD left in the image moves with the fill where an aircraft passes behind
++; it); 2 everywhere. Taken in while the game runs.
++dcs_motion_occlusion_fill=0
+ ; DCS, with cockpit_mask=1: keep the HUD and helmet symbols sharp in generated
+ ; frames. The engine module shares what they add to each frame: they are taken
+ ; out before the motion is worked out and put back from the nearest real frame
+diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
+--- a/src/common/embedded_control.cpp
++++ b/src/common/embedded_control.cpp
+@@ -31,6 +31,7 @@ struct Control {
+     Settings settings;
+     std::uint64_t revision{1}, next_id{1};
+     std::int32_t occlusion_aware{-1}; // DCS Control (0066): Snapshot::occlusion_aware
++    std::int32_t occlusion_fill{-1}; // DCS Control (0122): Snapshot::occlusion_fill
+     std::map<std::uint64_t, Receipt> sessions;
+     Control() {
+         const auto options = implicit_layer::read_nvidia_options(directory());
+@@ -54,6 +55,7 @@ Snapshot snapshot() {
+     auto& c = control(); std::scoped_lock lock(c.mutex);
+     Snapshot s; s.desired = c.settings; s.revision = c.revision;
+     s.occlusion_aware = c.occlusion_aware; // DCS Control (0066)
++    s.occlusion_fill = c.occlusion_fill; // DCS Control (0122)
+     s.sessions = static_cast<unsigned>(c.sessions.size());
+     for (auto& [id, r] : c.sessions) {
+         if (r.revision != c.revision) ++s.pending;
+@@ -102,18 +104,24 @@ bool set_overlay_setting(int position) { return position >= 0 && position < 5 &&
+ // DCS Control (0066).
+ LiveAdoption adopt_live(const LiveFlow& flow, bool first) {
+     LiveAdoption result;
+-    if (flow.preset < 0 || flow.preset > 2 || flow.scale < 0 || flow.scale > 2 || flow.occlusion_aware > 1U)
++    if (flow.preset < 0 || flow.preset > 2 || flow.scale < 0 || flow.scale > 2 || flow.occlusion_aware > 1U ||
++        flow.occlusion_fill > 2U) // DCS Control (0122)
+         return result;
+     auto& c = control(); std::scoped_lock lock(c.mutex);
+     result.before = {c.settings.preset, c.settings.scale, c.settings.backward,
+         c.occlusion_aware >= 0 || !first ? static_cast<std::uint32_t>(std::max(c.occlusion_aware, 0))
+-                                         : flow.occlusion_aware};
++                                         : flow.occlusion_aware,
++        // DCS Control (0122): as occlusion_aware.
++        c.occlusion_fill >= 0 || !first ? static_cast<std::uint32_t>(std::max(c.occlusion_fill, 0))
++                                        : flow.occlusion_fill};
+     result.after = flow;
+     if (result.before.preset != flow.preset) result.keys |= kLivePreset;
+     if (result.before.scale != flow.scale) result.keys |= kLiveScale;
+     if (result.before.backward != flow.backward) result.keys |= kLiveBidirectional;
+     if (result.before.occlusion_aware != flow.occlusion_aware) result.keys |= kLiveOcclusion;
++    if (result.before.occlusion_fill != flow.occlusion_fill) result.keys |= kLiveOcclusionFill; // DCS Control (0122)
+     c.occlusion_aware = static_cast<std::int32_t>(flow.occlusion_aware);
++    c.occlusion_fill = static_cast<std::int32_t>(flow.occlusion_fill);
+     if (result.keys != 0) {
+         c.settings.preset = flow.preset;
+         c.settings.scale = flow.scale;
+@@ -129,13 +137,14 @@ std::uint64_t live_flow_code(const LiveFlow& flow) noexcept {
+     return static_cast<std::uint64_t>(flow.preset & 0xFF) |
+         (flow.scale >= 0 && flow.scale <= 2 ? percent[flow.scale] << 8 : 0ULL) |
+         (flow.backward ? 1ULL << 16 : 0ULL) |
+-        (static_cast<std::uint64_t>(flow.occlusion_aware & 0xFFU) << 24);
++        (static_cast<std::uint64_t>(flow.occlusion_aware & 0xFFU) << 24) |
++        (static_cast<std::uint64_t>(flow.occlusion_fill & 3U) << 40); // DCS Control (0122)
+ }
+ 
+ namespace {
+ LiveFlow live_flow_of(const implicit_layer::OfxrSectionValues& values) noexcept {
+     return {static_cast<int>(values.nvidia.preset), static_cast<int>(values.nvidia.input_scale),
+-        values.nvidia.bidirectional, values.occlusion_aware};
++        values.nvidia.bidirectional, values.occlusion_aware, values.occlusion_fill};
+ }
+ // DCS Control (0095): diag_vram's place in kOfxrStartOnlyKeys (its bit stays
+ // in the list, so the live_settings record's bits keep their meaning; it is
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -381,8 +381,18 @@ bool read_dcs_motion(const std::filesystem::path& module_directory) noexcept {
+ }
+ 
+ // DCS Control (0121).
+-bool read_dcs_motion_occlusion_fill(const std::filesystem::path& module_directory) noexcept {
+-    return read_ofxr_switch(module_directory, L"dcs_motion_occlusion_fill", false);
++std::uint32_t read_dcs_motion_occlusion_fill(const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return 0;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        const INT value = static_cast<INT>(GetPrivateProfileIntW(
++            L"ofxr", L"dcs_motion_occlusion_fill", 0, ini_path.c_str()));
++        return value <= 0 ? 0U : (value > 2 ? 2U : static_cast<std::uint32_t>(value));
++    } catch (...) {
++        return 0;
++    }
+ }
+ 
+ // DCS Control (0049).
+@@ -768,6 +778,8 @@ OfxrSectionValues parse_ofxr_section(std::wstring_view section) {
+     values.nvidia.bidirectional = profile_int(find(L"nvidia_bidirectional"), 0) != 0;
+     const UINT occlusion = profile_int(find(L"nvidia_occlusion_aware"), 0);
+     values.occlusion_aware = occlusion <= 1U ? occlusion : 0U; // as read_nvidia_occlusion_aware
++    const UINT fill = profile_int(find(L"dcs_motion_occlusion_fill"), 0); // DCS Control (0122)
++    values.occlusion_fill = fill <= 2U ? fill : 2U; // as read_dcs_motion_occlusion_fill
+     for (std::size_t i = 0; i < kOfxrStartOnlyKeys.size(); ++i) {
+         if (const auto* value = find(kOfxrStartOnlyKeys[i])) values.start_only[i] = *value;
+     }
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -537,6 +537,10 @@ constexpr UINT kDcsMotionCellShift = 4U;
+ constexpr UINT kDcsMotionOutputBit = 256U;
+ // DCS Control (0121): [ofxr] dcs_motion_occlusion_fill (frame_synthesis.hlsl).
+ constexpr UINT kDcsMotionFillBit = 4096U;
++// DCS Control (0122): repeated in frame_synthesis.hlsl; clear of the cell bits,
++// the output bit and 0104's quality bits (16-23).
++static_assert(kDcsMotionFillBit == 4096U && (kDcsMotionFillBit & (0x30U | 0x100U | 0xFF0000U)) == 0U,
++    "kDcsMotionFillBit: frame_synthesis.hlsl repeats it");
+ // The resampled motion (xy residual, z class, w surface), the scatter (a key
+ // per cell and output), and the composition's counters: 16 buckets of two
+ // uints (pixels along an MV, pixels back to the flow), one pixel in 256,
+@@ -544,7 +548,11 @@ constexpr UINT kDcsMotionFillBit = 4096U;
+ constexpr DXGI_FORMAT kDcsMotionTargetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+ constexpr DXGI_FORMAT kDcsMotionScatterFormat = DXGI_FORMAT_R32_UINT;
+ constexpr UINT kDcsMotionCounterBuckets = 16;
+-constexpr UINT kDcsMotionCounterBytes = kDcsMotionCounterBuckets * 8U;
++// DCS Control (0122): and after them 16 uints, the pixels the occlusion fill
++// gave (frame_synthesis.hlsl: byte 128), kept apart from the MVs' own count.
++constexpr UINT kDcsMotionFillCounterOffset = kDcsMotionCounterBuckets * 8U;
++constexpr UINT kDcsMotionCounterBytes = kDcsMotionFillCounterOffset + kDcsMotionCounterBuckets * 4U;
++static_assert(kDcsMotionFillCounterOffset == 128U, "frame_synthesis.hlsl writes the fill count at byte 128");
+ constexpr UINT kDcsMotionSampledPixels = 256;
+ // The sky's MVs (the camera's motion at infinity, R70 T2) instead of its flow
+ // (the fixtures: a little closer to the true middle frame, and no worse).
+@@ -1842,6 +1850,7 @@ struct D3D12FrameSynthesizer::Impl {
+     std::uint64_t dcs_motion_next_order{1};
+     std::uint64_t dcs_motion_harvested_order{};
+     std::array<std::uint32_t, 2> dcs_motion_harvested{};
++    std::uint32_t dcs_motion_fill_harvested{}; // DCS Control (0122)
+     [[nodiscard]] bool dcs_motion_enabled() const noexcept {
+         return nvidia_options.dcs_motion && nvidia_options.cockpit_mask &&
+             backend == D3D12OpticalFlowBackend::nvidia;
+@@ -2548,8 +2557,10 @@ struct D3D12FrameSynthesizer::Impl {
+             }
+         }
+         // DCS Control (0121): the previous frame's class pass (without it no
+-        // pair carries the fill's bit).
+-        if (dcs_motion_enabled() && nvidia_options.dcs_motion_occlusion_fill) {
++        // pair carries the fill's bit). DCS Control (0122): made with
++        // dcs_motion whatever the key, so a live change (a rebuild) only flips
++        // the bit.
++        if (dcs_motion_enabled()) {
+             compute_description.CS = {g_xrfg_dcs_motion_previous_shader, sizeof(g_xrfg_dcs_motion_previous_shader)};
+             if (FAILED(device->CreateComputePipelineState(
+                     &compute_description, IID_PPV_ARGS(dcs_motion_previous_pipeline.GetAddressOf())))) {
+@@ -5267,7 +5278,7 @@ struct D3D12FrameSynthesizer::Impl {
+         apply_test_dcs_motion_cell(); // DCS Control (0120)
+         // DCS Control (0121): the occlusion fill rides in every MV pair's bits.
+         dcs_motion_feature_bits =
+-            nvidia_options.dcs_motion_occlusion_fill && dcs_motion_previous_pipeline != nullptr ? kDcsMotionFillBit : 0U;
++            nvidia_options.dcs_motion_occlusion_fill != 0U && dcs_motion_previous_pipeline != nullptr ? kDcsMotionFillBit : 0U;
+         // Tests only: the sky's MVs on (1) or off (0), and the MVs without
+         // any check (XRFG_TEST_DCS_MOTION_ONLY), to measure what each gives.
+         std::array<char, 4> sky{};
+@@ -5568,8 +5579,15 @@ struct D3D12FrameSynthesizer::Impl {
+         if (SUCCEEDED(dcs_motion_readback->Map(0, &read_range, &mapped)) && mapped != nullptr) {
+             std::array<std::uint32_t, kDcsMotionCounterBuckets * 2U> words{};
+             std::memcpy(words.data(), static_cast<const std::byte*>(mapped) + begin, sizeof(words));
++            std::array<std::uint32_t, kDcsMotionCounterBuckets> fill_words{}; // DCS Control (0122)
++            std::memcpy(fill_words.data(),
++                static_cast<const std::byte*>(mapped) + begin + kDcsMotionFillCounterOffset, sizeof(fill_words));
+             const D3D12_RANGE no_write{0, 0};
+             dcs_motion_readback->Unmap(0, &no_write);
++            std::uint32_t filled_total = 0;
++            for (const std::uint32_t word : fill_words) {
++                filled_total += word;
++            }
+             std::array<std::uint32_t, 2> values{};
+             for (UINT bucket = 0; bucket < kDcsMotionCounterBuckets; ++bucket) {
+                 values[0] += words[bucket * 2U];
+@@ -5589,7 +5607,14 @@ struct D3D12FrameSynthesizer::Impl {
+                             std::uint64_t(pixels) * kDcsMotionSampledPixels, std::memory_order_relaxed);
+                         slot.motion_sink->motion_fallback_pixels.fetch_add(
+                             std::uint64_t(fallbacks) * kDcsMotionSampledPixels, std::memory_order_relaxed);
++                        // DCS Control (0122): the fill's pixels, apart.
++                        const std::uint32_t filled = filled_total - dcs_motion_fill_harvested;
++                        if (filled < 0x80000000U) {
++                            slot.motion_sink->motion_filled_pixels.fetch_add(
++                                std::uint64_t(filled) * kDcsMotionSampledPixels, std::memory_order_relaxed);
++                        }
+                     }
++                    dcs_motion_fill_harvested = filled_total;
+                 }
+             }
+         }
+@@ -5604,6 +5629,12 @@ struct D3D12FrameSynthesizer::Impl {
+     // pair's previous frame carries its class atlas; the composition's fill
+     // reads it. Nothing without the key, MVs or that atlas (the fill then
+     // only knows what the current frame hides).
++    // DCS Control (0122): the pair's views compose without the fill.
++    void clear_dcs_motion_fill_bits() noexcept {
++        for (UINT& bits : pair_motion_bits) {
++            bits &= ~kDcsMotionFillBit;
++        }
++    }
+     void record_dcs_motion_previous_class(
+         ID3D12GraphicsCommandList* list,
+         WorkSlot& slot,
+@@ -5613,18 +5644,27 @@ struct D3D12FrameSynthesizer::Impl {
+         D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
+         if (!pair_motion_bound || dcs_motion_previous_pipeline == nullptr ||
+             (dcs_motion_feature_bits & kDcsMotionFillBit) == 0U || previous_frame == nullptr ||
+-            !previous_frame->motion || !previous_frame->motion_class ||
++            // DCS Control (0122): mode 1, only where the symbology was taken out.
++            (nvidia_options.dcs_motion_occlusion_fill == 1U && !hud_pair.active) ||
++            !previous_frame->motion || !previous_frame->motion_class || previous_frame->motion_texture == nullptr ||
+             previous_frame->motion_class_texture == nullptr || previous_frame->ready_fence == nullptr) {
++            // DCS Control (0122): no previous class: no fill for the pair.
++            clear_dcs_motion_fill_bits();
+             return;
+         }
++        D3D12CockpitMaskFrame* const current_frame = pair_mask_current.get();
+         std::array<DcsMotionParameters, kMaxReprojectionViews> views{};
+         bool any = false;
+         const UINT width = static_cast<UINT>(image_description.Width);
+         for (UINT index = 0; index < static_cast<UINT>(target_views.size()) && index < kMaxReprojectionViews;
+              ++index) {
+             const UINT eye = cockpit_mask_eye(target_views[index], index);
++            // DCS Control (0122): both frames' classes with their stencil
++            // composition (the ranks of one without it mean something else).
+             if (pair_motion_bits[index] == 0U || eye >= 2U || !previous_frame->motion_views[eye].valid ||
+-                previous_frame->motion_views[eye].no_stencil) {
++                previous_frame->motion_views[eye].no_stencil || current_frame == nullptr ||
++                current_frame->motion_views[eye].no_stencil) {
++                pair_motion_bits[index] &= ~kDcsMotionFillBit;
+                 continue;
+             }
+             const D3D12DcsMotionView& previous_view = previous_frame->motion_views[eye];
+@@ -5644,9 +5684,16 @@ struct D3D12FrameSynthesizer::Impl {
+             parameters.source_rect = {float(previous_view.x), float(previous_view.y), float(previous_view.width),
+                 float(previous_view.height)};
+             parameters.source_fov = previous_view.fov_tan;
++            // DCS Control (0122): where the previous frame's model is at each
++            // output's instant (its own MVs, t0).
++            parameters.outputs = std::clamp(synthetic_output_count(), 1U, 2U);
++            parameters.fraction0 = synthetic_output_fraction(0);
++            parameters.fraction1 = parameters.outputs > 1U ? synthetic_output_fraction(1) : parameters.fraction0;
++            parameters.offset = {previous_view.offset_px[0], previous_view.offset_px[1], 0.0F, 0.0F};
+             any = any || (parameters.output_width != 0U && parameters.output_height != 0U);
+         }
+         if (!any) {
++            clear_dcs_motion_fill_bits();
+             return;
+         }
+         // The block: t1 the previous frame's classes, u0 the resampled
+@@ -5661,6 +5708,7 @@ struct D3D12FrameSynthesizer::Impl {
+             view.Format = DXGI_FORMAT_R8_UNORM;
+             ID3D12Resource* resource = nullptr;
+             if (index == 0) {
++                resource = previous_frame->motion_texture.Get(); // DCS Control (0122)
+                 view.Format = DXGI_FORMAT_R16G16_FLOAT;
+             } else if (index == 1) {
+                 resource = previous_frame->motion_class_texture.Get();
+@@ -10482,8 +10530,9 @@ struct D3D12FrameSynthesizer::Impl {
+         }
+         // DCS Control (0121): the fill's pass read the previous frame's class
+         // copy: its fence, where the mask did not wait for it.
+-        if (pair_previous_class_read && !previous_mask_bound && previous_cockpit_mask != nullptr &&
+-            previous_cockpit_mask->ready_fence != nullptr) {
++        // DCS Control (0122): kept for the reader note below.
++        const bool previous_class_read = pair_previous_class_read && previous_cockpit_mask != nullptr;
++        if (previous_class_read && !previous_mask_bound && previous_cockpit_mask->ready_fence != nullptr) {
+             result = wait_once(previous_cockpit_mask->ready_fence.Get(), previous_cockpit_mask->ready_value);
+             if (FAILED(result)) {
+                 hud_pair = {};
+@@ -10578,6 +10627,11 @@ struct D3D12FrameSynthesizer::Impl {
+         if (hud_previous_wait) {
+             previous_cockpit_mask->note_reader(fence.Get(), fence_value);
+         }
++        // DCS Control (0122): the fill's pass read the previous frame's class
++        // copy: that ring entry stays unwritten until this pair completes too.
++        if (previous_class_read && !(mask_bound && previous_mask_bound) && !hud_previous_wait) {
++            previous_cockpit_mask->note_reader(fence.Get(), fence_value);
++        }
+         if (hud_used) {
+             commit_hud_pair(previous_serial, previous_cockpit_mask ? previous_cockpit_mask->mask_seq : 0U,
+                 current.serial, current_mask ? current_mask->mask_seq : 0U);
+diff --git a/src/d3d12/dcs_motion_previous.hlsl b/src/d3d12/dcs_motion_previous.hlsl
+--- a/src/d3d12/dcs_motion_previous.hlsl
++++ b/src/d3d12/dcs_motion_previous.hlsl
+@@ -9,7 +9,9 @@
+ // SourceFov: the previous frame's rect), and the class found there, as a
+ // depth rank, is kept in the cell's flags (w) above the resample's bits:
+ // w += 8 * (rank + 1), rank 0 the sky, 1 another G-buffer surface, 2 a model,
+-// 3 anything else; nothing where the cell has no MV (w stays 0) or the
++// 3 anything else (bits 3-4); DCS Control (0122): bits 5 / 6 where the previous
++// frame's model, carried on along its own MVs (t0, that frame's MV rect), is at
++// output 0's / 1's instant; nothing where the cell has no MV (w stays 0) or the
+ // direction is outside that rect (rank unknown: no bits). The composition
+ // (frame_synthesis.hlsl, dcs_motion_occlusion_fill) reads it at the place a
+ // vector takes a pixel to in the previous frame.
+@@ -25,6 +27,47 @@ uint dcs_previous_rank(uint klass) {
+     return (klass & 0x80u) != 0u ? 0u : (composition == 1u ? 2u : (composition <= 4u ? 1u : 3u));
+ }
+ 
++// DCS Control (0122): the previous frame's class rect texel at target pixel
++// `pixel` (through the composition's rotation), false outside it or past the
++// class texture itself (a rect that does not fit it reads 0, a surface).
++bool dcs_previous_texel(float2 pixel, out int2 texel, out float2 position) {
++    float2 uv = (pixel - TargetRect.xy + 0.5) / max(TargetRect.zw, float2(1.0, 1.0));
++    float3 ray = rotate_by_quaternion(TargetToPrevious, float3(
++        lerp(TargetTangents.x, TargetTangents.y, uv.x), lerp(TargetTangents.z, TargetTangents.w, uv.y), -1.0));
++    float left = SourceFov.x, right = SourceFov.y, up = SourceFov.z, down = SourceFov.w;
++    bool usable = ray.z < -1.0e-5 && right > left && up > down && SourceRect.z >= 1.0 && SourceRect.w >= 1.0;
++    float2 tangent = ray.xy / max(-ray.z, 1.0e-5);
++    position = float2((tangent.x - left) / (right - left), (up - tangent.y) / (up - down)) * SourceRect.zw;
++    uint class_width, class_height;
++    ClassSource.GetDimensions(class_width, class_height);
++    texel = int2(SourceRect.xy) + int2(floor(position));
++    return usable && all(position >= 0.0) && all(position < SourceRect.zw) && all(texel >= 0) &&
++        texel.x < int(class_width) && texel.y < int(class_height);
++}
++
++// DCS Control (0122): whether the previous frame's model reaches target pixel
++// `pixel` at instant t (between the previous frame, 0, and the current one,
++// 1), carried on along its own MV (the previous frame's: back to the frame
++// before it, so forward is its opposite; MotionSource t0, render texels of
++// that view, `scale` target pixels each): the previous texel q whose content
++// is at `pixel` then solves q - t * mv(q) = pixel, in two steps from the
++// pixel itself.
++bool dcs_previous_model_at(float2 pixel, float t, float2 scale) {
++    float2 from = pixel;
++    bool model = false;
++    [unroll] for (uint step = 0u; step < 3u; ++step) {
++        int2 texel;
++        float2 position;
++        model = dcs_previous_texel(from, texel, position) && dcs_previous_rank(ClassSource.Load(int3(texel, 0))) == 2u;
++        [branch] if (!model || step == 2u) {
++            break;
++        }
++        float2 mv = MotionSource.Load(int3(texel, 0)) + Offset.xy;
++        from = finite2(mv) ? pixel + t * mv * scale : from;
++    }
++    return model;
++}
++
+ [numthreads(8, 8, 1)]
+ void DcsMotionPreviousClassCS(uint3 thread_id : SV_DispatchThreadID) {
+     if (thread_id.x >= OutputWidth || thread_id.y >= OutputHeight) {
+@@ -35,16 +78,19 @@ void DcsMotionPreviousClassCS(uint3 thread_id : SV_DispatchThreadID) {
+     uint flags = uint(cell.w + 0.5);
+     [branch] if (flags != 0u && (Flags & 1u) != 0u) {
+         float2 pixel = TargetRect.xy + (float2(thread_id.xy) + 0.5) * float(Cell) - 0.5;
+-        float2 uv = (pixel - TargetRect.xy + 0.5) / max(TargetRect.zw, float2(1.0, 1.0));
+-        float3 ray = rotate_by_quaternion(TargetToPrevious, float3(
+-            lerp(TargetTangents.x, TargetTangents.y, uv.x), lerp(TargetTangents.z, TargetTangents.w, uv.y), -1.0));
+-        float left = SourceFov.x, right = SourceFov.y, up = SourceFov.z, down = SourceFov.w;
+-        bool usable = ray.z < -1.0e-5 && right > left && up > down && SourceRect.z >= 1.0 && SourceRect.w >= 1.0;
+-        float2 tangent = ray.xy / max(-ray.z, 1.0e-5);
+-        float2 position = float2((tangent.x - left) / (right - left), (up - tangent.y) / (up - down)) * SourceRect.zw;
+-        [branch] if (usable && all(position >= 0.0) && all(position < SourceRect.zw)) {
+-            uint klass = ClassSource.Load(int3(int2(SourceRect.xy) + int2(floor(position)), 0));
+-            MotionTarget[at] = float4(cell.xyz, float((flags & 7u) + 8u * (dcs_previous_rank(klass) + 1u)));
++        int2 texel;
++        float2 position;
++        [branch] if (dcs_previous_texel(pixel, texel, position)) {
++            uint klass = ClassSource.Load(int3(texel, 0));
++            // Target pixels per render texel of the previous view.
++            float2 scale = abs(float2(TargetRect.z / max(abs(TargetTangents.y - TargetTangents.x), 1.0e-6),
++                TargetRect.w / max(abs(TargetTangents.w - TargetTangents.z), 1.0e-6)) /
++                (SourceRect.zw / max(abs(float2(SourceFov.y - SourceFov.x, SourceFov.z - SourceFov.w)), 1.0e-6)));
++            // Bit 5 (32): the previous frame's model is here at output 0's
++            // instant; bit 6 (64): at output 1's (a third pass of 3X).
++            uint reached = (dcs_previous_model_at(pixel, Fraction0, scale) ? 32u : 0u) |
++                (Outputs > 1u && dcs_previous_model_at(pixel, Fraction1, scale) ? 64u : 0u);
++            MotionTarget[at] = float4(cell.xyz, float((flags & 7u) + 8u * (dcs_previous_rank(klass) + 1u) + reached));
+         }
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1348,6 +1348,12 @@ static const float kDcsMotionSnap = 1.0 / 64.0;
+ // which one frame alone would carry to another place), and only where the
+ // MVs' own composition did not hold (weight below 1). (Leaving out pixels the
+ // scatter brings a nearer edge to, tried, kept a third of the gain away.)
++// DCS Control (0122): the frame taken must show the farther surface itself at
++// the place it is read, by a known rank (the cockpit, no MV, outside the rect
++// and no previous class are unknown: no fill), and that place must not be
++// the cockpit mask's. The host clears the bit for a view whose previous frame
++// has no class atlas (or either frame no stencil), so the fill never guesses.
++// Repeated as kDcsMotionFillBit in d3d12_frame_synthesizer.cpp.
+ static const uint kDcsMotionFillBit = 4096u;
+ 
+ // The class's depth order: 2 a model, 1 another G-buffer surface, 0 the sky;
+@@ -1366,16 +1372,24 @@ float4 dcs_motion_current_cell(float2 at) {
+ 
+ // The previous frame's rank at target pixel `at` (3 where unknown).
+ uint dcs_motion_previous_rank(float2 at) {
+-    uint flags = uint(dcs_motion_current_cell(at).w + 0.5);
+-    return (flags >> 3) == 0u ? 3u : (flags >> 3) - 1u;
++    uint code = (uint(dcs_motion_current_cell(at).w + 0.5) >> 3) & 3u;
++    return code == 0u ? 3u : code - 1u;
+ }
+ 
+-bool dcs_motion_occlusion_fill(float2 pixel, float t, out float4 color) {
++// DCS Control (0122): whether the previous frame's model, carried on along
++// its own MVs, is at target pixel `at` at output `output`'s instant
++// (dcs_motion_previous.hlsl, bits 5 / 6).
++bool dcs_motion_previous_model_reaches(float2 at, uint output) {
++    return ((uint(dcs_motion_current_cell(at).w + 0.5) >> (5u + output)) & 1u) != 0u;
++}
++
++bool dcs_motion_occlusion_fill(float2 pixel, float t, uint output, out float4 color) {
+     color = float4(0.0, 0.0, 0.0, 1.0);
+     float cell = dcs_motion_cell();
+     // The nearest and farthest ranked cells around the pixel (3 x 3 cells).
+     uint near_rank = 0u, far_rank = 3u;
+     float2 near_motion = float2(0.0, 0.0), far_motion = float2(0.0, 0.0);
++    float2 near_place = pixel; // DCS Control (0122): the nearer cell's centre
+     float far_distance = 1.0e9;
+     [unroll] for (int y = -1; y <= 1; ++y) {
+         [unroll] for (int x = -1; x <= 1; ++x) {
+@@ -1389,20 +1403,58 @@ bool dcs_motion_occlusion_fill(float2 pixel, float t, out float4 color) {
+             far_distance = farther ? distance : far_distance;
+             far_rank = farther ? rank : far_rank;
+             near_motion = nearer ? around.xy : near_motion;
++            near_place = nearer ? pixel + float2(x, y) * cell : near_place;
+             near_rank = nearer ? rank : near_rank;
+         }
+     }
++    // DCS Control (0122): the pixel at this instant may be the nearer surface
++    // anywhere within half a cell of where its vector puts it (the class is
++    // known per cell: an edge cell's centre can fall either side).
++    float2 near_from = pixel - (1.0 - t) * near_motion;
++    bool maybe_near = false;
++    [unroll] for (uint probe = 0u; probe < 5u; ++probe) {
++        float2 offset = probe == 0u ? float2(0.0, 0.0)
++            : float2(probe == 1u ? 0.5 : (probe == 2u ? -0.5 : 0.0), probe == 3u ? 0.5 : (probe == 4u ? -0.5 : 0.0)) * cell;
++        maybe_near = maybe_near || dcs_motion_depth_rank(dcs_motion_current_cell(near_from + offset)) == near_rank;
++    }
++    // DCS Control (0122): with no nearer surface around in the current frame
++    // (behind a model that has moved on), the pixel at this instant may still
++    // be that model's trailing part: where the previous frame's model,
++    // carried on along its own MVs, reaches this pixel now, no fill.
++    bool previous_reaches = dcs_motion_previous_model_reaches(pixel, output);
+     bool filled = false;
+-    [branch] if (far_rank <= 1u &&
+-        (far_rank == near_rank ||
+-            dcs_motion_depth_rank(dcs_motion_current_cell(pixel - (1.0 - t) * near_motion)) != near_rank)) {
++    [branch] if (far_rank <= 1u && (far_rank == near_rank ? !previous_reaches : !maybe_near)) {
+         float2 current_at = pixel - (1.0 - t) * far_motion;
+         float2 previous_at = pixel + t * far_motion;
+         uint current_rank = dcs_motion_depth_rank(dcs_motion_current_cell(current_at));
+         uint previous_rank = dcs_motion_previous_rank(previous_at);
+         bool current_hidden = current_rank <= 2u && current_rank > far_rank;
+         bool previous_hidden = previous_rank <= 2u && previous_rank > far_rank;
+-        [branch] if (current_hidden != previous_hidden) {
++        // DCS Control (0122): the frame taken must show the farther surface
++        // there, known (not the cockpit, no MV, outside the rect, no
++        // previous class), and the place it is read at must not be the
++        // cockpit's (its colour on the world).
++        uint seen_rank = current_hidden ? previous_rank : current_rank;
++        float2 seen_place = current_hidden ? previous_at : current_at;
++        // DCS Control (0122): nor where the optical flow holds the pixel still
++        // while the farther surface moves: content over the world that the
++        // G-buffer does not hold (a HUD, glass, even semi-transparent, with an
++        // aircraft passing behind it), which one frame alone would move.
++        float2 flow_here = flow_for_pixel(pixel, Slice, ViewIndex, 1.0 / 32.0, true);
++        bool overlay = dot(flow_here, flow_here) < 0.25 && dot(far_motion, far_motion) > 4.0;
++        // DCS Control (0122): and the nearer surface's own MVs must hold (both
++        // frames alike along them at its cell): a rotor, a propeller or an
++        // afterburner whose look changes while its MVs say rigid tells
++        // nothing of where it hides the farther one.
++        bool near_holds = true;
++        [branch] if (far_rank < near_rank) {
++            CameraSample near_current = sample_current_target(near_place, Slice, ViewIndex);
++            CameraSample near_previous = sample_previous_target(near_place + near_motion, Slice, ViewIndex);
++            near_holds = near_current.valid >= 0.5 && near_previous.valid >= 0.5 &&
++                rgb_error(near_current.color, near_previous.color) < 24.0 / 255.0;
++        }
++        [branch] if (current_hidden != previous_hidden && seen_rank == far_rank && !overlay && near_holds &&
++            cockpit_mask_at(seen_place) < 0.75) {
+             CameraSample same_previous = sample_previous_target(pixel, Slice, ViewIndex);
+             CameraSample same_current = sample_current_target(pixel, Slice, ViewIndex);
+             bool still = same_previous.valid >= 0.5 && same_current.valid >= 0.5 &&
+@@ -1507,20 +1559,25 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+                 }
+             }
+         }
+-        // DCS Control (0121): the occluded side left out where the MVs did not hold.
++        // One pixel in 256, spread over 16 buckets.
++        [branch] if (count && eligible && ((integer_pixel.x | integer_pixel.y) & 15u) == 0u) {
++            uint bucket = (((integer_pixel.x >> 4) ^ (integer_pixel.y >> 4)) & 15u) * 8u;
++            DcsMotionCounters.InterlockedAdd(bucket + (weight >= 0.5 ? 0u : 4u), 1u);
++        }
++        // DCS Control (0121): the occluded side left out where the MVs did not
++        // hold. DCS Control (0122): after the count above (the backoff judges
++        // the MVs alone), its own count at byte 128 (one pixel in 256 as above).
+         [branch] if ((UseGameMotion & kDcsMotionFillBit) != 0u && weight < 0.999 && cockpit_mask_at(pixel) < 0.75) {
+             float4 fill;
+-            if (dcs_motion_occlusion_fill(pixel, t, fill)) {
++            if (dcs_motion_occlusion_fill(pixel, t, output, fill)) {
+                 color = fill;
+                 weight = 1.0;
+-                eligible = true;
++                [branch] if (count && ((integer_pixel.x | integer_pixel.y) & 15u) == 0u) {
++                    uint fill_bucket = (((integer_pixel.x >> 4) ^ (integer_pixel.y >> 4)) & 15u) * 4u;
++                    DcsMotionCounters.InterlockedAdd(128u + fill_bucket, 1u);
++                }
+             }
+         }
+-        // One pixel in 256, spread over 16 buckets.
+-        [branch] if (count && eligible && ((integer_pixel.x | integer_pixel.y) & 15u) == 0u) {
+-            uint bucket = (((integer_pixel.x >> 4) ^ (integer_pixel.y >> 4)) & 15u) * 8u;
+-            DcsMotionCounters.InterlockedAdd(bucket + (weight >= 0.5 ? 0u : 4u), 1u);
+-        }
+     }
+     return weight;
+ }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5403,7 +5403,9 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+                     wanted_options.bidirectional ||
+                 // DCS Control (0066): and the live one.
+                 inputs.nvidia_options.occlusion_aware !=
+-                    wanted_options.occlusion_aware) {
++                    wanted_options.occlusion_aware ||
++                // DCS Control (0122): the occlusion fill.
++                inputs.nvidia_options.dcs_motion_occlusion_fill != wanted_options.dcs_motion_occlusion_fill) {
+                 taken = SUCCEEDED(generation->synthesizer->reconfigure(
+                     wanted, wanted_options));
+             }
+@@ -6713,8 +6715,9 @@ XrResult layer_create_session_impl(
+     state->nvidia_options.hud_symbology = state->nvidia_options.cockpit_mask &&
+         xrfg::implicit_layer::read_hud_symbology(current_layer_directory());
+     // DCS Control (0121): fixed for the session (with dcs_motion).
+-    state->nvidia_options.dcs_motion_occlusion_fill = state->nvidia_options.dcs_motion &&
+-        xrfg::implicit_layer::read_dcs_motion_occlusion_fill(current_layer_directory());
++    state->nvidia_options.dcs_motion_occlusion_fill = state->nvidia_options.dcs_motion
++        ? xrfg::implicit_layer::read_dcs_motion_occlusion_fill(current_layer_directory())
++        : 0U;
+     // Foveated layers: fixed for the session.
+     state->foveated_layers =
+         xrfg::implicit_layer::read_foveated_layers(current_layer_directory());
+@@ -17460,12 +17463,18 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+         state->nvidia_options.foveated_uncovered_alpha,
+         state->nvidia_options.foveated_uncovered_exact, // round 6: the session's
+         state->nvidia_options.foveated_uncovered_fill, // (round 7: a number)
+-        state->nvidia_options.dcs_motion_occlusion_fill}; // DCS Control (0121): the session's
++        // DCS Control (0121): the session's; DCS Control (0122): or the ini's
++        // once taken in live (with dcs_motion only, as at the start).
++        state->nvidia_options.dcs_motion
++            ? (control.occlusion_fill >= 0 ? static_cast<std::uint32_t>(control.occlusion_fill)
++                                           : state->nvidia_options.dcs_motion_occlusion_fill)
++            : 0U};
+     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
+         options.preset != state->nvidia_options.preset ||
+         options.input_scale != state->nvidia_options.input_scale ||
+         options.bidirectional != state->nvidia_options.bidirectional ||
+-        options.occlusion_aware != state->nvidia_options.occlusion_aware; // DCS Control (0066)
++        options.occlusion_aware != state->nvidia_options.occlusion_aware || // DCS Control (0066)
++        options.dcs_motion_occlusion_fill != state->nvidia_options.dcs_motion_occlusion_fill; // DCS Control (0122)
+     // Enumeration is excluded by frame_call_mutex, so newly created contexts
+     // also see this tuple. A partial failure remains bypass, never mixed flow.
+     state->optical_flow_backend = backend;
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -2235,7 +2235,9 @@ void test_live_ini_section() {
+         require(section.found, what);
+         require(section.nvidia.preset == options.preset && section.nvidia.input_scale == options.input_scale &&
+                 section.nvidia.bidirectional == options.bidirectional &&
+-                section.occlusion_aware == xrfg::implicit_layer::read_nvidia_occlusion_aware(directory),
++                section.occlusion_aware == xrfg::implicit_layer::read_nvidia_occlusion_aware(directory) &&
++                // DCS Control (0122): the occlusion fill's mode, as its reader.
++                section.occlusion_fill == xrfg::implicit_layer::read_dcs_motion_occlusion_fill(directory),
+             what);
+         return section;
+     };
+@@ -2290,6 +2292,13 @@ void test_live_ini_section() {
+         "live ini: the first repeated key, quotes stripped");
+     require(xrfg::implicit_layer::parse_ofxr_section(std::wstring_view(L"; x=1\0", 6)).found == false,
+         "live ini: comments alone are no section");
++    // DCS Control (0122): dcs_motion_occlusion_fill live, 0-2 (above 2 reads 2).
++    for (const auto& [text, mode] : std::array<std::pair<const char*, std::uint32_t>, 4>{
++             {{"0", 0U}, {"1", 1U}, {"2", 2U}, {"7", 2U}}}) {
++        write((std::string("[ofxr]\nenabled=1\ndcs_motion_occlusion_fill=") + text + "\n").c_str());
++        section = same_as_readers("live ini: as the readers (occlusion fill)");
++        require(section.occlusion_fill == mode, "live ini: the occlusion fill's mode");
++    }
+     std::filesystem::remove_all(directory, ignored);
+     std::cout << "cockpit mask: [ofxr] read whole for the live keys, as the readers\n";
+ }
+diff --git a/tests/fg_engine_data.inc b/tests/fg_engine_data.inc
+--- a/tests/fg_engine_data.inc
++++ b/tests/fg_engine_data.inc
+@@ -35,14 +35,19 @@ struct FeLayer {
+     double alpha;      // 1 opaque; below, transparent
+     bool opaque;       // in the G-buffer (MVs, class)
+     std::array<double, 3> tint;
++    double spin{};     // DCS Control (0122): radians at s = 1 its look turns (a rotor; MVs: none of it)
+ };
+ 
+ // Region ids of FeFrame::front's layers are their indices; these name the shapes.
+ enum FeShape : int {
+     kFeFull = 0, kFeWires = 1, kFeModelLow = 2, kFeModelHigh = 3, kFeSmoke = 4, kFeTerrain = 5,
+     kFeCockpit = 6, kFeHud = 7, kFeParticles = 8,
++    kFeRotor = 9, kFeHudLow = 10, // DCS Control (0122)
+ };
+ 
++// DCS Control (0122): the rotor's centre (texture space) of kFeRotor.
++std::array<double, 2> fe_rotor_centre(double w, double h) { return {w * 0.36 + 40.0, h * 0.70}; }
++
+ double fe_cover(int shape, double u, double v, double w, double h) {
+     switch (shape) {
+     case kFeWires: {
+@@ -88,6 +93,18 @@ double fe_cover(int shape, double u, double v, double w, double h) {
+         }
+         return 0.0;
+     }
++    case kFeRotor: { // DCS Control (0122): a rotor disc at the low aircraft's nose
++        const auto c = fe_rotor_centre(w, h);
++        return std::hypot(u - c[0], v - c[1]) < 16.0 ? 1.0 : 0.0;
++    }
++    case kFeHudLow: { // DCS Control (0122): HUD symbols over the low aircraft's path
++        const double cx = w * 0.36 + 13.0, cy = h * 0.70;
++        const bool box = std::abs(u - cx) < 40.0 && std::abs(v - cy) < 26.0 &&
++            (std::abs(u - cx) >= 38.0 || std::abs(v - cy) >= 24.0);
++        const bool cross = (std::abs(u - cx) < 1.0 && std::abs(v - cy) < 12.0) ||
++            (std::abs(v - cy) < 1.0 && std::abs(u - cx) < 12.0);
++        return box || cross ? 1.0 : 0.0;
++    }
+     default:
+         return 1.0;
+     }
+@@ -107,79 +124,156 @@ std::array<double, 2> fe_screen_point(const FeLayer& layer, double u, double v,
+         std::sin(a) * px + std::cos(a) * py + h * 0.5 + layer.dy * s};
+ }
+ 
+-std::array<double, 3> fe_colour(const FeLayer& layer, double u, double v) {
+-    if (layer.shape == kFeHud || layer.shape == kFeParticles) return layer.tint; // flat bright
++// A layer's colour at texture point (u, v) at instant s: a spinning layer
++// (`spin`, a rotor: its look turns, its geometry and MVs do not) is looked up
++// turned by spin * s about the rotor's centre.
++std::array<double, 3> fe_colour(const FeLayer& layer, double u, double v, double s = 0.0, double w = 0.0,
++    double h = 0.0) {
++    if (layer.shape == kFeHud || layer.shape == kFeHudLow || layer.shape == kFeParticles) return layer.tint;
++    if (layer.spin != 0.0) {
++        const auto c = fe_rotor_centre(w, h);
++        const double a = layer.spin * s, du = u - c[0], dv = v - c[1];
++        u = c[0] + std::cos(a) * du - std::sin(a) * dv;
++        v = c[1] + std::sin(a) * du + std::cos(a) * dv;
++    }
+     const auto texel = occlusion_texture(u * layer.scale, v * layer.scale, layer.texture);
+     return {texel[0] * layer.tint[0], texel[1] * layer.tint[1], texel[2] * layer.tint[2]};
+ }
+ 
++// DCS Control (0122): cameras. The scene's layers live in the reference
++// camera's image (the current frame's, identity orientation); a frame drawn by
++// a camera turned by `orientation` (its pose) sees, at its pixel, what the
++// reference image holds at the same direction. Per eye, by its field of view.
++struct FeCamera {
++    const ReprojectionViews* views{};    // the fields of view (the same in every camera)
++    xrfg::Quaternion orientation{0.0F, 0.0F, 0.0F, 1.0F};
++    [[nodiscard]] bool turned() const noexcept {
++        return views != nullptr && std::abs(orientation.w) < 0.9999999F;
++    }
++};
++
++std::array<double, 4> fe_tangents(const ReprojectionViews& views, UINT eye) {
++    const auto& fov = views[eye].fov;
++    return {std::tan(fov.angle_left), std::tan(fov.angle_right), std::tan(fov.angle_up), std::tan(fov.angle_down)};
++}
++
++// A pixel of camera `camera` (eye `eye`) to the reference image's pixel, or
++// the other way (`inverse`); false behind the camera.
++bool fe_map_pixel(const FeCamera& camera, UINT eye, double x, double y, double w, double h, bool inverse,
++    double& out_x, double& out_y) {
++    if (!camera.turned()) {
++        out_x = x;
++        out_y = y;
++        return true;
++    }
++    const auto t = fe_tangents(*camera.views, eye);
++    const double tx = t[0] + x / w * (t[1] - t[0]), ty = t[2] - y / h * (t[2] - t[3]);
++    xrfg::Quaternion q = camera.orientation;
++    if (inverse) {
++        q = {-q.x, -q.y, -q.z, q.w};
++    }
++    const xrfg::Vec3 d = depth_test_rotate(q, {static_cast<float>(tx), static_cast<float>(ty), -1.0F});
++    if (!(d.z < -1.0e-6F)) return false;
++    const double rx = d.x / -d.z, ry = d.y / -d.z;
++    out_x = (rx - t[0]) / (t[1] - t[0]) * w;
++    out_y = (t[2] - ry) / (t[2] - t[3]) * h;
++    return true;
++}
++
+ struct FeFrame {
+     StereoPattern image;
+     std::vector<std::int8_t> front; // the front layer's index (a transparent one where it covers > 0.3)
+ };
+ 
+-FeFrame fe_frame(const std::vector<FeLayer>& layers, UINT width, UINT height, double s) {
++// The colour and front layer at reference-image point (cx, cy), instant s.
++std::array<double, 3> fe_shade(const std::vector<FeLayer>& layers, double cx, double cy, double s, double w, double h,
++    std::int8_t& front_out) {
++    std::array<double, 3> colour{0.0, 0.0, 0.0};
++    std::size_t base = layers.size();
++    for (std::size_t index = 0; index < layers.size(); ++index) {
++        const FeLayer& layer = layers[index];
++        if (!layer.opaque) continue;
++        const auto uv = fe_texture_point(layer, cx, cy, s, w, h);
++        if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) {
++            colour = fe_colour(layer, uv[0], uv[1], s, w, h);
++            base = index;
++            break;
++        }
++    }
++    std::int8_t front = static_cast<std::int8_t>(base);
++    for (std::size_t index = base; index-- > 0;) {
++        const FeLayer& layer = layers[index];
++        if (layer.opaque) continue;
++        const auto uv = fe_texture_point(layer, cx, cy, s, w, h);
++        const double cover = fe_cover(layer.shape, uv[0], uv[1], w, h) * layer.alpha;
++        if (cover > 0.0) {
++            const auto overlay = fe_colour(layer, uv[0], uv[1], s, w, h);
++            for (int c = 0; c < 3; ++c) colour[c] += (overlay[c] - colour[c]) * cover;
++            if (cover > 0.3) front = static_cast<std::int8_t>(index);
++        }
++    }
++    front_out = front;
++    return colour;
++}
++
++// The image at instant s seen by `camera` (the reference camera by default).
++FeFrame fe_frame(const std::vector<FeLayer>& layers, UINT width, UINT height, double s, const FeCamera& camera = {}) {
+     FeFrame frame;
+     frame.front.assign(static_cast<std::size_t>(width) * height, -1);
+-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+     const double w = width, h = height;
+-    for (UINT y = 0; y < height; ++y) {
+-        for (UINT x = 0; x < width; ++x) {
+-            const double cx = x + 0.5, cy = y + 0.5;
+-            std::array<double, 3> colour{0.0, 0.0, 0.0};
+-            std::size_t base = layers.size();
+-            for (std::size_t index = 0; index < layers.size(); ++index) {
+-                const FeLayer& layer = layers[index];
+-                if (!layer.opaque) continue;
+-                const auto uv = fe_texture_point(layer, cx, cy, s, w, h);
+-                if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) {
+-                    colour = fe_colour(layer, uv[0], uv[1]);
+-                    base = index;
+-                    break;
+-                }
+-            }
+-            std::int8_t front = static_cast<std::int8_t>(base);
+-            for (std::size_t index = base; index-- > 0;) {
+-                const FeLayer& layer = layers[index];
+-                if (layer.opaque) continue;
+-                const auto uv = fe_texture_point(layer, cx, cy, s, w, h);
+-                const double cover = fe_cover(layer.shape, uv[0], uv[1], w, h) * layer.alpha;
+-                if (cover > 0.0) {
+-                    const auto overlay = fe_colour(layer, uv[0], uv[1]);
+-                    for (int c = 0; c < 3; ++c) colour[c] += (overlay[c] - colour[c]) * cover;
+-                    if (cover > 0.3) front = static_cast<std::int8_t>(index);
++    const UINT eyes = camera.turned() ? kEyeCount : 1U;
++    for (UINT eye = 0; eye < eyes; ++eye) {
++        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                double cx = x + 0.5, cy = y + 0.5;
++                std::int8_t front = -1;
++                std::array<double, 3> colour{0.0, 0.0, 0.0};
++                if (fe_map_pixel(camera, eye, x + 0.5, y + 0.5, w, h, false, cx, cy)) {
++                    colour = fe_shade(layers, cx, cy, s, w, h, front);
+                 }
++                if (eye == 0) frame.front[static_cast<std::size_t>(y) * width + x] = front;
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                for (int c = 0; c < 3; ++c) bytes[i + c] = static_cast<std::uint8_t>(std::clamp(colour[c], 0.0, 255.0) + 0.5);
++                bytes[i + 3] = 255;
+             }
+-            frame.front[static_cast<std::size_t>(y) * width + x] = front;
+-            const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
+-            for (int c = 0; c < 3; ++c) bytes[i + c] = static_cast<std::uint8_t>(std::clamp(colour[c], 0.0, 255.0) + 0.5);
+-            bytes[i + 3] = 255;
+         }
++        frame.image[eye] = bytes;
+     }
+-    for (UINT eye = 0; eye < kEyeCount; ++eye) frame.image[eye] = bytes;
++    if (eyes == 1U) frame.image[1] = frame.image[0];
+     return frame;
+ }
+ 
+-// The current frame's mask frame as the consumer hands it on: the cockpit mask
+-// and, `with_motion`, the MVs and classes at the render resolution (`divisor`),
+-// pointing at `previous_display_time`; the current frame is the scene at s =
+-// `from`, the previous one at `to`.
++// The front opaque layer at reference point (x, y), instant s (-1 none).
++int fe_opaque_at(const std::vector<FeLayer>& layers, double x, double y, double s, double w, double h) {
++    for (std::size_t index = 0; index < layers.size(); ++index) {
++        const FeLayer& layer = layers[index];
++        if (!layer.opaque) continue;
++        const auto uv = fe_texture_point(layer, x, y, s, w, h);
++        if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) return static_cast<int>(index);
++    }
++    return -1;
++}
++
++// A frame's mask frame as the consumer hands it on: the cockpit mask and,
++// `with_motion`, the MVs and classes at the render resolution (`divisor`),
++// pointing at `previous_display_time`; the frame is the scene at s = `from`
++// seen by `camera`, the frame its MVs point at the scene at `to` seen by
++// `to_camera` (DCS's MVs carry the head's turn: the content's place in that
++// frame's own image less its place in this one).
+ std::shared_ptr<xrfg::D3D12CockpitMaskFrame> fe_mask_frame(D3D12WarpFixture& fixture, const std::vector<FeLayer>& layers,
+     UINT width, UINT height, UINT divisor, UINT mask_divisor, const ReprojectionViews& views, std::int64_t display_time,
+     std::int64_t previous_display_time, bool with_motion, const std::shared_ptr<xrfg::CockpitMaskPairCounters>& counters,
+-    double from = 1.0, double to = 0.0) {
++    double from = 1.0, double to = 0.0, const FeCamera& camera = {}, const FeCamera& to_camera = {}) {
+     const double w = width, h = height;
+     std::vector<std::uint8_t> cockpit(static_cast<std::size_t>(width) * height, 0);
+     for (UINT y = 0; y < height; ++y) {
+         for (UINT x = 0; x < width; ++x) {
+-            for (const FeLayer& layer : layers) {
+-                if (!layer.opaque) continue;
+-                const auto uv = fe_texture_point(layer, x + 0.5, y + 0.5, from, w, h);
+-                if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) {
+-                    cockpit[static_cast<std::size_t>(y) * width + x] = (layer.klass & 7U) == 5U ? 1 : 0;
+-                    break;
+-                }
+-            }
++            double rx = 0.0, ry = 0.0;
++            if (!fe_map_pixel(camera, 0, x + 0.5, y + 0.5, w, h, false, rx, ry)) continue;
++            const int index = fe_opaque_at(layers, rx, ry, from, w, h);
++            cockpit[static_cast<std::size_t>(y) * width + x] =
++                index >= 0 && (layers[static_cast<std::size_t>(index)].klass & 7U) == 5U ? 1 : 0;
+         }
+     }
+     auto frame = make_cockpit_mask_frame(fixture, width, height, cockpit, mask_divisor, views);
+@@ -190,23 +284,27 @@ std::shared_ptr<xrfg::D3D12CockpitMaskFrame> fe_mask_frame(D3D12WarpFixture& fix
+     const UINT rw = (width + d - 1U) / d, rh = (height + d - 1U) / d;
+     std::vector<std::uint8_t> motion(static_cast<std::size_t>(rw) * kEyeCount * rh * 4U, 0);
+     std::vector<std::uint8_t> classes(static_cast<std::size_t>(rw) * kEyeCount * rh, 0);
+-    for (UINT j = 0; j < rh; ++j) {
+-        for (UINT i = 0; i < rw; ++i) {
+-            const double x = (i + 0.5) * d, y = (j + 0.5) * d;
+-            float mx = 0.0F, my = 0.0F;
+-            std::uint8_t klass = 7;
+-            for (const FeLayer& layer : layers) {
+-                if (!layer.opaque) continue;
+-                const auto uv = fe_texture_point(layer, x, y, from, w, h);
+-                if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) {
+-                    const auto then = fe_screen_point(layer, uv[0], uv[1], to, w, h);
+-                    mx = static_cast<float>((then[0] - x) / d);
+-                    my = static_cast<float>((then[1] - y) / d);
+-                    klass = layer.klass;
+-                    break;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        for (UINT j = 0; j < rh; ++j) {
++            for (UINT i = 0; i < rw; ++i) {
++                const double x = (i + 0.5) * d, y = (j + 0.5) * d;
++                float mx = 0.0F, my = 0.0F;
++                std::uint8_t klass = 7;
++                double rx = 0.0, ry = 0.0;
++                if (fe_map_pixel(camera, eye, x, y, w, h, false, rx, ry)) {
++                    const int index = fe_opaque_at(layers, rx, ry, from, w, h);
++                    if (index >= 0) {
++                        const FeLayer& layer = layers[static_cast<std::size_t>(index)];
++                        const auto uv = fe_texture_point(layer, rx, ry, from, w, h);
++                        const auto then = fe_screen_point(layer, uv[0], uv[1], to, w, h);
++                        double px = then[0], py = then[1];
++                        if (fe_map_pixel(to_camera, eye, then[0], then[1], w, h, true, px, py)) {
++                            mx = static_cast<float>((px - x) / d);
++                            my = static_cast<float>((py - y) / d);
++                        }
++                        klass = layer.klass;
++                    }
+                 }
+-            }
+-            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                 const std::size_t texel = static_cast<std::size_t>(j) * rw * kEyeCount + eye * rw + i;
+                 const std::uint16_t hx = dcs_motion_half(mx), hy = dcs_motion_half(my);
+                 std::memcpy(&motion[texel * 4U], &hx, 2);
+@@ -237,7 +335,6 @@ std::shared_ptr<xrfg::D3D12CockpitMaskFrame> fe_mask_frame(D3D12WarpFixture& fix
+     }
+     return frame;
+ }
+-
+ struct FeCase {
+     const char* name;
+     std::vector<FeLayer> layers;
+@@ -270,9 +367,10 @@ struct FeRegions {
+     std::vector<std::vector<std::uint8_t>> masks; // per pixel
+ };
+ 
+-FeRegions fe_regions(const FeCase& scene, UINT width, UINT height) {
++// The regions at the synthetic's instant t (0.5 unless a test says).
++FeRegions fe_regions(const FeCase& scene, UINT width, UINT height, double t = 0.5) {
+     const FeFrame f0 = fe_frame(scene.layers, width, height, 0.0);
+-    const FeFrame fm = fe_frame(scene.layers, width, height, 0.5);
++    const FeFrame fm = fe_frame(scene.layers, width, height, t);
+     const FeFrame f1 = fe_frame(scene.layers, width, height, 1.0);
+     const std::size_t n = static_cast<std::size_t>(width) * height;
+     const auto shape_at = [&](const FeFrame& f, std::size_t i) {
+@@ -312,18 +410,21 @@ FeRegions fe_regions(const FeCase& scene, UINT width, UINT height) {
+         covered[i] = !is_model(fm, i) && is_model(f1, i) && !is_model(f0, i);
+     }
+     auto wires = grow([&](std::size_t i) { return shape_at(fm, i) == kFeWires; }, 2);
+-    auto hud = grow([&](std::size_t i) { return shape_at(fm, i) == kFeHud; }, 1);
++    auto hud = grow([&](std::size_t i) { return shape_at(fm, i) == kFeHud || shape_at(fm, i) == kFeHudLow; }, 1);
++    // DCS Control (0122): a rotor whose look turns while its MVs say it does not.
++    auto rotor = grow([&](std::size_t i) { return shape_at(fm, i) == kFeRotor; }, 0);
+     auto smoke = grow([&](std::size_t i) { return shape_at(fm, i) == kFeSmoke; }, 0);
+     auto particles = grow([&](std::size_t i) { return shape_at(fm, i) == kFeParticles; }, 2);
+     std::vector<std::uint8_t> band(n, 0), rest(n, 0), all(n, 1);
+     for (std::size_t i = 0; i < n; ++i) {
+         band[i] = cockpit_band[i] && !cockpit[i];
+         model[i] = model[i] && !cockpit[i];
+-        rest[i] = !(model[i] || trailing[i] || wires[i] || band[i] || hud[i] || smoke[i] || particles[i] || cockpit[i]);
++        rest[i] = !(model[i] || trailing[i] || wires[i] || band[i] || hud[i] || smoke[i] || particles[i] || cockpit[i] ||
++            rotor[i]);
+     }
+-    const std::array<std::pair<const char*, std::vector<std::uint8_t>*>, 11> list{{{"model", &model},
++    const std::array<std::pair<const char*, std::vector<std::uint8_t>*>, 12> list{{{"model", &model},
+         {"trailing", &trailing}, {"behind", &uncovered}, {"ahead", &covered}, {"wires", &wires}, {"cockpit", &band}, {"hud", &hud}, {"smoke", &smoke},
+-        {"particles", &particles}, {"rest", &rest}, {"all", &all}}};
++        {"particles", &particles}, {"rotor", &rotor}, {"rest", &rest}, {"all", &all}}};
+     for (const auto& [name, mask] : list) {
+         std::size_t count = 0;
+         for (std::size_t i = 32U * width; i + 32U * width < n; ++i) count += (*mask)[i];
+@@ -342,36 +443,88 @@ struct FeVariant {
+     UINT cell{};       // XRFG_TEST_DCS_MOTION_CELL (0: the image's own)
+     UINT mask_divisor{}; // the cockpit mask's texel (0: the MVs')
+     bool fill{};         // [ofxr] dcs_motion_occlusion_fill (0121)
++    // DCS Control (0122): the previous frame carries its MVs and classes (DCS's
++    // every frame; false: the fill's degraded case, no previous class atlas),
++    // the previous camera's yaw against the current one's (radians: a head
++    // turn), the synthetic's instant (3X: 1/3, 2/3).
++    bool previous_motion{true};
++    float yaw{};
++    double t{0.5};
++    std::uint32_t fill_mode{2}; // the key's mode with `fill` (1: only where the HUD was taken out)
+ };
+ 
+ struct FeResult {
+     std::vector<DepthTestError> errors; // per region
+     double along{};                     // share of the counted pixels composed along the MVs
+     double fallback{};                  // ... back to the flow
++    double filled{};                    // ... given by the occlusion fill (0122: apart)
+     StereoPattern image;
+ };
+ 
++// DCS Control (0122): the pair (a, b) composed at instant t, with the previous
++// capture's views (a head that turned) where they differ.
++StereoPattern fe_synthesize(D3D12WarpFixture& fixture, const StereoPattern& a, const StereoPattern& b, UINT width,
++    UINT height, const xrfg::D3D12NvidiaOpticalFlowOptions& options,
++    const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>& masks, const ReprojectionViews& previous_views,
++    const ReprojectionViews& views, float t) {
++    std::array<ComPtr<ID3D12Resource>, 2> sources{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    auto current = create_source_texture(fixture, width, height);
++    auto synthetic = create_source_texture(fixture, width, height);
++    std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 1> current_out{current.Get()}, synthetic_out{synthetic.Get()};
++    upload_pattern(fixture, sources[0].Get(), a);
++    upload_pattern(fixture, sources[1].Get(), b);
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require_hresult(history->initialize(fixture.device(), fixture.queue(), input, D3D12_RESOURCE_STATE_RENDER_TARGET),
++        "engine data history");
++    xrfg::D3D12NvidiaOpticalFlowOptions session_options = options;
++    session_options.cockpit_mask = true;
++    xrfg::D3D12FrameSynthesizer synth;
++    require_hresult(synth.initialize(fixture.device(), fixture.queue(), history, current_out, synthetic_out, kFormat,
++                        D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::nvidia, session_options),
++        "engine data initialize");
++    xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
++    xrfg::D3D12FrameSynthesisTicket output{};
++    require_hresult(history->capture(0, &ca), "engine data A");
++    require_hresult(history->commit(ca), "engine data commit A");
++    synth.set_cockpit_mask(masks[0]);
++    require_hresult(synth.submit_prime(ca, previous_views, 0, &output), "engine data prime");
++    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
++    require_hresult(history->capture(1, &cb), "engine data B");
++    require_hresult(history->commit(cb), "engine data commit B");
++    synth.set_cockpit_mask(masks[1]);
++    require_hresult(synth.submit_pair(cb, views, views, 0, 0, &output, std::nullopt, {}, false, t), "engine data pair");
++    auto image = readback_pattern(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    require_hresult(synth.wait_for_idle(), "engine data drain");
++    fixture.require_no_debug_errors();
++    return image;
++}
++
+ FeResult fe_run(D3D12WarpFixture& fixture, const FeCase& scene, const FeRegions& regions, const FeVariant& variant,
+     UINT width, UINT height) {
+     const ReprojectionViews views = make_reprojection_views();
+-    const FeFrame a = fe_frame(scene.layers, width, height, 0.0);
++    const ReprojectionViews previous_views = make_reprojection_views(variant.yaw);
++    const FeCamera previous_camera{&views, previous_views[0].pose.orientation};
++    const FeFrame a = fe_frame(scene.layers, width, height, 0.0, previous_camera);
+     const FeFrame b = fe_frame(scene.layers, width, height, 1.0);
+-    const FeFrame truth = fe_frame(scene.layers, width, height, 0.5);
++    const FeFrame truth = fe_frame(scene.layers, width, height, variant.t);
+     auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
+     const UINT mask_divisor = variant.mask_divisor != 0 ? variant.mask_divisor : variant.divisor;
+     // The previous frame carries its own MVs and classes too (every DCS frame
+-    // does), pointing at the frame before it.
++    // does), pointing at the frame before it; drawn by its own camera.
+     const auto previous = fe_mask_frame(fixture, scene.layers, width, height, variant.divisor, mask_divisor, views, 1000,
+-        500, variant.motion, counters, 0.0, -1.0);
++        500, variant.motion && variant.previous_motion, counters, 0.0, -1.0, previous_camera, previous_camera);
+     const auto current = fe_mask_frame(fixture, scene.layers, width, height, variant.divisor, mask_divisor, views, 2000,
+-        1000, variant.motion, counters);
++        1000, variant.motion, counters, 1.0, 0.0, {}, previous_camera);
+     xrfg::D3D12NvidiaOpticalFlowOptions options = variant.options;
+     options.dcs_motion = variant.motion;
+-    options.dcs_motion_occlusion_fill = variant.fill;
++    options.dcs_motion_occlusion_fill = variant.fill ? variant.fill_mode : 0U;
+     FeResult result;
+     const std::string cell = std::to_string(variant.cell);
+     SetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_CELL", variant.cell != 0 ? cell.c_str() : nullptr);
+-    result.image = synthesize_nvidia_pair(fixture, a.image, b.image, width, height, options, {previous, current});
++    result.image = fe_synthesize(fixture, a.image, b.image, width, height, options, {previous, current}, previous_views,
++        views, static_cast<float>(variant.t));
+     SetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_CELL", nullptr);
+     for (std::size_t r = 0; r < regions.masks.size(); ++r) {
+         const auto& mask = regions.masks[r];
+@@ -381,9 +534,9 @@ FeResult fe_run(D3D12WarpFixture& fixture, const FeCase& scene, const FeRegions&
+     const double pixels = 2.0 * width * height;
+     result.along = double(counters->motion_pixels.load()) / pixels;
+     result.fallback = double(counters->motion_fallback_pixels.load()) / pixels;
++    result.filled = double(counters->motion_filled_pixels.load()) / pixels;
+     return result;
+ }
+-
+ void fe_print(const std::string& label, const FeRegions& regions, const FeResult& result) {
+     std::cout << "fe " << label;
+     for (std::size_t r = 0; r < regions.names.size(); ++r) {
+@@ -392,10 +545,10 @@ void fe_print(const std::string& label, const FeRegions& regions, const FeResult
+         std::cout << " | " << regions.names[r] << " " << mae << " p99 " << result.errors[r].p99;
+     }
+     std::cout << " | along " << int(100.0 * result.along + 0.5) << "% fallback "
+-              << int(100.0 * result.fallback + 0.5) << "%" << std::endl;
++              << int(100.0 * result.fallback + 0.5) << "% filled " << int(100.0 * result.filled + 0.5) << "%" << std::endl;
+ }
+ 
+-// The variants every case is composed with; a later patch adds its own.
++// The variants every case is composed with.
+ std::vector<FeVariant> fe_variants(const std::string& which) {
+     std::vector<FeVariant> list;
+     xrfg::D3D12NvidiaOpticalFlowOptions medium{};
+@@ -407,10 +560,13 @@ std::vector<FeVariant> fe_variants(const std::string& which) {
+     if (which.find("cell") != std::string::npos) {
+         // Focus MVs (E): the periphery's MVs in the focus (texel 10 px) or
+         // the focus view's own (2 px; 1: per pixel), resampled at the cell the
+-        // headset's image gets today (8) or a finer one (4).
++        // headset's image gets today (8) or a finer one (4); and the fill
++        // (0122) at both.
+         for (UINT cell : {8U, 4U}) {
+             for (UINT divisor : {10U, 2U, 1U}) {
+-                list.push_back({"mv c" + std::to_string(cell) + " d" + std::to_string(divisor), true, medium, divisor, cell, 10});
++                const std::string name = " c" + std::to_string(cell) + " d" + std::to_string(divisor);
++                list.push_back({"mv" + name, true, medium, divisor, cell, 10});
++                list.push_back({"mv+fill" + name, true, medium, divisor, cell, 10, true});
+             }
+         }
+         return list;
+@@ -421,9 +577,43 @@ std::vector<FeVariant> fe_variants(const std::string& which) {
+         if (which.find("fast") != std::string::npos) list.push_back({"mv-fast" + d, true, fast, divisor});
+         list.push_back({"mv-medium+fill" + d, true, medium, divisor, 0, 0, true});
+     }
++    // DCS Control (0122): the headset's cell (8) against the periphery's MVs;
++    // a head turn of 1.5 degrees between the frames (the previous class read
++    // through the composition's rotation); 3X's instants; and no previous
++    // class atlas (the fill must then change nothing).
++    list.push_back({"mv-medium d10 c8", true, medium, 10, 8});
++    list.push_back({"mv-medium+fill d10 c8", true, medium, 10, 8, 0, true});
++    list.push_back({"mv-medium d10 turn", true, medium, 10, 0, 0, false, true, 0.02618F});
++    list.push_back({"mv-medium+fill d10 turn", true, medium, 10, 0, 0, true, true, 0.02618F});
++    for (double t : {1.0 / 3.0, 2.0 / 3.0}) {
++        const std::string at = t < 0.5 ? " t1/3" : " t2/3";
++        list.push_back({"mv-medium d10" + at, true, medium, 10, 0, 0, false, true, 0.0F, t});
++        list.push_back({"mv-medium+fill d10" + at, true, medium, 10, 0, 0, true, true, 0.0F, t});
++    }
++    list.push_back({"mv-medium d10 noprev", true, medium, 10, 0, 0, false, false});
++    list.push_back({"mv-medium+fill d10 noprev", true, medium, 10, 0, 0, true, false});
++    // Mode 1: only where the HUD symbology was taken out (none here): as without.
++    list.push_back({"mv-medium+fill1 d10", true, medium, 10, 0, 0, true, true, 0.0F, 0.5, 1U});
+     return list;
+ }
+ 
++// DCS Control (0122): the day scene with a rotor on the low aircraft (its look
++// turns, its MVs say it does not: a propeller, rotor or afterburner) and a
++// semi-transparent HUD (alpha 0.6) the aircraft passes behind.
++FeCase fe_rotor_case() {
++    FeCase scene = fe_flight_case("day+rotor+glass HUD", 1.0, false);
++    FeLayer rotor{};
++    for (const FeLayer& layer : scene.layers) {
++        if (layer.shape == kFeModelLow) rotor = layer;
++    }
++    rotor.shape = kFeRotor;
++    rotor.texture = 3;
++    rotor.spin = 1.2;
++    scene.layers.insert(scene.layers.begin(), rotor);
++    scene.layers.insert(scene.layers.begin(), FeLayer{0, 1.0, 0.0, 0.0, 0.0, kFeHudLow, 0, 0.6, false, {40.0, 255.0, 60.0}});
++    return scene;
++}
++
+ void run_fg_engine_data_fixtures() {
+     D3D12WarpFixture fixture(true);
+     char which_buffer[256]{};
+@@ -435,7 +625,7 @@ void run_fg_engine_data_fixtures() {
+     const UINT factor = which.find("x4") != std::string::npos ? 4U : 1U;
+     const UINT width = 640U * factor, height = 480U * factor;
+     std::vector<FeCase> cases{fe_flight_case("day", 1.0, false), fe_flight_case("night", 0.22, false),
+-        fe_flight_case("day+effects", 1.0, true), fe_flight_case("night+effects", 0.22, true)};
++        fe_flight_case("day+effects", 1.0, true), fe_flight_case("night+effects", 0.22, true), fe_rotor_case()};
+     if (which.find("smooth") != std::string::npos) {
+         // A fast roll (4 degrees a pair) over a nearly flat sky: little
+         // texture for the flow to match.
+@@ -453,9 +643,11 @@ void run_fg_engine_data_fixtures() {
+         }
+     }
+     for (const FeCase& scene : cases) {
+-        const FeRegions regions = fe_regions(scene, width, height);
++        std::map<double, FeRegions> regions_at;
+         std::vector<std::pair<FeVariant, FeResult>> results;
+         for (const FeVariant& variant : fe_variants(which)) {
++            if (regions_at.count(variant.t) == 0) regions_at.emplace(variant.t, fe_regions(scene, width, height, variant.t));
++            const FeRegions& regions = regions_at.at(variant.t);
+             results.emplace_back(variant, fe_run(fixture, scene, regions, variant, width, height));
+             fe_print(std::string(scene.name) + " " + variant.name, regions, results.back().second);
+         }
+@@ -463,46 +655,65 @@ void run_fg_engine_data_fixtures() {
+         // than the flow's by more than the colour checks' blend allows.
+         const auto& flow = results[0].second;
+         for (const auto& [variant, result] : results) {
+-            if (!variant.motion) continue;
+-            const std::size_t all = regions.names.size() - 1U;
++            if (!variant.motion || variant.t != 0.5 || variant.yaw != 0.0F) continue;
++            const std::size_t all = regions_at.at(0.5).names.size() - 1U;
+             require(result.errors[all].mae <= flow.errors[all].mae * 1.10 + 0.5,
+                 std::string("fg engine data ") + scene.name + " " + variant.name + ": worse than the flow overall");
+         }
+         // DCS Control (0121): the occlusion fill against the MVs without it
+-        // at the same texel: the regions a model uncovers or covers clearly
+-        // better by day (at least a third), never worse at night, the whole
+-        // image and the HUD not worse beyond noise.
+-        const auto region_index = [&](const char* name) {
+-            for (std::size_t r = 0; r < regions.names.size(); ++r) {
+-                if (regions.names[r] == name) return static_cast<int>(r);
+-            }
+-            return -1;
+-        };
++        // in the same conditions (texel, cell, turn, instant, previous atlas):
++        // what models uncover or cover clearly better by day (at least a
++        // third) where the previous frame has its class atlas, never worse at
++        // night; the whole image, the HUD and the rotor not worse beyond
++        // noise. DCS Control (0122): without a previous class atlas the same
++        // image, byte for byte.
+         for (const auto& [variant, result] : results) {
+             if (!variant.fill) continue;
+             const FeResult* plain = nullptr;
+             for (const auto& [other, other_result] : results) {
+                 if (other.motion && !other.fill && other.divisor == variant.divisor &&
+-                    other.options.preset == variant.options.preset) {
++                    other.options.preset == variant.options.preset && other.cell == variant.cell &&
++                    other.yaw == variant.yaw && other.t == variant.t &&
++                    (other.previous_motion == variant.previous_motion || variant.fill_mode == 1U)) {
+                     plain = &other_result;
+                 }
+             }
+             require(plain != nullptr, "fg engine data: the fill has no MV variant to compare with");
++            const FeRegions& regions = regions_at.at(variant.t);
++            const auto region_index = [&](const char* name) {
++                for (std::size_t r = 0; r < regions.names.size(); ++r) {
++                    if (regions.names[r] == name) return static_cast<int>(r);
++                }
++                return -1;
++            };
+             const std::string label = std::string("fg engine data ") + scene.name + " " + variant.name;
+-            const int trailing = region_index("trailing"), all = region_index("all"), hud = region_index("hud");
++            if (!variant.previous_motion || variant.fill_mode == 1U) {
++                require(result.image == plain->image, label +
++                    (variant.fill_mode == 1U ? ": mode 1 fills a pair whose HUD was not taken out"
++                                             : ": without the previous frame's class atlas the fill changes the image"));
++                continue;
++            }
++            const int trailing = region_index("trailing"), all = region_index("all"), hud = region_index("hud"),
++                      rotor = region_index("rotor");
+             const bool day = std::string(scene.name).rfind("day", 0) == 0;
+             require(trailing >= 0 && result.errors[trailing].mae <=
+-                        plain->errors[trailing].mae * (day ? 0.67 : 1.0) + (day ? 0.0 : 0.05),
++                        plain->errors[trailing].mae * (day ? 0.75 : 1.0) + (day ? 0.0 : 0.05),
+                 label + ": the occlusion fill does not improve what models uncover or cover");
+             require(all >= 0 && result.errors[all].mae <= plain->errors[all].mae * 1.02 + 0.02,
+                 label + ": the occlusion fill makes the image worse");
+-            require(hud < 0 || result.errors[hud].mae <= plain->errors[hud].mae * 1.05 + 0.3,
++            // Mode 2 everywhere: an opaque HUD within noise; a semi-transparent
++            // one with an aircraft passing behind it (the glass HUD case) and a
++            // rotor (MVs wrong) by at most a tenth (what mode 1 leaves out, and
++            // the live A/B decides).
++            const bool glass = std::string(scene.name).find("glass") != std::string::npos;
++            require(hud < 0 || result.errors[hud].mae <= plain->errors[hud].mae * (glass ? 1.10 : 1.05) + 0.3,
+                 label + ": the occlusion fill makes the HUD worse");
++            require(rotor < 0 || result.errors[rotor].mae <= plain->errors[rotor].mae * 1.10 + 0.3,
++                label + ": the occlusion fill makes the rotor worse");
+         }
+     }
+     fixture.require_no_debug_errors();
+ }
+-
+ // DCS Control (0121): the occlusion fill's GPU cost at a headset's eye image
+ // (XRFG_TEST_FG_ENGINE_DATA_BENCH, label bench). Two synthesizers on the same
+ // frames, interleaved pair by pair: MVs without and with the fill; the day
+@@ -554,7 +765,7 @@ void bench_fg_engine_data(D3D12WarpFixture& fixture, UINT width, UINT height) {
+         options.occlusion_aware = 1;
+         options.cockpit_mask = true;
+         options.dcs_motion = true;
+-        options.dcs_motion_occlusion_fill = index == 1;
++        options.dcs_motion_occlusion_fill = index == 1 ? 2U : 0U;
+         pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
+         require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
+                     pipeline.history,
