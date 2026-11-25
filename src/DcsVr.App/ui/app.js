@@ -822,7 +822,7 @@ function buildFields() {
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // Generated-frame quality options (OFXR 0104), NVIDIA only, all off until flown: one fold, a toggle each.
   { const nvidia = p => p.frameGen === 'Nvidia', ones = ['frameGenSkyOcclusion','frameGenEdgeChoice','frameGenFlowInputSrgb','frameGenMaskBand','frameGenPerceptualChecks','frameGenCurrentFallback','frameGenTemporalHints','frameGenFadeFlow'];
-    more = disclosure(c,'Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default.',p => { const n = ones.filter(k => p[k]).length; return n ? ${n} on : 'All off'; });
+    more = disclosure(c,'Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default.',p => { const n = ones.filter(k => p[k]).length; return n ? n+' on' : 'All off'; });
     toggles = toggleList(more);
     field(toggles,'frameGenSkyOcclusion','Clean edges against the sky',['No faint copy trailing an aircraft over the sky, most visible at night.','Where something crossed the sky between two frames, one frame is used instead of a blend of both.'],'toggle',null,nvidia);
     field(toggles,'frameGenEdgeChoice','Sharper moving edges','Picks the motion that fits best where two motions meet.','toggle',null,nvidia);
