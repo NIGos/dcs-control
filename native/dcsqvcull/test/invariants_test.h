@@ -112,6 +112,7 @@ const NotParts kNotParts[] = {
      "farDepthSlots farDepthLogProj farDepthPreOverlay farDepthCoverageMode farDepthPostOverlay farDepthOverlayTrace "
      "cockpitMaskExport cockpitMaskDivisor cockpitMaskViews cockpitMaskNearM cockpitMaskDilate cockpitMaskDump "
      "cockpitMaskLog cockpitDepthExport cockpitDepthDump cockpitMotionExport cockpitMotionClass cockpitMotionDump "
+     "cockpitMotionFocus cockpitMotionDepth cockpitMotionFocusAssumeJitterFree "
      "cockpitFgDump symbologyExport symbologyAlpha symbologyPublishAlways cockpitTrueIpd cockpitTrueIpdLighting "
      "cockpitTrueIpdForward cockpitTrueIpdHelmet cockpitTrueIpdOwnship cockpitIpdDormant cockpitTrueIpdOverlays "
      "cockpitTrueIpdOverlayMvp cockpitTrueIpdLog cockpitTrueIpdPrevLog cockpitTrueIpdFrameDump cockpitTrueIpdMvpDump "
@@ -479,6 +480,8 @@ const KeyRow kKeys[] = {
     {L"Perception", L"CockpitMaskExport", kNum, L"0", IV(g_cfg.cockpitMaskExport)},
     {L"Perception", L"CockpitDepthExport", kNum, L"0", IV(g_cfg.cockpitDepthExport)},
     {L"Perception", L"CockpitMotionExport", kNum, L"0", IV(g_cfg.cockpitMotionExport)},
+    {L"Perception", L"CockpitMotionFocus", kNum, L"0", IV(g_cfg.cockpitMotionFocus)},  // motion contract revision 4
+    {L"Perception", L"CockpitMotionDepth", kNum, L"0", IV(g_cfg.cockpitMotionDepth)},
     {L"Perception", L"SymbologyExport", kNum, L"0", IV(g_cfg.symbologyExport)},
     {L"Perception", L"CockpitTrueIpd", kNum, L"0", IV(g_cfg.cockpitTrueIpd)},
     {L"Perception", L"CockpitTrueIpdOwnship", kNum, L"0", IV(g_cfg.cockpitTrueIpdOwnship)},

@@ -909,6 +909,24 @@ void TestR74Pure() {
   cmask::ctime::g_modelTime = nullptr;
 }
 
+// Motion contract revision 4: the motion atlases' rects (pure).
+void TestMotionRects() {
+  const uint32_t sw[4] = {624, 624, 1132, 1132}, sh[4] = {616, 616, 1120, 1120};
+  cmask::Layout L;
+  const bool lay = cmask::MakeLayout(sw, sh, 15, 0, L);
+  cmask::MotionRects r3, r4, rp;
+  const bool a = cmask::MotionRectsOf(L, false, r3), b = cmask::MotionRectsOf(L, true, r4);
+  cmask::Layout Lp;
+  const bool c = cmask::MakeLayout(sw, sh, 3, 0, Lp) && cmask::MotionRectsOf(Lp, true, rp);
+  Check(lay && a && b && c && r3.W == 1248 && r3.H == 616 && r3.x[1] == 624 && r3.w[2] == 0 && !r3.focus &&
+            r4.focus && r4.W == 2888 && r4.H == 1232 && r4.x[0] == 0 && r4.y[1] == 616 && r4.x[2] == 624 &&
+            r4.x[3] == 1756 && r4.y[2] == 0 && r4.w[3] == 1132 && r4.h[3] == 1120 && !rp.focus && rp.W == 1248 &&
+            rp.y[1] == 0,
+        "motion revision 4: rects (2.9.31 sizes): revision 3's 1248x616 without the focus views; with them 2888x1232 "
+        "(periphery column at x 0, focus 2 at 624, 3 at 1756), as docs/FOCUS_MOTION.md; focus wanted but no focus "
+        "view in the layout -> revision 3's");
+}
+
 void TestPipeline() {
   ID3D11Device* dev = nullptr;
   ID3D11DeviceContext* imm = nullptr;
@@ -1076,6 +1094,8 @@ void TestPipeline() {
     if (SUCCEEDED(dev->CreateTexture2D(&ud, nullptr, &u1tex))) dev->CreateUnorderedAccessView(u1tex, nullptr, &dcsU1);
   }
   bool beating = false;  // the test's reader: stores its heartbeat at every frame start
+  ID3D11UnorderedAccessView* dcsU2 = nullptr;  // motion revision 4: a UAV of DCS's at CS u2 (the depth plane binds u2)
+  int noMvView = -1;  // motion revision 4: this view's G-buffer passes bind no MV target
   auto qpcNow = [] {
     LARGE_INTEGER q;
     QueryPerformanceCounter(&q);
@@ -1122,6 +1142,10 @@ void TestPipeline() {
       const UINT keep = static_cast<UINT>(-1);
       c->CSSetUnorderedAccessViews(1, 1, &dcsU1, &keep);
     }
+    if (dcsU2) {
+      const UINT keep = static_cast<UINT>(-1);
+      c->CSSetUnorderedAccessViews(2, 1, &dcsU2, &keep);
+    }
     ob(&casc, true);
     ob(&casc, false);
     for (int i = 0; i < 4; ++i) {
@@ -1134,7 +1158,8 @@ void TestPipeline() {
         ob(&gbuf, true);
         c->CSSetShader(dcsCs, nullptr, 0);
         c->CSSetConstantBuffers(0, 1, &cbA);
-        c->OMSetRenderTargets(1, &mvRtv[i], v[i].dsv);  // R70: DCS's MV target with the G-buffer's depth
+        ID3D11RenderTargetView* mvBind = i == noMvView ? nullptr : mvRtv[i];
+        c->OMSetRenderTargets(1, &mvBind, v[i].dsv);  // R70: DCS's MV target with the G-buffer's depth
         D3D11_VIEWPORT vp{0, 0, static_cast<float>(v[i].w - vpCut), static_cast<float>(v[i].h - vpCut), 0, 1};
         c->RSSetViewports(1, &vp);
         c->UpdateSubresource(v[i].cb, 0, nullptr, data.data(), 0, 0);
@@ -3461,6 +3486,340 @@ void TestPipeline() {
     Rel(rdev);
     ptiming::g_orig = execSave;
   }
+  // Motion contract revision 4 (docs/FOCUS_MOTION.md): the focus views' MVs and class, the per-pixel depth plane.
+  // The fake pass sequence pL, pR, fL, fR of frame() (each view at its own sample point, inside its passes).
+  {
+    cmask::g_flightGate = false;
+    cmask::g_buildWaitMs = 5000;
+    flight = false;
+    vpCut = 0;
+    g_verify = 1;
+    xrp = &xi;
+    beating = dbeating = mbeating = true;
+    cmask::Configure(true, 2, 15, 1.0, 0);
+    cmask::ConfigureMotion(true, true, 0);  // both revision 4 options off
+    // The R85 harness's reader held slots with the release fence: this test's reader releases everything.
+    if (cmask::g_r.rel) {
+      ID3D11DeviceContext4* c4 = nullptr;
+      imm->QueryInterface(__uuidof(ID3D11DeviceContext4), reinterpret_cast<void**>(&c4));
+      if (c4) {
+        c4->Signal(cmask::g_r.rel, 1ull << 62);
+        c4->Flush();
+        for (int k = 0; k < 200 && cmask::g_r.rel->GetCompletedValue() < (1ull << 62); ++k) Sleep(5);
+        c4->Release();
+      }
+    }
+    // DCS's UAV at CS u2 (the depth plane binds u2: it must be put back).
+    ID3D11Texture2D* u2tex = nullptr;
+    {
+      D3D11_TEXTURE2D_DESC ud{};
+      ud.Width = ud.Height = 4;
+      ud.MipLevels = ud.ArraySize = 1;
+      ud.Format = DXGI_FORMAT_R32_FLOAT;
+      ud.SampleDesc.Count = 1;
+      ud.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      if (SUCCEEDED(dev->CreateTexture2D(&ud, nullptr, &u2tex))) dev->CreateUnorderedAccessView(u2tex, nullptr, &dcsU2);
+    }
+    auto readMotion = [&](int64_t dt, cmv::Header& hv, int& s) {
+      s = cmv::seqlock_read(mblk, hv) ? cmv::find_slot(hv, dt) : -1;
+    };
+    // The R16_FLOAT depth plane's texels (row-major, its size).
+    auto readR16 = [&](ID3D11Texture2D* t) {
+      D3D11_TEXTURE2D_DESC d{};
+      t->GetDesc(&d);
+      d.Usage = D3D11_USAGE_STAGING;
+      d.BindFlags = 0;
+      d.MiscFlags = 0;
+      d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      ID3D11Texture2D* st = nullptr;
+      std::vector<float> out;
+      if (FAILED(dev->CreateTexture2D(&d, nullptr, &st))) return out;
+      c->CopyResource(st, t);
+      D3D11_MAPPED_SUBRESOURCE m{};
+      if (SUCCEEDED(c->Map(st, 0, D3D11_MAP_READ, 0, &m))) {
+        for (UINT y = 0; y < d.Height; ++y) {
+          const uint16_t* row = reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(m.pData) + y * m.RowPitch);
+          for (UINT x = 0; x < d.Width; ++x) out.push_back(HalfToFloat(row[x]));
+        }
+        c->Unmap(st, 0);
+      }
+      st->Release();
+      return out;
+    };
+    auto zeroTail = [](const cmv::Header& h) {
+      const unsigned char* b = reinterpret_cast<const unsigned char*>(&h);
+      for (size_t k = offsetof(cmv::Header, focusView); k < offsetof(cmv::Header, readerHeartbeatQpc); ++k)
+        if (b[k]) return false;
+      return true;
+    };
+    // 1. Both off: revision 3's records (views 0 / 1 left to right, tail zero), revision 4, jitter_proven on 0 / 1.
+    for (int f = 0; f < 4; ++f) frame(5000 + f, true);
+    cmv::Header hA{};
+    int sA = -1;
+    readMotion(5003, hA, sA);
+    bool r3 = sA >= 0 && hA.revision == 4 && hA.atlasW == 96 + 97 && hA.atlasH == 91 && hA.slot[sA].viewMask == 3 &&
+              !(hA.flags & (cmv::header_flags::focus_views | cmv::header_flags::depth_plane)) && zeroTail(hA) &&
+              !(hA.slot[sA].flags & (cmv::slot_flags::focus_partial | cmv::slot_flags::depth_plane)) &&
+              !cmv::view_record(hA, sA, 2) && !cmv::depth_usable(hA, sA, 0);
+    for (int i = 0; r3 && i < 2; ++i) {
+      const cmv::MotionView& m = hA.slot[sA].view[i];
+      r3 = m.x == (i ? 96u : 0u) && m.y == 0 && (m.flags & cmv::view_flags::jitter_proven) &&
+           !(m.flags & (cmv::view_flags::focus | cmv::view_flags::depth_plane));
+    }
+    {
+      cdp::Header hd{};
+      r3 = r3 && cdp::seqlock_read(dblk, hd) && !(hd.flags & cdp::header_flags::per_pixel_in_motion) &&
+           hd.revision == cdp::contract_revision;
+    }
+    Check(r3, "motion revision 4: both options off -> revision 3's records byte for byte (views 0 / 1 left to right, "
+              "focusView / depthFormat / depthTextureHandle / tail zero, no new flag), revision 4, jitter_proven on 0 / 1; "
+              "the depth block's per_pixel_in_motion clear");
+    const uint32_t genA = hA.generation;
+    // 2. Both on: one new generation; the focus rects and the depth plane.
+    const uint64_t rl0 = cmask::g_relayouts.load(), fv0 = cmask::g_mFocusViews.load(), diffs0 = cmask::g_stateDiffs.load();
+    stateSame = true;
+    cmask::ConfigureMotion(true, true, 0, true, true, false);
+    for (int f = 0; f < 5; ++f) frame(5100 + f, true);
+    cmv::Header hB{};
+    int sB = -1;
+    readMotion(5104, hB, sB);
+    const uint32_t genB = hB.generation;
+    const bool oneGen = sB >= 0 && genB != genA && cmask::g_relayouts.load() == rl0 + 1;
+    const uint32_t wantX[4] = {0, 0, 97, 297}, wantY[4] = {0, 90, 0, 0};
+    bool rects = oneGen && hB.atlasW == 97 + 200 + 200 && hB.atlasH == 190 && hB.slot[sB].viewMask == 15 &&
+                 (hB.flags & cmv::header_flags::focus_views) && (hB.flags & cmv::header_flags::depth_plane) &&
+                 hB.depthFormat == cmv::format_r16_float && hB.depthTextureHandle[sB] != 0 &&
+                 (hB.slot[sB].flags & cmv::slot_flags::depth_plane) && !(hB.slot[sB].flags & cmv::slot_flags::focus_partial) &&
+                 !(hB.slot[sB].flags & cmv::slot_flags::reset);
+    double fovErr = 0, jitErr = 0;
+    for (int i = 0; rects && i < 4; ++i) {
+      const cmv::MotionView* m = cmv::view_record(hB, sB, i);
+      rects = m && cmv::view_usable(hB, sB, i) && cmv::depth_usable(hB, sB, i) && m->x == wantX[i] && m->y == wantY[i] &&
+              m->w == static_cast<uint32_t>(v[i].w) && m->h == static_cast<uint32_t>(v[i].h) &&
+              ((m->flags & cmv::view_flags::focus) != 0) == (i >= 2) &&
+              ((m->flags & cmv::view_flags::jitter_proven) != 0) == (i < 2);
+      if (!rects) break;
+      float wfov[4];
+      const Viewport vp{0, 0, static_cast<double>(v[i].w), static_cast<double>(v[i].h), 0, 1};
+      cmask::RectFov(ParseProj(Pj[i]), vp, v[i].w, v[i].h, 1, wfov);
+      for (int k = 0; k < 4; ++k) fovErr = std::max(fovErr, static_cast<double>(std::fabs(m->fovTan[k] - wfov[k])));
+      jitErr = std::max({jitErr, std::fabs(m->jitterCurPx[0] - jit[i][0]), std::fabs(m->jitterCurPx[1] - jit[i][1])});
+    }
+    const float mv0[2] = {1.5f, -2.0f};
+    float tm[2] = {};
+    const bool gate = sB >= 0 && cmv::true_motion_view(hB, sB, 0, mv0, tm) && tm[0] == 1.5f &&
+                      !cmv::true_motion_view(hB, sB, 2, mv0, tm) && !cmv::true_motion_view(hB, sB, 3, mv0, tm);
+    const int pB = sB >= 0 ? cmv::prev_slot(hB, sB) : -1;
+    const bool prev = pB >= 0 && hB.slot[pB].displayTime == 5103 && cmv::depth_usable(hB, pB, 2);
+    sprintf_s(what, "motion revision 4: both options on -> one new generation (one relayout), atlas 497x190 (periphery "
+                    "0 above 1 at x 0, focus 2 / 3 to the right), all four views usable with their depth, focus flags, "
+                    "fovTan from each view's gProj (max error %.2g), jitters (max error %.2g); jitter_proven only on 0 / 1 "
+                    "(true_motion_view refuses 2 / 3); prev_slot finds the previous frame with its depth",
+              fovErr, jitErr);
+    Check(rects && fovErr < 1e-6 && jitErr < 2e-3 && gate && prev, what);
+    // The textures through their NT handles after the shared fence: MV verbatim, class, depth (w within the
+    // half-float / depth-format tolerance, 65504 for the sky), and the three aligned texel for texel.
+    {
+      ID3D11Texture2D* mt = nullptr;
+      ID3D11Texture2D* ct = nullptr;
+      ID3D11Texture2D* pt = nullptr;
+      if (d1 && sB >= 0) {
+        d1->OpenSharedResource1(reinterpret_cast<HANDLE>(hB.textureHandle[sB]), __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&mt));
+        d1->OpenSharedResource1(reinterpret_cast<HANDLE>(hB.classTextureHandle[sB]), __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&ct));
+        d1->OpenSharedResource1(reinterpret_cast<HANDLE>(hB.depthTextureHandle[sB]), __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&pt));
+      }
+      bool fenced = false;
+      ID3D11Fence* mf = nullptr;  // this install's fence (the harness above made the base objects anew)
+      if (d5 && sB >= 0)
+        d5->OpenSharedFence(reinterpret_cast<HANDLE>(hB.fenceHandle), __uuidof(ID3D11Fence), reinterpret_cast<void**>(&mf));
+      if (mf) {
+        c->Flush();
+        for (int k = 0; k < 200 && mf->GetCompletedValue() < hB.slot[sB].seq; ++k) Sleep(5);
+        fenced = mf->GetCompletedValue() >= hB.slot[sB].seq;
+      }
+      Rel(mf);
+      int mvBad[4] = {-1, -1, -1, -1}, clsBad[4] = {-1, -1, -1, -1}, dBad[4] = {-1, -1, -1, -1}, align[4] = {-1, -1, -1, -1},
+          block[4] = {-1, -1, -1, -1};
+      cdp::Header hd{};
+      const int ds = cdp::seqlock_read(dblk, hd) ? cdp::find_slot(hd, 5104) : -1;
+      ID3D11Texture2D* dt = nullptr;
+      if (d1 && ds >= 0)
+        d1->OpenSharedResource1(reinterpret_cast<HANDLE>(hd.textureHandle[ds]), __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dt));
+      if (mt && ct && pt && dt && sB >= 0) {
+        const std::vector<float> a = ReadRG16F(dev, c, mt);
+        const std::vector<uint8_t> cl = ReadR8(dev, c, ct);
+        const std::vector<float> pl = readR16(pt);
+        const std::vector<float> dc = ReadRG16F(dev, c, dt);
+        for (int i = 0; i < 4; ++i) {
+          mvBad[i] = clsBad[i] = dBad[i] = align[i] = block[i] = 0;
+          const cmv::MotionView& m = *cmv::view_record(hB, sB, i);
+          const cdp::DepthView& dv = hd.slot[ds].view[i];
+          for (uint32_t y = 0; y < m.h; ++y)
+            for (uint32_t x = 0; x < m.w; ++x) {
+              const size_t at = static_cast<size_t>(m.y + y) * hB.atlasW + m.x + x;
+              float wmv[2];
+              mvAt(i, static_cast<int>(x), static_cast<int>(y), wmv);
+              if (a[at * 2] != wmv[0] || a[at * 2 + 1] != wmv[1]) ++mvBad[i];
+              const Px q = ScenePx(i, static_cast<int>(x), static_cast<int>(y), v[i].w, v[i].h, false);
+              const uint8_t wc = static_cast<uint8_t>(((q.st >> 3) & 7) | (std::isinf(q.w) ? 0x80 : 0));
+              if (cl[at] != wc) ++clsBad[i];
+              const float got = at < pl.size() ? pl[at] : -1.0f;
+              const float wd = std::isinf(q.w) ? 65504.0f : q.w;
+              if (std::isinf(q.w) ? got != 65504.0f : !(std::fabs(got - wd) <= 6e-3f * wd)) ++dBad[i];
+              // Alignment: the sky bit exactly where the depth is 65504; cockpit texels nearer than 1 m.
+              if (((cl[at] & 0x80) != 0) != (got == 65504.0f) || ((cl[at] & 7) == 5 && !(got < 1.0f))) ++align[i];
+              // Within the depth companion's block (divisor 2): at most its farthest, at least its nearest cockpit.
+              const size_t bat = static_cast<size_t>(dv.y + y / 2) * hd.atlasW + dv.x + x / 2;
+              const float nearC = dc[bat * 2], farW = dc[bat * 2 + 1];
+              if (got > farW * 1.006f || ((cl[at] & 7) == 5 && nearC > 0 && got < nearC * 0.994f)) ++block[i];
+            }
+        }
+      }
+      Rel(mt);
+      Rel(ct);
+      Rel(pt);
+      Rel(dt);
+      sprintf_s(what, "motion revision 4: WARP atlases after the shared fence: MVs verbatim (mismatches %d %d %d %d), class "
+                      "(%d %d %d %d), depth plane w = near / d, 65504 sky (%d %d %d %d), MV / class / depth aligned (%d %d %d "
+                      "%d), inside the depth companion's block min / max (%d %d %d %d)",
+                mvBad[0], mvBad[1], mvBad[2], mvBad[3], clsBad[0], clsBad[1], clsBad[2], clsBad[3], dBad[0], dBad[1],
+                dBad[2], dBad[3], align[0], align[1], align[2], align[3], block[0], block[1], block[2], block[3]);
+      bool zero = fenced;
+      for (int i = 0; i < 4; ++i) zero = zero && !mvBad[i] && !clsBad[i] && !dBad[i] && !align[i] && !block[i];
+      Check(zero, what);
+      Check(ds >= 0 && (hd.flags & cdp::header_flags::per_pixel_in_motion) && hd.generation == genB,
+            "motion revision 4: the depth block says per_pixel_in_motion while the plane is published (same generation)");
+    }
+    // DCS's state: every binding the dispatches touch back as it was (u2 included), DCS's MV targets unchanged.
+    {
+      int untouched = 0;
+      for (int i = 2; i < 4; ++i) {
+        const std::vector<float> a = ReadRG16F(dev, c, mvTex[i]);
+        bool same = a.size() == static_cast<size_t>(v[i].w) * v[i].h * 2;
+        for (int y = 0; same && y < v[i].h; ++y)
+          for (int x = 0; same && x < v[i].w; ++x) {
+            float wmv[2];
+            mvAt(i, x, y, wmv);
+            const size_t at = static_cast<size_t>(y) * v[i].w + x;
+            same = a[at * 2] == wmv[0] && a[at * 2 + 1] == wmv[1];
+          }
+        untouched += same ? 1 : 0;
+      }
+      Check(stateSame && cmask::g_stateDiffs.load() == diffs0 && untouched == 2 &&
+                cmask::g_mFocusViews.load() >= fv0 + 8,
+            "motion revision 4: DCS's CS / OM bindings identical around every dispatch (DCS's UAV at u2 included); DCS's "
+            "focus MV targets read only");
+    }
+    // 3. [Dev] CockpitMotionFocusAssumeJitterFree: jitter_proven on 2 / 3, no new generation.
+    cmask::ConfigureMotion(true, true, 0, true, true, true);
+    for (int f = 0; f < 2; ++f) frame(5200 + f, true);
+    {
+      cmv::Header hm4{};
+      int s = -1;
+      readMotion(5201, hm4, s);
+      const float mv1[2] = {0.25f, 0.5f};
+      float out[2] = {};
+      Check(s >= 0 && hm4.generation == genB && cmv::true_motion_view(hm4, s, 2, mv1, out) && out[1] == 0.5f &&
+                (cmv::view_record(hm4, s, 3)->flags & cmv::view_flags::jitter_proven) && cmask::g_relayouts.load() == rl0 + 1,
+            "motion revision 4: [Dev] CockpitMotionFocusAssumeJitterFree sets jitter_proven on 2 / 3 (same generation)");
+    }
+    // 4. A focus view without an MV target this frame (stereo routing, or no G-buffer MV): focus_partial, the others
+    // usable.
+    noMvView = 3;
+    for (int f = 0; f < 2; ++f) frame(5300 + f, true);
+    noMvView = -1;
+    {
+      cmv::Header hm4{};
+      int s = -1;
+      readMotion(5301, hm4, s);
+      Check(s >= 0 && (hm4.slot[s].flags & cmv::slot_flags::focus_partial) && hm4.slot[s].viewMask == 7 &&
+                cmv::view_usable(hm4, s, 2) && !cmv::view_usable(hm4, s, 3) && !cmv::depth_usable(hm4, s, 3) &&
+                !(hm4.slot[s].flags & cmv::slot_flags::partial) && !(hm4.slot[s].flags & cmv::slot_flags::reset),
+            "motion revision 4: a focus view without MVs -> viewMask bit clear, focus_partial (partial and the pair "
+            "untouched), the other views usable");
+    }
+    // 5. Both off again: the larger set is kept (same generation and handles, no relayout), the flags clear, the focus
+    // records and viewMask bits 2 / 3 zero, no plane flag; back on: the same generation, nothing made.
+    {
+      const uint64_t made0 = cmask::g_texCreates.load();
+      cmask::ConfigureMotion(true, true, 0, false, false, false);
+      for (int f = 0; f < 3; ++f) frame(5400 + f, true);
+      cmv::Header hm4{};
+      int s = -1;
+      readMotion(5402, hm4, s);
+      bool off = s >= 0 && hm4.generation == genB && hm4.atlasW == 497 && hm4.depthTextureHandle[s] == hB.depthTextureHandle[s] &&
+                 hm4.textureHandle[s] == hB.textureHandle[s] && hm4.slot[s].viewMask == 3 &&
+                 !(hm4.flags & (cmv::header_flags::focus_views | cmv::header_flags::depth_plane)) &&
+                 !(hm4.slot[s].flags & (cmv::slot_flags::depth_plane | cmv::slot_flags::focus_partial)) &&
+                 !cmv::view_record(hm4, s, 2) && !cmv::depth_usable(hm4, s, 0) && cmv::view_usable(hm4, s, 0) &&
+                 cmv::view_usable(hm4, s, 1) && hm4.slot[s].view[1].y == 90;
+      const unsigned char* fb = reinterpret_cast<const unsigned char*>(&hm4.focusView[0][0]);
+      for (size_t k = 0; off && k < sizeof(hm4.focusView); ++k) off = fb[k] == 0;
+      cdp::Header hd{};
+      off = off && cdp::seqlock_read(dblk, hd) && !(hd.flags & cdp::header_flags::per_pixel_in_motion);
+      cmask::ConfigureMotion(true, true, 0, true, true, false);
+      for (int f = 0; f < 3; ++f) frame(5500 + f, true);
+      cmv::Header h2{};
+      int s2 = -1;
+      readMotion(5502, h2, s2);
+      const bool on = s2 >= 0 && h2.generation == genB && h2.slot[s2].viewMask == 15 &&
+                      (h2.flags & cmv::header_flags::focus_views) && cmv::depth_usable(h2, s2, 3);
+      Check(off && on && cmask::g_relayouts.load() == rl0 + 1 && cmask::g_texCreates.load() == made0,
+            "motion revision 4 (R85): both off keeps the larger set (same generation and handles, records cleared, "
+            "flags clear); on again: the same generation, no texture made, no relayout");
+    }
+    // 6. No reader heartbeat on the motion block: no focus copy, no depth (idle costs nothing).
+    {
+      LARGE_INTEGER qf;
+      QueryPerformanceFrequency(&qf);
+      mbeating = false;
+      cmv::reader_heartbeat(mblk, qpcNow() - qf.QuadPart * 21 / 10);
+      const uint64_t f0 = cmask::g_mFocusViews.load(), p0 = cmask::g_mPlaneViews.load();
+      for (int f = 0; f < 3; ++f) frame(5600 + f, true);
+      const bool idle = cmask::g_mFocusViews.load() == f0 && cmask::g_mPlaneViews.load() == p0 && cmask::g_mIdleA.load();
+      mbeating = true;
+      for (int f = 0; f < 3; ++f) frame(5700 + f, true);
+      Check(idle && cmask::g_mFocusViews.load() > f0 && cmask::g_mPlaneViews.load() > p0,
+            "motion revision 4: without the motion reader's heartbeat no focus copy and no depth plane; back with it");
+    }
+    // 7. The larger atlases cannot be made (VRAM): revision 3's set at the next relayout, logged once, no build loop;
+    // a key change tries again.
+    {
+      cmask::g_testFailExt = true;
+      const uint64_t rl1 = cmask::g_relayouts.load(), ef0 = cmask::g_mExtFails.load();
+      vpCut = 2;  // a layout change (resolution): the set is made again
+      for (int f = 0; f < 6; ++f) frame(5800 + f, true);
+      cmv::Header hm4{};
+      int s = -1;
+      readMotion(5805, hm4, s);
+      const bool fell = s >= 0 && cmask::g_relayouts.load() == rl1 + 1 && cmask::g_mExtFails.load() == ef0 + 1 &&
+                        cmask::g_extFailed.load() && hm4.atlasW == 94 + 95 && hm4.atlasH == 89 && hm4.slot[s].viewMask == 3 &&
+                        !(hm4.flags & (cmv::header_flags::focus_views | cmv::header_flags::depth_plane)) && zeroTail(hm4) &&
+                        hm4.generation != genB;
+      cmask::g_testFailExt = false;
+      cmask::ConfigureMotion(true, true, 0, true, true, true);  // a key changed: tried again
+      for (int f = 0; f < 3; ++f) frame(5900 + f, true);
+      cmv::Header h2{};
+      int s2 = -1;
+      readMotion(5902, h2, s2);
+      const bool again = s2 >= 0 && !cmask::g_extFailed.load() && cmask::g_relayouts.load() == rl1 + 2 &&
+                         (h2.flags & cmv::header_flags::focus_views) && h2.atlasW == 95 + 198 + 198 &&
+                         cmv::depth_usable(h2, s2, 2);
+      Check(fell && again, "motion revision 4: larger atlases not made -> revision 3's motion set at that relayout (one "
+                           "generation, logged once, no relayout loop over the next frames); a key change makes it again");
+      vpCut = 0;
+      for (int f = 0; f < 2; ++f) frame(5950 + f, true);
+    }
+    cmask::ConfigureMotion(true, true, 0);  // the shipped defaults (the larger set stays held until the uninstall)
+    for (int f = 0; f < 2; ++f) frame(5990 + f, true);
+    {
+      const UINT keep = static_cast<UINT>(-1);
+      ID3D11UnorderedAccessView* none = nullptr;
+      c->CSSetUnorderedAccessViews(2, 1, &none, &keep);
+    }
+    Rel(dcsU2);
+    Rel(u2tex);
+  }
   // Uninstall: the block goes inactive.
   Rel(shared4);
   Rel(shared);
@@ -3507,6 +3866,7 @@ void TestPipeline() {
     cmv::Header hmu{};  // R70
     const bool rmu = keepM && cmv::seqlock_read(keepM, hmu);
     Check(rmu && !(hmu.flags & cmv::header_flags::active) && hmu.textureHandle[0] == 0 && hmu.classTextureHandle[0] == 0 &&
+              hmu.depthTextureHandle[0] == 0 && hmu.depthFormat == 0 &&
               !cmask::g_mview.load() && !cmask::g_r.haveMotion && !fixdepth::g_runMv && !fixdepth::g_passMv,
           "motion: uninstall leaves the motion block inactive (no handles), textures and DCS's MV targets released");
     if (keepM) UnmapViewOfFile(keepM);
@@ -3556,6 +3916,7 @@ void Run() {
   TestContract();
   TestDepthContract();  // R69
   TestMotionContract();  // R70
+  TestMotionRects();  // motion contract revision 4
   TestPure();
   TestPipeline();
 }

@@ -2946,15 +2946,17 @@ void RestoreState(ID3D11DeviceContext* c, ID3D11DeviceContext1* c1, Saved& sv) {
 // u0. Every binding touched is saved before and put back after (see 5).
 // R69: uav1 (optional) is bound as u1 too; DCS's CS UAV 1 is saved and put back exactly.
 // R70: srv2 (optional) is bound as t2 too; DCS's CS SRV 2 is saved and put back exactly.
+// uav2 (motion contract revision 4: the depth plane) binds u0-u2 (u1 null without uav1); every extra slot is put back.
 void RunCs(const Run& r, ID3D11Buffer* params, ID3D11ComputeShader* cs, ID3D11ShaderResourceView* const* srvs,
            ID3D11UnorderedAccessView* uav, UINT groupsX, UINT groupsY, ID3D11UnorderedAccessView* uav1 = nullptr,
-           ID3D11ShaderResourceView* srv2 = nullptr) {
+           ID3D11ShaderResourceView* srv2 = nullptr, ID3D11UnorderedAccessView* uav2 = nullptr) {
   State& s = g_s;
   ID3D11DeviceContext* c = s.ctx;
   Saved sv;
   SaveState(c, s.ctx1, sv);
-  ID3D11UnorderedAccessView* savedU1 = nullptr;
-  if (uav1) c->CSGetUnorderedAccessViews(1, 1, &savedU1);
+  const UINT extraU = uav2 ? 2u : uav1 ? 1u : 0u;  // UAV slots 1.. bound besides u0
+  ID3D11UnorderedAccessView* savedU[2] = {};
+  if (extraU) c->CSGetUnorderedAccessViews(1, extraU, savedU);
   ID3D11ShaderResourceView* savedT2 = nullptr;
   if (srv2) c->CSGetShaderResources(2, 1, &savedT2);
   // DCS's DSV on the sampled texture would make d3d11 null our SRV: unbind
@@ -2995,19 +2997,19 @@ void RunCs(const Run& r, ID3D11Buffer* params, ID3D11ComputeShader* cs, ID3D11Sh
   c->CSSetShaderResources(0, 2, srvs);
   if (srv2) c->CSSetShaderResources(2, 1, &srv2);
   const UINT keep = static_cast<UINT>(-1);
-  if (uav1) {
-    ID3D11UnorderedAccessView* both[2] = {uav, uav1};
-    const UINT keep2[2] = {keep, keep};
-    c->CSSetUnorderedAccessViews(0, 2, both, keep2);
-  } else {
-    c->CSSetUnorderedAccessViews(0, 1, &uav, &keep);
+  {
+    ID3D11UnorderedAccessView* all[3] = {uav, uav1, uav2};
+    const UINT keep3[3] = {keep, keep, keep};
+    c->CSSetUnorderedAccessViews(0, 1 + extraU, all, keep3);
   }
   c->Dispatch(groupsX, groupsY, 1);
   ID3D11ShaderResourceView* nullSrv[2] = {};
   c->CSSetShaderResources(0, 2, nullSrv);  // before OM restore re-binds the DSV
-  if (uav1) {
-    c->CSSetUnorderedAccessViews(1, 1, &savedU1, &keep);
-    if (savedU1) savedU1->Release();
+  if (extraU) {
+    const UINT keep2[2] = {keep, keep};
+    c->CSSetUnorderedAccessViews(1, extraU, savedU, keep2);
+    for (ID3D11UnorderedAccessView* u : savedU)
+      if (u) u->Release();
   }
   if (srv2) {
     c->CSSetShaderResources(2, 1, &savedT2);
@@ -3034,12 +3036,12 @@ Bind ReadBind(ID3D11DeviceContext* c, ID3D11DeviceContext1* c1) {
   ID3D11ComputeShader* cs = nullptr;
   c->CSGetShader(&cs, nullptr, nullptr);
   put(cs);
-  ID3D11ShaderResourceView* srv[2] = {};
-  c->CSGetShaderResources(0, 2, srv);
-  put(srv[0]), put(srv[1]);
-  ID3D11UnorderedAccessView* uav[2] = {};
-  c->CSGetUnorderedAccessViews(0, 2, uav);
-  put(uav[0]), put(uav[1]);
+  ID3D11ShaderResourceView* srv[3] = {};  // t2: the motion copy's MV target (R70)
+  c->CSGetShaderResources(0, 3, srv);
+  put(srv[0]), put(srv[1]), put(srv[2]);
+  ID3D11UnorderedAccessView* uav[3] = {};  // u2: the motion copy's depth plane (revision 4)
+  c->CSGetUnorderedAccessViews(0, 3, uav);
+  put(uav[0]), put(uav[1]), put(uav[2]);
   ID3D11Buffer* cb[3] = {};
   if (c1)
     c1->CSGetConstantBuffers1(0, 3, cb, b.u, b.u + 3);

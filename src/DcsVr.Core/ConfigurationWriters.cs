@@ -388,7 +388,7 @@ public static class ConfigurationWriters
         ; Cockpit depth and DCS's motion vectors for Framegen (R69/R70): computed only while the frame generation layer reads
         ; them (its heartbeats), so they cost nothing otherwise.
         CockpitDepthExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
-        CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}{FocusMotionLines(p)}
         ; The HUD and helmet symbols as their own layer for frame generation (R95); with or without the dual camera.
         SymbologyExport={(p.UsesHudSymbology ? 1 : 0)}
         ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
@@ -402,6 +402,12 @@ public static class ConfigurationWriters
         IniPath={(p.EngineOptimizations && p.EngineDevMode ? p.EngineDevIniPath?.Trim() : null)}
 
         """;
+
+    /// <summary>Motion contract revision 4 (docs/FOCUS_MOTION.md): the focus views' motion vectors and the per-pixel depth
+    /// plane for frame generation, written only while the profile turns them on (research options, off until a live A/B;
+    /// the module's default is off).</summary>
+    private static string FocusMotionLines(VrProfile p) => p.FrameGen == FrameGeneration.Off || p.Desktop ? "" :
+        (p.FgFocusMotionVectors ? "\nCockpitMotionFocus=1" : "") + (p.FgPerPixelDepth ? "\nCockpitMotionDepth=1" : "");
 
     /// <summary>1 for an OFXR quality option that is on with NVIDIA frame generation, else 0.</summary>
     private static int NvidiaOption(VrProfile p, bool on) => on && p.FrameGen == FrameGeneration.Nvidia ? 1 : 0;

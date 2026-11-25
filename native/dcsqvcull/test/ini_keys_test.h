@@ -81,6 +81,7 @@ const AppKey kAppKeys[] = {
     {L"Perception", L"CockpitMaskLog", true}, {L"Perception", L"CockpitDepthExport", false},
     {L"Perception", L"CockpitDepthDump", true}, {L"Perception", L"CockpitMotionExport", false},
     {L"Perception", L"CockpitMotionClass", true}, {L"Perception", L"CockpitMotionDump", true},
+    {L"Perception", L"CockpitMotionFocus", false}, {L"Perception", L"CockpitMotionDepth", false},  // revision 4
     {L"Perception", L"CockpitFgDump", true}, {L"Perception", L"CockpitMaskOverlay", true},
     {L"Perception", L"SymbologyExport", false}, {L"Perception", L"SymbologyAlpha", true},
     {L"Perception", L"FarDepthCoverageMode", true}, {L"Perception", L"FarDepthLogProj", true},

@@ -12,7 +12,17 @@ The contract is `native/dcsqvcull/src/dcsvr_motion.h` at revision 4, plus one hi
 
 ## Status and gates
 
-Nothing writes or reads the new fields yet. The engine and OFXR work is split out in the last section.
+The engine writer is implemented (`cockpit_mask.h` item 15, offline tested on the fake pass sequence; not flown yet).
+No reader uses the new fields yet. The engine and OFXR work is split out in the last section.
+
+Engine details a reader may rely on:
+
+- `CockpitMotionFocus=1` makes the mask's views include 2 and 3 for the rest of the payload (the focus MVs come from
+  the same per-view runs). Its switch-off then keeps the larger set, as the held-set rules below require.
+- A focus view's unknown DLSS jitter never resets the pair. Its own `jitter_proven` (and `true_motion_view`) gate it;
+  views 0 and 1 keep the revision 2 reset rule.
+- The app writes the keys only when the profile turns them on (`FgFocusMotionVectors`, `FgPerPixelDepth`, profile
+  only, off).
 
 Before the work started, the motion study measured two things:
 
