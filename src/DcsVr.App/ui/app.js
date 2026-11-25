@@ -841,7 +841,7 @@ function buildFields() {
     // OFXR dcs_motion_occlusion_fill 0/1/2. With Sharp HUD (1) fills only frames Sharp HUD took the HUD out of, so the HUD
     // never moves; Always (2) also with the HUD in the image. Saved only when on (0.7.0 refuses keys it does not know).
     // With Sharp HUD picked while Sharp HUD is off: a line under the choice says what it needs (it stays pickable).
-    const fill = segmented(field(more,'frameGenOcclusionFill','Fill around moving aircraft',['Less smear just behind and ahead of a moving aircraft.','With Sharp HUD: only while Sharp HUD takes the HUD out, so the HUD never moves. Always: also over the HUD, which can shift a little where an aircraft passes behind it. About 0.1 ms of GPU.'],
+    const fill = segmented(field(more,'frameGenOcclusionFill','Fill around moving aircraft',['Less smear just behind and ahead of a moving aircraft.','With Sharp HUD: only while Sharp HUD takes the HUD out, so the HUD never moves. Always: also over the HUD, which can shift a little where an aircraft passes behind it. Always costs about 0.3 ms of GPU at 2X, 1.1 ms at 3X.'],
       'select',[['Off','Off · default'],['WithSharpHud','With Sharp HUD'],['Always','Always']],nvidia,'',fidelityFg,
       {prop:'frameGenOcclusionFill',get:p => p.frameGenOcclusionFill || 'Off',set:(p,v) => p.frameGenOcclusionFill = v}),{Off:'Off',WithSharpHud:'With Sharp HUD',Always:'Always'});
     fill.segmentNote = p => p.frameGenOcclusionFill === 'WithSharpHud' && !p.frameGenHudSymbology ? 'Needs Sharp HUD.' : ''; }
