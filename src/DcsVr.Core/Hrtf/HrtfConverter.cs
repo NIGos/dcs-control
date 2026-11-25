@@ -85,7 +85,7 @@ public static class HrtfConverter
         if (outTaps < DcsHrtfFile.MinTaps || outTaps > DcsHrtfFile.MaxTaps) throw new HrtfConversionException("Tap count out of range.");
         var warnings = new List<string>();
         if (set.MeasurementDistanceM < NearMeasurementM)
-            warnings.Add($"Measured at {set.MeasurementDistanceM:0.0#} m: the set already holds some near-field effect, so close sounds (in the cockpit) get a little more of it.");
+            warnings.Add($"Measured at {set.MeasurementDistanceM:0.0#} m, closer than most sets: close sounds (in the cockpit) start from the set's own near field.");
 
         // 2. Directions: unit, merged (repeats averaged), triangulated.
         var unit = new List<double[]>();

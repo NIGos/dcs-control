@@ -103,11 +103,14 @@ void InterpolatedDelays(const HrtfSet& set, const std::uint32_t idx[3], const fl
     out[1] = set.delayBase + m + (r - m) * scale;
 }
 
-float NearFieldShelfDb(float cosEar, float r) {
-    if (!(r < kNearFieldM)) return 0.0f;
-    const float rr = std::max(r, kMinDistanceM);
-    const float k = std::clamp((1.0f / rr - 1.0f / kNearFieldM) / (1.0f / kNearFieldRefM - 1.0f / kNearFieldM), 0.0f, 1.0f);
-    const float g = kNearFieldMaxDb * k;
+float NearFieldShelfDb(float cosEar, float r, float fromM) {
+    if (!(r < fromM)) return 0.0f;
+    auto k = [](float x) {
+        const float xx = std::max(x, kMinDistanceM);
+        return std::clamp((1.0f / xx - 1.0f / kNearFieldM) / (1.0f / kNearFieldRefM - 1.0f / kNearFieldM), 0.0f, 1.0f);
+    };
+    // k(kNearFieldM) is exactly 0: a far-field set gets the model unchanged.
+    const float g = kNearFieldMaxDb * std::max(0.0f, k(r) - k(fromM));
     return cosEar >= 0.0f ? (2.0f / 3.0f) * g * cosEar : (1.0f / 3.0f) * g * cosEar;
 }
 
@@ -133,6 +136,7 @@ HrtfSet* LoadHrtf(const void* data, std::size_t bytes, std::uint32_t deviceRate,
         s.directions = h.directionCount;
         s.triangles = h.triangleCount;
         s.datasetHeadRadiusM = h.datasetHeadRadiusM;
+        s.nearFromM = h.measurementDistanceM < kNearFieldM ? std::clamp(h.measurementDistanceM, kNearFieldRefM, kNearFieldM) : kNearFieldM;
         std::memcpy(s.name, h.name, sizeof(s.name));
         s.name[sizeof(s.name) - 1] = 0;
         s.serial = g_serial.fetch_add(1);
@@ -196,9 +200,9 @@ HrtfSet* LoadHrtf(const void* data, std::size_t bytes, std::uint32_t deviceRate,
             s.delay[i * 2 + 1] = static_cast<float>((v.delays[i].right - minDelay) * ratio);
         }
         // The largest ITD scale the base keeps non-negative: a 0.12 m head (the geometric radius of the largest head
-        // size), and at least kMaxHeadSizeScale, the head-size range's own maximum (66 / 57 cm, PilotItdRadiusM), for a
-        // set whose fitted radius is larger than the geometric one (SADIE II's KU100: 0.119 m). A larger scale only
-        // clamps the shortest delays at zero (Targets).
+        // size), and at least kMaxHeadSizeScale, the head-size range's own maximum (66 / 57 cm, PilotItdRadiusM), which
+        // decides for a set fitted above 0.104 m (a personal set; SADIE II's KU100 fits 0.094 m, so its base covers a
+        // 0.12 m head, scale 1.27). A larger scale only clamps the shortest delays at zero (Targets).
         const float sMax = std::max(0.12f / s.datasetHeadRadiusM, kMaxHeadSizeScale);
         float lowest = 0.0f;
         for (std::uint32_t i = 0; i < n; ++i) {

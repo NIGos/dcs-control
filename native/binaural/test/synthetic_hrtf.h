@@ -93,6 +93,7 @@ struct Options {
     double headRadius = 0.0875;
     double backShelfDb = -8.0;
     double alphaMin = 0.1;
+    float distance = 1.5f;        // Header.measurementDistanceM
     const char* name = "Synthetic sphere";
 };
 
@@ -193,7 +194,7 @@ inline std::vector<std::uint32_t> Build(const Options& o) {
     const float g = static_cast<float>(1.0 / std::sqrt(e));
     for (float& v : ir) v *= g;
     using namespace hrtf_format::flags;
-    return Assemble(m.v, delays, m.t, ir, o.rate, o.taps, static_cast<float>(o.headRadius), 1.5f, g,
+    return Assemble(m.v, delays, m.t, ir, o.rate, o.taps, static_cast<float>(o.headRadius), o.distance, g,
                     kMinimumPhase | kFrontNormalised, o.name, "synthetic test set");
 }
 

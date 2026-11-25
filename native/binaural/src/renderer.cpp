@@ -196,9 +196,14 @@ struct Renderer::Impl {
         const float scale = radius / set->datasetHeadRadiusM;
         if (pw > 0.0f) {
             // Each ear's filter is looked up from that ear (at +-earR on z: the head's real radius, not the ITD radius,
-            // which is a fit of the set's delays and larger). Closer than two head radii the ear offset shrinks to 0 at
+            // which is a fit of the set's delays). Closer than two head radii the ear offset shrinks to 0 at
             // one radius: a source at or inside the head radius (allowed down to kMinDistanceM) would otherwise be seen
             // by the near ear from the far side (filter flipped 180 degrees, ITD and ILD gone).
+            // A set measured closer than kNearFieldM (nearFromM = its distance D) already holds the parallax of a source
+            // at D: each ear's lookup is the direction from the head centre of the point at D on the ray from that ear
+            // through the source (the measured position that ear sees at the same angle), so a source at D gets the
+            // set's own filters. A far-field set (D >= kNearFieldM, SADIE II) takes the ray's own direction, as always.
+            const float D = set->nearFromM < kNearFieldM ? set->nearFromM : 0.0f;
             const float inside = std::clamp((r - earR) / earR, 0.0f, 1.0f);
             for (int e = 0; e < 2; ++e) {
                 const float ez = (e == 0 ? -earR : earR) * pw * inside;
@@ -208,6 +213,14 @@ struct Renderer::Impl {
                     v[0] /= len, v[1] /= len, v[2] /= len;
                 } else {
                     v[0] = dir[0], v[1] = dir[1], v[2] = dir[2];
+                }
+                if (D > 0.0f) {
+                    // |ear + t v| = D, t > 0; D >= kNearFieldRefM > |ez|, so the root is real and positive.
+                    const float ev = ez * v[2];
+                    const float tt = -ev + std::sqrt(std::max(0.0f, ev * ev - ez * ez + D * D));
+                    v[0] *= tt, v[1] *= tt, v[2] = ez + tt * v[2];
+                    const float n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                    if (n > 1e-6f) v[0] /= n, v[1] /= n, v[2] /= n;
                 }
                 std::memcpy(t[e].dir, v, sizeof(v));
                 Locate(*set, v, &s.triCache[e], t[e].idx, t[e].w);
@@ -230,7 +243,7 @@ struct Renderer::Impl {
         for (int e = 0; e < 2; ++e) {
             t[e].delay = std::clamp(t[e].delay + kFdLatency, kFdLatency, maxDelay);
             const float cosEar = e == 0 ? -dir[2] : dir[2];
-            t[e].shelf = (nearOn && r < kNearFieldM) ? std::pow(10.0f, NearFieldShelfDb(cosEar, r) * nearMix / 20.0f) : 1.0f;
+            t[e].shelf = (nearOn && r < set->nearFromM) ? std::pow(10.0f, NearFieldShelfDb(cosEar, r, set->nearFromM) * nearMix / 20.0f) : 1.0f;
         }
     }
 
@@ -265,10 +278,12 @@ struct Renderer::Impl {
         float step = 0.0f;
         bool reached = true;
         if (std::fabs(diff) > 1e-6f) {
-            // Spread over at least a whole sub-block: a short call (or the short last sub-block of a call) glides as
-            // slowly as a long one, and the rest follows in the next call.
-            step = diff / static_cast<float>(std::max(L, kSubBlockFrames));
-            if (L < kSubBlockFrames) reached = false;
+            // Spread over at least kMinGlideFrames: a short call glides no faster than a long one, and the rest follows
+            // in the next call. Not a whole sub-block: the 224-frame tail of a 480-frame call would then carry 1/8 of
+            // its change into the next call, pushing more sub-blocks past kFdBlendMax onto the per-sample interpolator
+            // (+48 % of them, +5 % CPU at 64 moving sources) for no audible gain.
+            step = diff / static_cast<float>(std::max(L, kMinGlideFrames));
+            if (L < kMinGlideFrames) reached = false;
             if (step > kMaxDelayStep) step = kMaxDelayStep, reached = false;
             if (step < -kMaxDelayStep) step = -kMaxDelayStep, reached = false;
         }

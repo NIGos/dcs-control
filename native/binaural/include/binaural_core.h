@@ -14,7 +14,11 @@
 //   - Near field (NearField on, source < 1 m): per-ear parallax (direction from each ear, ears at +-r on the z axis) for
 //     sources under 2 m (fading out between 1.5 and 2 m; the ear offset shrinks to 0 between 2 and 1 head radius, so
 //     a source at the head never flips the near ear's filter), plus a first-order low shelf per ear (1 kHz corner,
-//     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees (+8 dB near ear, -4 dB far ear).
+//     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees (+8 dB near ear, -4 dB far ear). A set
+//     measured closer than 1 m (Header.measurementDistanceM = D) already holds the near field down to D: the shelf adds
+//     only the difference from D (nothing at and beyond D), and each ear looks up the point at D on its own ray through
+//     the source, so a source at D plays the set's own filters. Sets measured at 1 m or farther (SADIE II: 1.2 m)
+//     get the model as described.
 //   - FIR: direct form, AVX2/FMA with an SSE2 fallback (chosen at Init); any block length, no FFT framing.
 //   - Distance gain, doppler, propagation delay, air and canopy filtering: never applied here (DCS already did them).
 //
@@ -49,11 +53,12 @@ constexpr float kParallaxM = 2.0f;                   // per-ear directions below
 constexpr float kMinDistanceM = 0.05f;               // positions are clamped to this distance (head-locked below)
 constexpr float kDefaultHeadRadiusM = 0.0875f;       // used when Config.headRadiusM is 0
 // The ITD radius the renderer accepts (Config.headRadiusM, SetHeadRadius): the range a .dcshrtf's fitted radius may have
-// (hrtf_format.h), so that every set can be scaled by the whole head-size range. A Woodworth fit of measured onsets is
-// larger than the head's geometric radius (SADIE II's KU100: 0.119 m), so the geometric 0.06 .. 0.12 m would stop it.
+// (hrtf_format.h), so that every set can be scaled by the whole head-size range. A Woodworth fit of measured onsets need
+// not match the head's geometric radius (SADIE II's KU100 fits 0.094 m; a fit of full-band onsets gave 0.119 m, and
+// personal sets vary), so the geometric 0.06 .. 0.12 m could stop it.
 constexpr float kMinItdRadiusM = 0.04f, kMaxItdRadiusM = 0.15f;
 // The ear radius (Config.earRadiusM, SetEarRadius): the geometric head radius, 48-66 cm around (binaural_config.h
-// HeadRadiusFromCircumferenceCm), kept apart from the ITD radius, which is a fit of the set's delays and larger.
+// HeadRadiusFromCircumferenceCm; 0.0907 m at 57 cm), kept apart from the ITD radius, which is a fit of the set's delays.
 constexpr float kMinEarRadiusM = 0.06f, kMaxEarRadiusM = 0.12f;
 // The largest ITD scale the head size asks for: 66 cm against the 57 cm reference (binaural_config.h PilotItdRadiusM).
 constexpr float kMaxHeadSizeScale = 66.0f / 57.0f;

@@ -558,6 +558,106 @@ static void TestNearField(const std::vector<std::uint32_t>& file) {
     ReleaseHrtf(rig.set);
 }
 
+// ---- A7b: the near field starts from the set's own measurement distance ------------------------------------------------
+// A set measured closer than 1 m already holds the near field down to its distance D: the shelf adds only G(r) - G(D)
+// (nothing at and beyond D) and each ear looks up the point at D on its ray through the source, so a source at D plays
+// the set's own filters. A far-field set (SADIE II: 1.2 m) is unchanged: 1.0, 1.2, 1.5 and 5 m render bit-identically.
+static void TestNearFieldDistance() {
+    const Vec noise = Noise(16384, 21);
+    auto build = [](float distance) {
+        synth::Options o;
+        o.distance = distance;
+        return synth::Build(o);
+    };
+    // Far-field sets: the distance in the header changes nothing (same IRs, near field on, sources 0.1 .. 1.8 m).
+    {
+        std::vector<Vec> outs;
+        for (float d : {1.0f, 1.2f, 1.5f, 5.0f}) {
+            const auto file = build(d);
+            Rig rig(file, 48000);
+            CHECK(rig.ok);
+            if (!rig.ok) return;
+            Vec all;
+            int slot = 0;
+            for (float dist : {0.1f, 0.3f, 0.6f, 0.9f, 1.8f})
+                for (double az : {-90.0, -45.0, 30.0, 150.0}) {
+                    const Vec out = RenderStatic(rig.r, slot++, FromAzEl(az, 10.0), dist, Vec(noise.begin(), noise.begin() + 4096), 480);
+                    all.insert(all.end(), out.begin(), out.end());
+                }
+            outs.push_back(std::move(all));
+            ReleaseHrtf(rig.set);
+        }
+        bool same = true;
+        for (std::size_t i = 1; i < outs.size(); ++i) same = same && outs[i] == outs[0];
+        std::printf("A7b far-field sets measured at 1.0 / 1.2 / 1.5 / 5 m render bit-identically: %s\n", same ? "yes" : "NO");
+        CHECK(same);
+    }
+    // A set measured at 0.5 m.
+    const float D = 0.5f;
+    const auto nearFile = build(D), farFile = build(1.2f);
+    Rig nearRig(nearFile, 48000), offRig(nearFile, 48000, 0.0875f, false), farRig(farFile, 48000);
+    CHECK(nearRig.ok && offRig.ok && farRig.ok);
+    if (!nearRig.ok || !offRig.ok || !farRig.ok) return;
+    // A source at the set's own distance gets the set's own filters: near field on = near field off.
+    {
+        const Vec on = RenderStatic(nearRig.r, 0, FromAzEl(-60, 0), D, noise, 480);
+        const Vec off = RenderStatic(offRig.r, 0, FromAzEl(-60, 0), D, noise, 480);
+        double e = 0.0, d = 0.0;
+        for (std::size_t i = 0; i < on.size(); ++i) e += double(off[i]) * off[i], d += double(on[i] - off[i]) * (on[i] - off[i]);
+        const double rel = std::sqrt(d / std::max(e, 1e-30));
+        float fl[3], fr[3];
+        detail::SourceFilterDirection(nearRig.r, 0, 0, fl);
+        detail::SourceFilterDirection(nearRig.r, 0, 1, fr);
+        const double angL = std::atan2(fl[2], fl[0]) * 180 / kPi, angR = std::atan2(fr[2], fr[0]) * 180 / kPi;
+        std::printf("A7b set at 0.5 m, source at 0.5 m 60 deg right: near field on vs off %.2e RMS (< 1e-4); ears look up %.3f / %.3f deg (60)\n",
+                    rel, angL, angR);
+        CHECK(rel < 1e-4 && std::fabs(angL - 60.0) < 0.05 && std::fabs(angR - 60.0) < 0.05);
+    }
+    // ILD (60-250 Hz, 90 degrees): only G(r) - G(D) below D, nothing beyond D; the far-field set adds the whole G(r).
+    auto lowIld = [&](Rig& rig, float dist) {
+        const Vec out = RenderStatic(rig.r, 1, FromAzEl(-90, 0), dist, noise, 480);
+        return BandRatioDb(Channel(out, 1), noise, 48000, 60, 250, 1024) - BandRatioDb(Channel(out, 0), noise, 48000, 60, 250, 1024);
+    };
+    {
+        const double got = lowIld(nearRig, 0.25f) - lowIld(nearRig, D);
+        const double model = NearFieldShelfDb(1.0f, 0.25f, D) - NearFieldShelfDb(-1.0f, 0.25f, D);
+        const double beyond = lowIld(nearRig, 0.8f) - lowIld(nearRig, D);
+        const double farBeyond = lowIld(farRig, 0.8f) - lowIld(farRig, D);
+        std::printf("A7b set at 0.5 m: ILD 0.25 m minus 0.5 m %.2f dB (model %.2f +-1), 0.8 m minus 0.5 m %.2f dB (0 +-0.5; the 1.2 m set %.2f)\n",
+                    got, model, beyond, farBeyond);
+        CHECK(farBeyond < -2.0);  // the far-field set still adds its shelf between 0.8 and 0.5 m
+        CHECKM(std::fabs(got - model) <= 1.0 && std::fabs(model - 8.0) < 1e-3, "%.2f vs %.2f", got, model);
+        CHECKM(std::fabs(beyond) <= 0.5, "beyond D %.2f dB", beyond);
+        CHECK(NearFieldShelfDb(1.0f, 0.8f, D) == 0.0f && NearFieldShelfDb(1.0f, 0.3f, 1.0f) == NearFieldShelfDb(1.0f, 0.3f));
+    }
+    // Parallax: 0.3 m at 45 degrees right; each ear looks up the point at 0.5 m on its own ray through the source.
+    {
+        Vec in(960, 0.0f);
+        RenderStatic(nearRig.r, 2, FromAzEl(-45, 0), 0.3f, in, 480);
+        float dl[3], dr[3];
+        detail::SourceFilterDirection(nearRig.r, 2, 0, dl);
+        detail::SourceFilterDirection(nearRig.r, 2, 1, dr);
+        const double s = 0.3 * std::sqrt(0.5);
+        auto expect = [&](double ez) {
+            double wx = s, wz = s - ez;
+            const double n = std::hypot(wx, wz);
+            wx /= n, wz /= n;
+            const double ev = ez * wz, t = -ev + std::sqrt(ev * ev - ez * ez + double(D) * D);
+            return std::atan2(ez + t * wz, t * wx) * 180 / kPi;
+        };
+        const double angL = std::atan2(dl[2], dl[0]) * 180 / kPi, angR = std::atan2(dr[2], dr[0]) * 180 / kPi;
+        const double expL = expect(-0.0875), expR = expect(0.0875);
+        const double rayL = std::atan2(s + 0.0875, s) * 180 / kPi, rayR = std::atan2(s - 0.0875, s) * 180 / kPi;
+        std::printf("A7b set at 0.5 m, 0.3 m at 45 deg right: left ear %.2f deg (expected %.2f; far-field set %.2f), right %.2f (%.2f; %.2f)\n",
+                    angL, expL, rayL, angR, expR, rayR);
+        CHECK(std::fabs(angL - expL) <= 0.5 && std::fabs(angR - expR) <= 0.5);
+        CHECK(angL > 45.0 && angL < rayL && angR < 45.0 && angR > rayR);  // less parallax than a far-field set
+    }
+    ReleaseHrtf(nearRig.set);
+    ReleaseHrtf(offRig.set);
+    ReleaseHrtf(farRig.set);
+}
+
 // ---- A8: latency --------------------------------------------------------------------------------------------------------
 static void TestLatency(const std::vector<std::uint32_t>& file, std::uint32_t rate, std::initializer_list<std::uint32_t> blocks) {
     Rig rig(file, rate);
@@ -1289,6 +1389,8 @@ int main(int argc, char** argv) {
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
     if (argc > 1 && std::strcmp(argv[1], "--default-data") == 0) {
         TestDefaultData();
+    } else if (argc > 1 && std::strcmp(argv[1], "--real-time") == 0) {
+        TestRealTime(synth::Build(synth::Options{}));              // A12 alone (repeat runs, timing spread)
     } else {
         synth::Options o;
         const auto file = synth::Build(o);
@@ -1306,6 +1408,7 @@ int main(int argc, char** argv) {
         TestFrontEnergy(file, 48000, "(synthetic)");              // A5
         TestFrontBack(file, "(synthetic)");                       // A6
         TestNearField(file);                                       // A7
+        TestNearFieldDistance();                                   // A7b
         TestLatency(file, 48000, {1, 7, 480, 1056, 4096});         // A8
         TestBlockInvariance(file);                                 // A9
         TestCrossfades(file, file2);                               // A10

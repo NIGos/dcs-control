@@ -19,10 +19,14 @@
 //
 // The converter (C#, src/DcsVr.Core, task A) produces:
 //   - minimum-phase IRs (real cepstrum), truncated to `taps` with a half-Hann tail window;
-//   - onset delays from the original HRIRs: the lag that best aligns each HRIR with its own minimum-phase version
-//     (cross-correlation upsampled 8x; Nam, Abel and Smith 2008), plus SOFA Data.Delay, the common minimum removed; the
-//     interaural time difference is delayRight - delayLeft. (A -20 dB level threshold was the first plan: band-limited
-//     onsets ring before the threshold and shadowed ears rise late: 38 us of ITD error on a synthetic set vs < 1 us.)
+//   - onset delays from the original HRIRs: per ear, the slope of the excess phase (phase of the measured HRIR minus
+//     that of the stored minimum-phase IR) fitted by least squares over 200-1500 Hz (HrtfDsp.ExcessPhaseDelay), so the
+//     rendered response keeps the measured interaural phase where hearing uses it; plus SOFA Data.Delay, the common
+//     minimum removed; repeated directions averaged. The interaural time difference is delayRight - delayLeft. (A full-
+//     band cross-correlation with the minimum-phase version came first: it locked onto the high-frequency lobes of a
+//     shadowed ear, 119 us RMS of phase-delay error on SADIE II's KU100 against 8.9 us now; docs/BINAURAL_AUDIO.md 4.1.)
+//   - measurementDistanceM: the renderer's near-field model starts from it when it is under 1 m (such a set already
+//     holds the near field down to that distance); 1 m and beyond is a far-field set.
 //   - diffuse-field equalisation (flag kDiffuseFieldEq): every IR divided by the power average over all directions
 //     (weighted by each direction's share of the sphere), smoothed to 1/3 octave, centred on its 200 Hz-10 kHz mean,
 //     limited to +-15 dB;

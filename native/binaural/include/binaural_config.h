@@ -92,8 +92,8 @@ inline double HeadScaleFromCircumferenceCm(float cm) {
 // Woodworth-fitted radius scaled by the head size, so the renderer's ITD scale (radius / the set's fitted radius) is
 // exactly the circumference ratio: 57 cm plays the set's own timing, whatever head it was measured on. (Comparing
 // C / 2 pi with a Woodworth fit would scale even the reference head's ITDs by a few percent.) Clamped to the renderer's
-// 0.04 .. 0.15 m (binaural_core.h kMinItdRadiusM, kMaxItdRadiusM: a fitted radius is larger than the geometric one, the
-// KU100 default set's is 0.119 m, and must still scale up to 66 cm).
+// 0.04 .. 0.15 m (binaural_core.h kMinItdRadiusM, kMaxItdRadiusM), the range a set's fit may have, so every set scales
+// over the whole 48-66 cm unclamped (the KU100 default set fits 0.094 m: 0.079 .. 0.109 m).
 inline float PilotItdRadiusM(float datasetHeadRadiusM, float cm) {
     const double fit = std::isfinite(datasetHeadRadiusM) && datasetHeadRadiusM > 0.0f ? datasetHeadRadiusM : 0.0875;
     return static_cast<float>(Clamp(fit * HeadScaleFromCircumferenceCm(cm), 0.04, 0.15));

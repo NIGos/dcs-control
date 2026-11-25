@@ -24,6 +24,7 @@ constexpr float kFdBlendMax = 0.1f;                // sub-block delay change ren
 constexpr float kFilterUpdateCos = 0.99996192f;     // cos(0.5 degree): a filter direction change past it crossfades
 constexpr std::uint32_t kFilterFadeFrames = 64;     // that crossfade's length (carried into the next sub-block or call)
 constexpr float kSwapFadeS = 0.01f;                 // a new HRTF set's crossfade, per source (carried across calls)
+constexpr std::uint32_t kMinGlideFrames = 64;       // a delay change glides over at least this many frames (short calls)
 constexpr float kShelfCornerHz = 1000.0f;           // near-field ILD low shelf corner
 // Near field switched on or off: the parallax and the shelf fade in or out over this long, so the per-ear delays of a
 // close source glide instead of jumping within one call (on the KU100 set at 0.3 m a jump within a 480-frame call
@@ -39,6 +40,10 @@ struct HrtfSet {
     std::uint32_t triangles = 0;
     std::uint32_t taps = 0;             // device taps (multiple of 8)
     float datasetHeadRadiusM = 0.0f;
+    // Where the near-field model starts: the set's measurement distance when it was measured closer than kNearFieldM
+    // (clamped to kNearFieldRefM .. kNearFieldM; such a set already holds the near field down to that distance), else
+    // kNearFieldM (a far-field set such as SADIE II at 1.2 m: the model unchanged).
+    float nearFromM = kNearFieldM;
     float delayBase = 0.0f;             // samples added to every delay so that the shortest (largest head) is >= 0
     char name[64] = {};
     std::vector<float> dir;             // n * 3
@@ -66,8 +71,10 @@ void InterpolatedDelays(const HrtfSet& set, const std::uint32_t idx[3], const fl
 // Near-field low-shelf gain (dB) of one ear: `cosEar` is the cosine between the source direction (from the head
 // centre) and that ear's axis (+1 = straight at the ear), `r` the distance in metres. G(r) = kNearFieldMaxDb x
 // clamp((1/r - 1/kNearFieldM) / (1/kNearFieldRefM - 1/kNearFieldM), 0, 1); near ear +2/3 G cosEar, far ear
-// +1/3 G cosEar (a cut), so the ILD grows by G at 90 degrees; 0 at and beyond kNearFieldM.
-float NearFieldShelfDb(float cosEar, float r);
+// +1/3 G cosEar (a cut), so the ILD grows by G at 90 degrees; 0 at and beyond kNearFieldM. `fromM`
+// (HrtfSet::nearFromM): a set measured closer than kNearFieldM already holds G(fromM), so only G(r) - G(fromM) is
+// added, 0 at and beyond fromM.
+float NearFieldShelfDb(float cosEar, float r, float fromM = kNearFieldM);
 // Parallax weight: 1 below 1.5 m, fading linearly to 0 at kParallaxM.
 float ParallaxWeight(float r);
 
