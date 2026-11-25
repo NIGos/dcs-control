@@ -167,6 +167,10 @@ public sealed record VrProfile
     /// <summary>OFXR dcs_motion_hud_guard: over the sky, DCS's motion vectors judge colours as you see them, so a HUD or a dark
     /// object over the night sky is not taken for sky and smeared with it.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenHudGuard { get; init; }
+    /// <summary>OFXR dcs_motion_focus (fork patch 0128): in the focus area, DCS's motion vectors of the focus view itself
+    /// (finer, with its depth) instead of the periphery's, read where the engine module exports them (motion contract
+    /// revision 4, docs/FOCUS_MOTION.md); without that export nothing changes. Off by default: not flown yet.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenFocusMotion { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored

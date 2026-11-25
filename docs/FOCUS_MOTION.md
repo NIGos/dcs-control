@@ -189,6 +189,57 @@ Every fallback is per pair and per view. None of them waits on the GPU or the en
   0121's 3-rank class ordering on the 10 px grid.
 - **Previous depth.** OFXR's own copy of A (above). If that is missing, it uses no depth test for that pair.
 
+### OFXR consumer: patch 0128 (`[ofxr] dcs_motion_focus`, app setting `FrameGenFocusMotion`, off)
+
+What is built (offline only; no producer writes revision 4 yet, nothing flown):
+
+- **Import.** With the key, the consumer takes views 2 / 3 when the producer publishes them (`view_usable`,
+  `true_motion_view`: without `jitter_proven` on the view they are refused and counted) and copies their rects in the
+  frame's one MV / class copy. The depth plane is opened with the generation and copied in the same list under the one
+  fence wait. A plane shared after the generation was opened reopens that generation once. The copy is still the
+  union box at atlas size, not "sized to the rects used": the focus views widen it to the whole atlas.
+- **Grid.** A pair whose current frame has focus MVs resamples on a 4 px grid (a target and scatter of its own where
+  the image's cell is 8). The periphery outside the inset keeps today's lattice: each fine cell takes the value of
+  the coarse cell it lies in, computed by the old code. The composition's interpolation between cells then ramps over
+  4 px instead of 8. The sky-occlusion rings keep today's reach in pixels.
+- **Focus cells.** These use an edge-aware filter: bilinear weights over the texels of the nearest texel's surface
+  only (same class, depth within 3 % + 0.25 m, motion within about one output pixel). The one-surface test follows the
+  same rules, and there is a one-cell feather at the inset edge.
+- **Fallback.** With the key off, an older producer, unproven focus jitter or F10, nothing above runs. The keys-off
+  output is byte-identical to the build before 0128: 144 of 144 compositions of `XRFG_TEST_DCS_MOTION` match
+  (`XRFG_TEST_OUTPUT_HASHES`). Within one build, key off with focus data and key on without focus data each equal
+  today's output in every fixture scene.
+
+Fixtures (`XRFG_TEST_FG_FOCUS_MOTION`, `tests/fg_focus_motion.inc`): periphery MVs d10, cell 8; focus MVs d2 over the
+middle half, fine cell 4. The numbers are MAE in sRGB units, today -> focus.
+
+| Scene | 640 x 480: model band (inset) | x4 (2560 x 1920, headset-scale motion): model band (inset) | x4 other regions |
+|---|---|---|---|
+| orbit day (aircraft still, world sliding) | 2.23 -> 1.79 | 5.39 -> 3.09 | all 0.28 -> 0.28 |
+| orbit dark | 1.28 -> 1.02 | 1.93 -> 1.18 | all 0.11 -> 0.11 |
+| small aircraft day (12-30 px) | 9.36 -> 10.11 | 12.46 -> 8.58 | ahead 5.14 -> 6.50, trailing 2.91 -> 3.55 |
+| small aircraft dark | 2.52 -> 2.85 | 4.00 -> 2.46 | ahead 2.52 -> 4.29, behind 0.74 -> 0.18 |
+| flight day (0120 scene) | 8.43 -> 8.11 | 10.64 -> 11.57 | wires 21.44 -> 20.86 |
+| flight dark | 1.99 -> 1.98 | 2.90 -> 3.08 | wires 5.41 -> 5.23 |
+
+- Outside the inset, every scene matches today to within 0.01.
+- With focus MVs at d1, the 640 x 480 small-aircraft day case goes from 9.36 to 7.67 and orbit day from 2.23 to 1.64.
+  Flight day gets worse, 8.43 to 8.96.
+- In these scenes the depth plane changes nothing beyond class and motion: focus with depth and focus with class only
+  give identical output. A checkerboard depth plane does change the output, so the plane is read. Depth matters only
+  where two surfaces of one class move alike, and there the motion is the same anyway. Its real use is M1.
+- Reading: in the focus region the change helps the orbited aircraft and the small aircraft at headset scale. It moves
+  error into the ahead and trailing bands of small aircraft and slightly worsens the flight scene's model band. This
+  matches M0b: finer MVs alone do not fix the halo, and the cross-fade at disocclusions (M1) remains.
+
+Cost (`XRFG_TEST_DCS_MOTION_BENCH` with `XRFG_TEST_DCS_MOTION_BENCH_FOCUS=1`, 5424 x 5356 x 2, focus d2 over the
+middle half; 2 runs): the composition takes 1201-1202 us today and 1354-1355 us with focus, about +153 us per pair
+for both eyes; the whole pair is +155 us. The consumer's larger copy (the full atlas plus the depth plane, about
+25 MB per frame at 2.9.31 sizes) is not in that number and is not measured. VRAM (key on only): each synthesizer gets a fine
+grid target and scatter. At 5424 px those are 1356 x 1339 x 6 slices x 8 B plus x 4 slices x 4 B, about 116 MB
+together. Each ring entry's copies grow to the full atlas plus the plane. VRAM is already near the budget
+(`ofxr-0009`), which is one more reason the key stays off.
+
 ## Task split
 
 ### Engine agent (DcsQvCull)
