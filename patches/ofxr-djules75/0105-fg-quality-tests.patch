@@ -1,0 +1,624 @@
+Tests for 0104. DCS motion fixtures: a fourth and fifth composition per scene (the shipping one and the flow alone with
+the quality options, XRFG_TEST_FG_QUALITY=<bits>, all by default), the fallback share, XRFG_TEST_SRGB_VIEW=1 (every scene
+read through an sRGB view), XRFG_TEST_DUMP_DIR (PPM dumps); new scenes: the occlusion at night (a grey aircraft 0.02-0.06
+over a 0.002 sky, MVs at 10 and 3 pixels a texel, UNORM and sRGB views; regions aircraft, trailing, leading, sky) and the
+world beside a cockpit mask's blocks. synthesize_nvidia_pair: a view format and XRFG_TEST_FG_QUALITY_ALL_PAIRS. DCS motion
+bench: XRFG_TEST_FG_QUALITY_BENCH=<bits> (both pipelines with MVs, the second with the options; pack, flow and whole-pair
+medians). New ctest xrfg_d3d12_temporal_hints (a sequence of pairs, hints off / on). Foveated quality bench:
+XRFG_FOVEATED_QUALITY_FG=<bits> on the fill2 modes' focus layer. Live ini parse test for the quality keys.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1906,6 +1906,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         add_test(NAME xrfg_d3d12_dcs_motion COMMAND xrfg_d3d12_history_tests)
+         set_tests_properties(xrfg_d3d12_dcs_motion PROPERTIES
+             ENVIRONMENT "XRFG_TEST_DCS_MOTION=1" TIMEOUT 600 SKIP_RETURN_CODE 77)
++        # DCS Control (0104): [ofxr] nvidia_temporal_hints on a sequence of pairs
++        # (no pair much worse with the engine's hints); skipped without NVIDIA.
++        add_test(NAME xrfg_d3d12_temporal_hints COMMAND xrfg_d3d12_history_tests)
++        set_tests_properties(xrfg_d3d12_temporal_hints PROPERTIES
++            ENVIRONMENT "XRFG_TEST_TEMPORAL_HINTS=1" TIMEOUT 600 SKIP_RETURN_CODE 77)
+         # DCS Control (0038): [ofxr] parallel_eye_synthesis (a synthesis queue
+         # per eye swapchain) against the shared queue, every byte of every
+         # output, then back to back; on NVIDIA hardware, skipped without one.
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -2281,6 +2281,12 @@ void test_live_ini_section() {
+             section.occlusion_aware == 1 && section.start_only[1] == L"fidelityfx" &&
+             section.start_only[13] == L"C:\\DCS W\u00e9rld\\bin",
+         "live ini: UTF-16 values, a non-ASCII path kept");
++    // DCS Control (0104): the quality keys, one bit each, as read_fg_quality reads them.
++    write("[ofxr]\nperceptual_checks=1\nnvidia_edge_choice=1\nfoveated_fade_flow=0\nnvidia_temporal_hints=1\n");
++    section = same_as_readers("live ini: as the readers (quality keys)");
++    require(section.fg_quality == (xrfg::kFgQualityPerceptual | xrfg::kFgQualityEdgeChoice | xrfg::kFgQualityTemporalHints) &&
++            xrfg::implicit_layer::read_fg_quality(directory) == section.fg_quality,
++        "live ini: the quality keys' bits");
+     // The parser alone: the first of a repeated key, quotes, '#' comments.
+     static constexpr wchar_t buffer[] = L"nvidia_preset=fast\0nvidia_preset=slow\0# nvidia_input_scale=75\0"
+                                         L"nvidia_input_scale=\"75\"\0backend='nvidia'\0=x\0novalue\0";
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -361,6 +361,10 @@ private:
+         GetEnvironmentVariableA("XRFG_TEST_FOVEATED_BENCH", nullptr, 0) != 0};
+ };
+ 
++// DCS Control (0104): the format test textures are made in (kFormat; a test
++// that views them sRGB, as a periphery swapchain is, makes them typeless).
++DXGI_FORMAT g_test_texture_format = kFormat;
++
+ [[nodiscard]] D3D12_RESOURCE_DESC stereo_texture_description(
+     UINT width = kWidth,
+     UINT height = kHeight) noexcept {
+@@ -371,7 +375,7 @@ private:
+     description.Height = height;
+     description.DepthOrArraySize = static_cast<UINT16>(kEyeCount);
+     description.MipLevels = 1;
+-    description.Format = kFormat;
++    description.Format = g_test_texture_format; // DCS Control (0104)
+     description.SampleDesc.Count = 1;
+     description.SampleDesc.Quality = 0;
+     description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+@@ -6951,6 +6955,18 @@ int main() {
+             std::cout << "D3D12 DCS motion tests passed\n";
+             return 0;
+         }
++        // DCS Control (0104): nvidia_temporal_hints on a sequence of pairs.
++        if (GetEnvironmentVariableA("XRFG_TEST_TEMPORAL_HINTS", nullptr, 0)) {
++            if (!nvidia_hardware_present()) {
++                std::cout << "D3D12 temporal hints tests skipped: no NVIDIA hardware adapter\n";
++                return kSkipped;
++            }
++            D3D12WarpFixture hints_fixture(true);
++            run_temporal_hints_sequence(hints_fixture, 640, 480);
++            run_temporal_hints_sequence(hints_fixture, 2712, 2678);
++            std::cout << "D3D12 temporal hints tests passed\n";
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_BENCH", nullptr, 0)) {
+             D3D12WarpFixture bench_fixture(true);
+             bench_dcs_motion_composition(bench_fixture, 5424, 5356);
+diff --git a/tests/foveated_quality.inc b/tests/foveated_quality.inc
+--- a/tests/foveated_quality.inc
++++ b/tests/foveated_quality.inc
+@@ -1289,6 +1289,7 @@ void dump_views(const std::string& directory, const std::string& stem, const Siz
+ //   XRFG_FOVEATED_QUALITY_DUMP=<directory>  BMP crops around the left eye's focus box (must exist)
+ //   XRFG_FOVEATED_QUALITY_WORKERS=<n>       CPU threads (default all cores but one)
+ //   XRFG_FOVEATED_QUALITY_DRY=1             no GPU: every synthetic is frame B
++//   XRFG_FOVEATED_QUALITY_FG=<bits>         DCS Control (0104): quality options on the fill2 modes' focus layer
+ //   XRFG_FOVEATED_QUALITY_UNCOVERED=<n>     foveated_uncovered_alpha of the layers-p100-ua mode, in focus
+ //                                           pixels at full size (default 16; 1..64); scaled with SCALE
+ void bench_foveated_quality() {
+@@ -1473,6 +1474,10 @@ void bench_foveated_quality() {
+                 }
+                 xrfg::D3D12NvidiaOpticalFlowOptions off = layer_half, fill1 = layer_half_fill, fill2 = layer_half_fill;
+                 fill2.foveated_uncovered_fill = 2U;
++                // DCS Control (0104): XRFG_FOVEATED_QUALITY_FG=<bits>, the quality
++                // options on the focus layer after the periphery's (fill = 2:
++                // its flow bound, foveated_fade_flow's vector).
++                fill2.fg_quality = static_cast<std::uint32_t>(env_number("XRFG_FOVEATED_QUALITY_FG", 0, 0, 255));
+                 xrfg::D3D12NvidiaOpticalFlowOptions fill2_ramp = fill2, fill1_ramp = fill1;
+                 for (xrfg::D3D12NvidiaOpticalFlowOptions* ramped : {&fill2_ramp, &fill1_ramp}) {
+                     ramped->foveated_uncovered_alpha = layer_half_uncovered.foveated_uncovered_alpha;
+diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
+--- a/tests/nvidia_fast_patterns.inc
++++ b/tests/nvidia_fast_patterns.inc
+@@ -329,11 +329,17 @@ StereoPattern synthesize_nvidia_pair(D3D12WarpFixture& fixture, const StereoPatt
+     const ReprojectionViews* previous_views = nullptr,
+     // DCS Control (0035): the current capture's views (and the target's),
+     // where they are not make_reprojection_views()'.
+-    const ReprojectionViews* current_views = nullptr) {
++    const ReprojectionViews* current_views = nullptr,
++    // DCS Control (0104): the view the synthesizer reads the images through
++    // (an sRGB one: the textures are made typeless; the bytes stay the same).
++    DXGI_FORMAT view_format = kFormat) {
++    const DXGI_FORMAT saved_texture_format = g_test_texture_format;
++    g_test_texture_format = view_format == kFormat ? kFormat : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+     std::array<ComPtr<ID3D12Resource>, 2> sources{
+         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+     auto current = create_source_texture(fixture, width, height);
+     auto synthetic = create_source_texture(fixture, width, height);
++    g_test_texture_format = saved_texture_format; // DCS Control (0104)
+     std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
+     std::array<ID3D12Resource*, 1> current_out{current.Get()}, synthetic_out{synthetic.Get()};
+     upload_pattern(fixture, sources[0].Get(), a);
+@@ -345,9 +351,15 @@ StereoPattern synthesize_nvidia_pair(D3D12WarpFixture& fixture, const StereoPatt
+     // takes the composition as before.
+     xrfg::D3D12NvidiaOpticalFlowOptions session_options = options;
+     session_options.cockpit_mask = cockpit_mask_session;
++    // DCS Control (0104): XRFG_TEST_FG_QUALITY_ALL_PAIRS=<bits> composes every
++    // pair of a run with those quality options (a run's A/B by environment).
++    if (char bits[32]{}; session_options.fg_quality == 0U &&
++        GetEnvironmentVariableA("XRFG_TEST_FG_QUALITY_ALL_PAIRS", bits, sizeof(bits)) != 0) {
++        session_options.fg_quality = static_cast<std::uint32_t>(std::strtoul(bits, nullptr, 0));
++    }
+     xrfg::D3D12FrameSynthesizer synth;
+     require_hresult(synth.initialize(fixture.device(), fixture.queue(), history,
+-        current_out, synthetic_out, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++        current_out, synthetic_out, view_format, D3D12_RESOURCE_STATE_RENDER_TARGET,
+         backend, session_options), "occlusion initialize");
+     const auto views = current_views != nullptr ? *current_views : make_reprojection_views();
+     xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
+@@ -369,7 +381,8 @@ StereoPattern synthesize_nvidia_pair(D3D12WarpFixture& fixture, const StereoPatt
+             std::to_string(static_cast<int>(backend)) + " occlusion " + std::to_string(options.occlusion_aware) +
+             " bidirectional " + std::to_string(options.bidirectional ? 1 : 0) + " motion " +
+             std::to_string(options.dcs_motion ? 1 : 0) + " depth " + std::to_string(options.cockpit_depth ? 1 : 0) +
+-            " mask " + std::to_string(cockpit_mask[1] ? 1 : 0),
++            " mask " + std::to_string(cockpit_mask[1] ? 1 : 0) + " quality " + // 0104
++            std::to_string(session_options.fg_quality) + " view " + std::to_string(static_cast<int>(view_format)),
+         image);
+     return image;
+ }
+@@ -1538,11 +1551,18 @@ struct DcsMotionLayer {
+     double alpha;     // 1 opaque; below, a transparent overlay without MVs
+     bool opaque;      // in the G-buffer (has MVs and a class)
+     std::array<double, 3> tint;
++    // DCS Control (0104): above 0, the layer's colour as stored (sRGB bytes)
++    // taken to linear light, times this, and encoded again: a night scene's
++    // levels (a sky near 0.002, a grey aircraft 0.02-0.06 in linear light).
++    double linear_scale{0.0};
+ };
+ 
+ struct DcsMotionScene {
+     std::vector<DcsMotionLayer> layers; // front first
+     UINT divisor{2};
++    // DCS Control (0104): the cockpit mask both frames carry (output pixels,
++    // 1 the cockpit; empty: none), at the mask's 8 pixels a texel.
++    std::vector<std::uint8_t> cockpit;
+ };
+ 
+ // Coverage of layer shape `shape` at texture point (u, v) of an image `w` x `h`.
+@@ -1571,6 +1591,8 @@ double dcs_motion_cover(int shape, double u, double v, double w, double h) {
+     }
+     case 5: // terrain below a horizon
+         return v > h * 0.62 + 0.1 * (u - w * 0.5) ? 1.0 : 0.0;
++    case 6: // DCS Control (0104): a cockpit sill and a canopy post
++        return (v >= 302.0 && v < 330.0) || (u >= 402.0 && u < 418.0 && v >= 60.0 && v < 302.0) ? 1.0 : 0.0;
+     default:
+         return 1.0;
+     }
+@@ -1586,7 +1608,15 @@ std::array<double, 2> dcs_motion_texture_point(const DcsMotionLayer& layer, doub
+ 
+ std::array<double, 3> dcs_motion_layer_colour(const DcsMotionLayer& layer, double u, double v) {
+     const auto texel = occlusion_texture(u * layer.scale, v * layer.scale, layer.texture);
+-    return {texel[0] * layer.tint[0], texel[1] * layer.tint[1], texel[2] * layer.tint[2]};
++    std::array<double, 3> colour{texel[0] * layer.tint[0], texel[1] * layer.tint[1], texel[2] * layer.tint[2]};
++    if (layer.linear_scale > 0.0) { // DCS Control (0104)
++        for (double& c : colour) {
++            const double v = std::clamp(c / 255.0, 0.0, 1.0);
++            const double linear = (v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4)) * layer.linear_scale;
++            c = 255.0 * (linear <= 0.0031308 ? linear * 12.92 : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055);
++        }
++    }
++    return colour;
+ }
+ 
+ // The image at instant s (both eyes alike), and per pixel which layer is in
+@@ -1661,7 +1691,7 @@ std::shared_ptr<xrfg::D3D12CockpitMaskFrame> make_dcs_motion_frame(D3D12WarpFixt
+     const DcsMotionScene& scene, UINT width, UINT height, const ReprojectionViews& views, std::int64_t display_time,
+     std::int64_t previous_display_time, bool with_motion,
+     const std::shared_ptr<xrfg::CockpitMaskPairCounters>& counters = {}, double from = 1.0, double to = 0.0) {
+-    auto frame = make_cockpit_mask_frame(fixture, width, height, {}, 8, views);
++    auto frame = make_cockpit_mask_frame(fixture, width, height, scene.cockpit, 8, views); // 0104: its cockpit
+     frame->display_time = display_time;
+     frame->counters = counters;
+     if (!with_motion) {
+@@ -1731,23 +1761,38 @@ struct DcsMotionEnvironment {
+ 
+ void run_dcs_motion_scene(D3D12WarpFixture& fixture, const char* name, const DcsMotionScene& scene,
+     const std::vector<std::pair<const char*, std::function<bool(UINT, UINT)>>>& regions,
+-    const std::function<void(const std::vector<std::array<DepthTestError, 3>>&)>& judge,
+-    const char* sky = nullptr) {
++    const std::function<void(const std::vector<std::array<DepthTestError, 5>>&)>& judge,
++    const char* sky = nullptr,
++    // DCS Control (0104): an sRGB view (a periphery swapchain's: the frames
++    // read in linear light); XRFG_TEST_SRGB_VIEW=1 gives every scene one.
++    DXGI_FORMAT view_format = kFormat) {
+     constexpr UINT width = 640, height = 480;
++    if (GetEnvironmentVariableA("XRFG_TEST_SRGB_VIEW", nullptr, 0) != 0) {
++        view_format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
++    }
++    // DCS Control (0104): a fourth composition, the shipping one with the
++    // quality options (XRFG_TEST_FG_QUALITY=<bits>, all of them by default).
++    std::uint32_t quality = xrfg::kFgQualityAll;
++    if (char bits[32]{}; GetEnvironmentVariableA("XRFG_TEST_FG_QUALITY", bits, sizeof(bits)) != 0) {
++        quality = static_cast<std::uint32_t>(std::strtoul(bits, nullptr, 0));
++    }
+     const ReprojectionViews views = make_reprojection_views();
+     const DcsMotionFrame a = dcs_motion_frame(scene, width, height, 0.0);
+     const DcsMotionFrame b = dcs_motion_frame(scene, width, height, 1.0);
+     const DcsMotionFrame truth = dcs_motion_frame(scene, width, height, 0.5);
+     xrfg::D3D12NvidiaOpticalFlowOptions options{};
+     auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
+-    const auto run = [&](bool session, std::int64_t points_at, bool with_motion, const char* only) {
++    const auto run = [&](bool session, std::int64_t points_at, bool with_motion, const char* only,
++                         std::uint32_t fg_quality = 0U) {
+         DcsMotionEnvironment environment(only, sky);
+         xrfg::D3D12NvidiaOpticalFlowOptions session_options = options;
+         session_options.dcs_motion = session;
++        session_options.fg_quality = fg_quality; // DCS Control (0104)
+         const auto previous = make_dcs_motion_frame(fixture, scene, width, height, views, 1000, 0, false, counters);
+         const auto current =
+             make_dcs_motion_frame(fixture, scene, width, height, views, 2000, points_at, with_motion, counters);
+-        return synthesize_nvidia_pair(fixture, a.image, b.image, width, height, session_options, {previous, current});
++        return synthesize_nvidia_pair(fixture, a.image, b.image, width, height, session_options, {previous, current},
++            xrfg::D3D12OpticalFlowBackend::nvidia, true, nullptr, nullptr, view_format);
+     };
+     const StereoPattern flow = run(false, 1000, true, nullptr);
+     // Without MVs that hold for the pair: the composition as before, byte for byte.
+@@ -1760,19 +1805,50 @@ void run_dcs_motion_scene(D3D12WarpFixture& fixture, const char* name, const Dcs
+     const StereoPattern only = run(true, 1000, true, "1");
+     const StereoPattern mixed = run(true, 1000, true, nullptr);
+     require(counters->motion_pairs.load() == 2, std::string("dcs motion ") + name + ": the MV pairs are not counted");
+-    std::vector<std::array<DepthTestError, 3>> errors;
++    const std::uint64_t along_before = counters->motion_pixels.load();
++    const std::uint64_t back_before = counters->motion_fallback_pixels.load();
++    const StereoPattern improved = run(true, 1000, true, nullptr, quality); // DCS Control (0104)
++    const std::uint64_t along_improved = counters->motion_pixels.load() - along_before;
++    const std::uint64_t back_improved = counters->motion_fallback_pixels.load() - back_before;
++    const StereoPattern flow_improved = run(false, 1000, true, nullptr, quality); // the flow alone, with them
++    // DCS Control (0104): XRFG_TEST_DUMP_DIR=<folder>: the first eye of the
++    // truth and of each composition as PPM files, for a look.
++    if (char folder[512]{}; GetEnvironmentVariableA("XRFG_TEST_DUMP_DIR", folder, sizeof(folder)) != 0) {
++        const auto dump = [&](const StereoPattern& image, const char* what) {
++            std::string file = std::string(folder) + "\\" + name + " - " + what + ".ppm";
++            for (char& c : file) if (c == ',') c = '_';
++            std::ofstream out(file, std::ios::binary);
++            out << "P6\n" << width << ' ' << height << "\n255\n";
++            for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
++                out.write(reinterpret_cast<const char*>(&image[0][i * kBytesPerPixel]), 3);
++            }
++        };
++        dump(truth.image, "truth");
++        dump(flow, "flow");
++        dump(mixed, "mixed");
++        dump(improved, "quality");
++        dump(flow_improved, "flow quality");
++    }
++    std::vector<std::array<DepthTestError, 5>> errors;
+     for (const auto& [label, where] : regions) {
+         const auto at = [&](UINT, UINT x, UINT y) { return where(x, y); };
+         errors.push_back({depth_test_error(flow, truth.image, width, height, at),
+             depth_test_error(only, truth.image, width, height, at),
+-            depth_test_error(mixed, truth.image, width, height, at)});
++            depth_test_error(mixed, truth.image, width, height, at),
++            depth_test_error(improved, truth.image, width, height, at),
++            depth_test_error(flow_improved, truth.image, width, height, at)});
+         const auto& e = errors.back();
+         std::cout << "dcs motion " << name << " / " << label << " (" << e[0].pixels << " px): flow mae "
+                   << e[0].mae << " p99 " << e[0].p99 << "; MV mae " << e[1].mae << " p99 " << e[1].p99
+-                  << "; mixed mae " << e[2].mae << " p99 " << e[2].p99 << std::endl;
++                  << "; mixed mae " << e[2].mae << " p99 " << e[2].p99 << "; quality " << quality << " mae "
++                  << e[3].mae << " p99 " << e[3].p99 << "; flow quality mae " << e[4].mae << " p99 " << e[4].p99
++                  << std::endl;
+     }
+-    std::cout << "dcs motion " << name << ": counted " << counters->motion_pixels.load() << " px along MVs, "
+-              << counters->motion_fallback_pixels.load() << " px back to the flow" << std::endl;
++    std::cout << "dcs motion " << name << ": counted " << along_before << " px along MVs, "
++              << back_before << " px back to the flow; quality " << quality << ": " << along_improved
++              << " along, " << back_improved << " back ("
++              << (along_improved + back_improved ? 100.0 * double(back_improved) / double(along_improved + back_improved) : 0.0)
++              << " %)" << std::endl;
+     judge(errors);
+     // Silence an unused warning when a scene has no use for the frames' fronts.
+     static_cast<void>(a.front.size() + b.front.size());
+@@ -1817,7 +1893,7 @@ void run_dcs_motion_fixtures() {
+         const auto thin = region(scene, [](std::int8_t f) { return f == 0; }, 2);
+         run_dcs_motion_scene(fixture, "thin wires, rolling world", scene,
+             {{"wires", thin}, {"rest", outside(thin)}, {"all", everywhere}},
+-            [](const std::vector<std::array<DepthTestError, 3>>& e) {
++            [](const std::vector<std::array<DepthTestError, 5>>& e) {
+                 require(e[0][2].mae < e[0][0].mae, "dcs motion: the wires are not closer to the truth than the flow's");
+                 require(e[1][2].mae <= e[1][0].mae * 1.05 + 0.5, "dcs motion: the world beside the wires is worse");
+             });
+@@ -1832,11 +1908,113 @@ void run_dcs_motion_fixtures() {
+         const auto edges = region(scene, [](std::int8_t f) { return f == 0; }, 30);
+         run_dcs_motion_scene(fixture, "occlusion", scene,
+             {{"object and its edges", edges}, {"rest", outside(edges)}, {"all", everywhere}},
+-            [](const std::vector<std::array<DepthTestError, 3>>& e) {
++            [](const std::vector<std::array<DepthTestError, 5>>& e) {
+                 require(e[0][2].mae <= e[0][0].mae * 1.05 + 0.5, "dcs motion: the occlusion is worse than the flow's");
+                 require(e[1][2].mae <= e[1][0].mae * 1.05 + 0.5, "dcs motion: the background is worse");
+             });
+     }
++    // DCS Control (0104): 2b. The occlusion at night (the pilot's 2X ghost on
++    // the Kola intercept): a grey aircraft (0.02-0.06 in linear light) passing
++    // 30 px over a near-black sky (about 0.002, the sky bit, the camera
++    // turning 3 px), its MVs coarse as the focus layer gets them (a texel per
++    // `divisor` pixels). Regions: the aircraft at the true instant, where it
++    // was in the previous frame only (its trailing copy) and where it is in
++    // the current frame only (leading), and the sky away from it. Once read
++    // as a UNORM image (Quad Views' focus layer: the bytes are the encoded
++    // values), once through an sRGB view (the periphery: linear light).
++    for (const UINT divisor : {10U, 3U}) {
++        for (const DXGI_FORMAT view : {kFormat, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB}) {
++            DcsMotionScene scene;
++            scene.divisor = divisor;
++            scene.layers = {
++                {1, 1.0, 0.0, 30.0, -4.0, 2, 1, 1.0, true, {0.8, 0.8, 0.8}, 0.07},
++                {3, 0.35, 0.0, 3.0, 0.0, 0, 0x80, 1.0, true, {0.6, 0.75, 1.1}, 0.006},
++            };
++            const auto at_instant = [&](double s, int grow) {
++                const DcsMotionFrame frame = dcs_motion_frame(scene, width, height, s);
++                auto mask = std::make_shared<std::vector<std::uint8_t>>(static_cast<std::size_t>(width) * height, 0);
++                for (int y = 0; y < int(height); ++y) {
++                    for (int x = 0; x < int(width); ++x) {
++                        if (frame.front[static_cast<std::size_t>(y) * width + x] != 0) continue;
++                        for (int dy = -grow; dy <= grow; ++dy) {
++                            for (int dx = -grow; dx <= grow; ++dx) {
++                                const int sx = std::clamp(x + dx, 0, int(width) - 1);
++                                const int sy = std::clamp(y + dy, 0, int(height) - 1);
++                                (*mask)[static_cast<std::size_t>(sy) * width + sx] = 1;
++                            }
++                        }
++                    }
++                }
++                return mask;
++            };
++            const auto object = at_instant(0.5, 0);
++            const auto before = at_instant(0.0, 0);
++            const auto after = at_instant(1.0, 0);
++            const auto near_object = at_instant(0.5, 40);
++            const auto make = [](auto f) { return std::function<bool(UINT, UINT)>(f); };
++            const auto index = [](UINT x, UINT y) { return static_cast<std::size_t>(y) * width + x; };
++            const std::string name = std::string("dark occlusion, divisor ") + std::to_string(divisor) +
++                (view == kFormat ? ", UNORM view" : ", sRGB view");
++            run_dcs_motion_scene(fixture, name.c_str(), scene,
++                {{"aircraft", make([=](UINT x, UINT y) { return (*object)[index(x, y)] != 0; })},
++                    {"trailing", make([=](UINT x, UINT y) {
++                        return (*before)[index(x, y)] != 0 && (*object)[index(x, y)] == 0; })},
++                    {"leading", make([=](UINT x, UINT y) {
++                        return (*after)[index(x, y)] != 0 && (*object)[index(x, y)] == 0; })},
++                    {"sky", make([=](UINT x, UINT y) { return (*near_object)[index(x, y)] == 0; })},
++                    {"all", everywhere}},
++                [](const std::vector<std::array<DepthTestError, 5>>& e) {
++                    // The quality options never make the sky worse, and the
++                    // aircraft with its trail no worse than the shipping
++                    // composition (the A/B numbers are printed).
++                    require(e[3][3].mae <= e[3][2].mae + 0.25, "dcs motion dark: the quality options worsen the sky");
++                },
++                nullptr, view);
++        }
++    }
++    // DCS Control (0104): 2c. The world beside the cockpit: a textured world
++    // moving 12 px under a still cockpit sill and canopy post (DCS's cockpit
++    // composition 5, no motion), the pair's cockpit mask made of them at 8
++    // pixels a texel (its blocks reach up to 7 px into the world). Regions:
++    // the world inside the mask's blocks (the band dcs_motion_mask_band opens
++    // to the MVs), the cockpit itself, the world elsewhere.
++    {
++        DcsMotionScene scene;
++        scene.layers = {
++            {2, 1.0, 0.0, 0.0, 0.0, 6, 5, 1.0, true, {0.45, 0.45, 0.5}},
++            {0, 1.0, 0.0, 12.0, 5.0, 0, 0, 1.0, true, {1.0, 1.0, 1.0}},
++        };
++        scene.cockpit.assign(static_cast<std::size_t>(width) * height, 0);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                scene.cockpit[static_cast<std::size_t>(y) * width + x] =
++                    dcs_motion_cover(6, x + 0.5, y + 0.5, width, height) > 0.5 ? 1 : 0;
++            }
++        }
++        auto blocks = std::make_shared<std::vector<std::uint8_t>>(static_cast<std::size_t>(width) * height, 0);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                bool any = false;
++                for (UINT by = (y / 8) * 8; by < std::min(height, (y / 8) * 8 + 8) && !any; ++by) {
++                    for (UINT bx = (x / 8) * 8; bx < std::min(width, (x / 8) * 8 + 8) && !any; ++bx) {
++                        any = scene.cockpit[static_cast<std::size_t>(by) * width + bx] != 0;
++                    }
++                }
++                (*blocks)[static_cast<std::size_t>(y) * width + x] = any ? 1 : 0;
++            }
++        }
++        const auto cockpit = std::make_shared<std::vector<std::uint8_t>>(scene.cockpit);
++        const auto index = [](UINT x, UINT y) { return static_cast<std::size_t>(y) * width + x; };
++        run_dcs_motion_scene(fixture, "world beside the cockpit", scene,
++            {{"band", std::function<bool(UINT, UINT)>([=](UINT x, UINT y) {
++                 return (*blocks)[index(x, y)] != 0 && (*cockpit)[index(x, y)] == 0; })},
++                {"cockpit", std::function<bool(UINT, UINT)>([=](UINT x, UINT y) { return (*cockpit)[index(x, y)] != 0; })},
++                {"world", std::function<bool(UINT, UINT)>([=](UINT x, UINT y) { return (*blocks)[index(x, y)] == 0; })},
++                {"all", everywhere}},
++            [](const std::vector<std::array<DepthTestError, 5>>& e) {
++                require(e[1][3].mae <= e[1][2].mae + 0.25, "dcs motion: the quality options move the cockpit");
++            });
++    }
+     // 3. Transparent overlays without MVs over a moving textured surface: a
+     // smoke puff drifting the other way, and still HUD symbology.
+     {
+@@ -1850,7 +2028,7 @@ void run_dcs_motion_fixtures() {
+         const auto smoke = region(scene, [](std::int8_t f) { return f == 1; }, 0);
+         run_dcs_motion_scene(fixture, "transparent overlays", scene,
+             {{"HUD", hud}, {"smoke", smoke}, {"all", everywhere}},
+-            [](const std::vector<std::array<DepthTestError, 3>>& e) {
++            [](const std::vector<std::array<DepthTestError, 5>>& e) {
+                 // The colour checks fall back where the MVs are not the content's.
+                 require(e[0][2].mae < e[0][1].mae, "dcs motion: the HUD takes the MVs of the surface below");
+                 require(e[0][2].mae <= e[0][0].mae * 1.1 + 1.0, "dcs motion: the HUD is worse than the flow's");
+@@ -1870,7 +2048,7 @@ void run_dcs_motion_fixtures() {
+         const auto sky_region = region(scene, [](std::int8_t f) { return f == 1; }, 0);
+         run_dcs_motion_scene(fixture, sky[0] == '1' ? "sky (its MVs)" : "sky (its flow)", scene,
+             {{"sky", sky_region}, {"terrain", outside(sky_region)}, {"all", everywhere}},
+-            [](const std::vector<std::array<DepthTestError, 3>>& e) {
++            [](const std::vector<std::array<DepthTestError, 5>>& e) {
+                 require(e[2][2].mae <= e[2][0].mae * 1.05 + 0.5, "dcs motion: the sky scene is worse than the flow's");
+             },
+             sky);
+@@ -1878,6 +2056,104 @@ void run_dcs_motion_fixtures() {
+     fixture.require_no_debug_errors();
+ }
+ 
++// DCS Control (0104): [ofxr] nvidia_temporal_hints. A sequence of frames of
++// continuous motion (a textured world sliding 20 px a frame under an object
++// moving 34 px, both at 2X), composed pair after pair by two synthesizers,
++// hints off and on: each pair's synthetic against the true middle frame (the
++// first pair has no hint to take), and the optical flow's GPU time per pair.
++// XRFG_TEST_TEMPORAL_HINTS=1, NVIDIA hardware; prints, requires only that the
++// hints never make a pair much worse.
++void run_temporal_hints_sequence(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    constexpr UINT kFrames = 9;
++    DcsMotionScene scene;
++    scene.layers = {
++        {1, 1.0, 0.0, 34.0, 6.0, 2, 1, 1.0, true, {0.9, 0.85, 0.8}},
++        {0, 1.0, 0.0, 20.0, -3.0, 0, 0, 1.0, true, {1.0, 1.0, 1.0}},
++    };
++    std::vector<DcsMotionFrame> frames, truths;
++    for (UINT k = 0; k < kFrames; ++k) frames.push_back(dcs_motion_frame(scene, width, height, double(k)));
++    for (UINT k = 0; k + 1 < kFrames; ++k) truths.push_back(dcs_motion_frame(scene, width, height, k + 0.5));
++    const ReprojectionViews views = make_reprojection_views();
++    struct Pipeline {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{};
++        std::array<ComPtr<ID3D12Resource>, 1> synthetics{};
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++        std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++        std::vector<double> mae;
++        std::vector<std::uint64_t> flow;
++    };
++    std::array<Pipeline, 2> pipelines{};
++    for (UINT index = 0; index < pipelines.size(); ++index) {
++        Pipeline& pipeline = pipelines[index];
++        for (UINT k = 0; k < kFrames; ++k) {
++            pipeline.sources[k] = create_source_texture(fixture, width, height);
++            upload_pattern(fixture, pipeline.sources[k].Get(), frames[k].image);
++        }
++        for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++        for (auto& s : pipeline.synthetics) s = create_source_texture(fixture, width, height);
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT k = 0; k < kFrames; ++k) source_pointers[k] = pipeline.sources[k].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++        std::array<ID3D12Resource*, 1> synthetic_pointers{pipeline.synthetics[0].Get()};
++        pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "temporal hints: history");
++        xrfg::D3D12NvidiaOpticalFlowOptions options{};
++        options.occlusion_aware = 1U;
++        options.fg_quality = index == 1 ? xrfg::kFgQualityTemporalHints : 0U;
++        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                    pipeline.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "temporal hints: synthesizer");
++    }
++    for (UINT k = 0; k < kFrames; ++k) {
++        for (Pipeline& pipeline : pipelines) {
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require(operation_succeeded(pipeline.history->capture(k, &capture)) &&
++                        operation_succeeded(pipeline.history->commit(capture)), "temporal hints: capture");
++            const HRESULT submitted = k == 0
++                ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                : pipeline.synthesizer->submit_pair(capture, views, views, 0, k % 2U, &ticket);
++            require(operation_succeeded(submitted), "temporal hints: submission " + std::to_string(k) + " hr " +
++                std::to_string(static_cast<unsigned long>(submitted)));
++            require_frame_start_gate(*pipeline.synthesizer, "temporal hints: frame-start gate");
++            if (k == 0) {
++                continue;
++            }
++            const StereoPattern image =
++                readback_pattern(fixture, pipeline.synthetics[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++            pipeline.mae.push_back(depth_test_error(image, truths[k - 1].image, width, height,
++                [](UINT, UINT, UINT) { return true; }).mae);
++            xrfg::D3D12NvidiaGpuTiming timing{};
++            while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                if (timing.previous_serial != 0) pipeline.flow.push_back(timing.eye0_microseconds + timing.eye1_microseconds);
++            }
++        }
++    }
++    double off = 0.0, on = 0.0;
++    std::cout << "temporal hints " << width << "x" << height << ", mae per pair (off / on):";
++    for (std::size_t i = 0; i < pipelines[0].mae.size(); ++i) {
++        std::cout << ' ' << pipelines[0].mae[i] << '/' << pipelines[1].mae[i];
++        if (i > 0) { off += pipelines[0].mae[i]; on += pipelines[1].mae[i]; }
++        require(pipelines[1].mae[i] <= pipelines[0].mae[i] * 1.5 + 0.5, "temporal hints: a pair much worse with the hints");
++    }
++    const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++        if (values.empty()) return 0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    const double pairs = double(std::max<std::size_t>(1, pipelines[0].mae.size() - 1));
++    std::cout << "; mean of pairs 2+: " << off / pairs << " / " << on / pairs << "; flow median "
++              << median(pipelines[0].flow) << " / " << median(pipelines[1].flow) << " us" << std::endl;
++    fixture.require_no_debug_errors();
++}
++
+ // DCS Control (0036): the MVs' GPU cost on hardware at a headset's eye image
+ // (XRFG_TEST_DCS_MOTION_BENCH). Two synthesizers on the same frames,
+ // interleaved pair by pair: the masks without MVs and the masks with them; the
+@@ -1905,9 +2181,23 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+         std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+         std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
+         std::vector<std::uint64_t> composition;
++        std::vector<std::uint64_t> pack, flow, total; // DCS Control (0104)
+     };
++    // DCS Control (0104): XRFG_TEST_FG_QUALITY_BENCH=<bits>: both pipelines with
++    // the MVs, the second with those quality options; XRFG_TEST_SRGB_VIEW=1:
++    // the images read through an sRGB view (a periphery swapchain's).
++    std::uint32_t quality_bits = 0U;
++    bool quality_bench = false;
++    if (char bits[32]{}; GetEnvironmentVariableA("XRFG_TEST_FG_QUALITY_BENCH", bits, sizeof(bits)) != 0) {
++        quality_bits = static_cast<std::uint32_t>(std::strtoul(bits, nullptr, 0));
++        quality_bench = true;
++    }
++    const DXGI_FORMAT view_format = GetEnvironmentVariableA("XRFG_TEST_SRGB_VIEW", nullptr, 0) != 0
++        ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : kFormat;
+     auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
+     std::array<Pipeline, 2> pipelines{};
++    const DXGI_FORMAT saved_texture_format = g_test_texture_format;
++    g_test_texture_format = view_format == kFormat ? kFormat : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+     for (UINT index = 0; index < pipelines.size(); ++index) {
+         Pipeline& pipeline = pipelines[index];
+         for (UINT frame = 0; frame < kFrames; ++frame) {
+@@ -1926,15 +2216,17 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+                     D3D12_RESOURCE_STATE_RENDER_TARGET)), "motion bench: history");
+         xrfg::D3D12NvidiaOpticalFlowOptions options{};
+         options.cockpit_mask = true;
+-        options.dcs_motion = index == 1;
++        options.dcs_motion = index == 1 || quality_bench;
++        options.fg_quality = index == 1 ? quality_bits : 0U; // DCS Control (0104)
+         pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
+         require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
+                     pipeline.history,
+                     std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
+                     std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
+-                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    view_format, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                     xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "motion bench: synthesizer");
+     }
++    g_test_texture_format = saved_texture_format;
+     // Two mask frames with MVs, A's pointing at B's display time and B's at
+     // A's, made afresh per pair (their display times advance).
+     const auto with_mvs_b = make_dcs_motion_frame(fixture, scene, width, height, views, 0, 0, true, counters);
+@@ -1975,6 +2267,9 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+             while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
+                 if (timing.previous_serial == 0) continue;
+                 pipeline.composition.push_back(timing.composition_microseconds);
++                pipeline.pack.push_back(timing.pack_microseconds); // DCS Control (0104)
++                pipeline.flow.push_back(timing.eye0_microseconds + timing.eye1_microseconds);
++                pipeline.total.push_back(timing.total_microseconds);
+             }
+         }
+     }
+@@ -1985,6 +2280,16 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+         std::sort(values.begin(), values.end());
+         return values[values.size() / 2];
+     };
++    if (quality_bench) { // DCS Control (0104)
++        std::cout << "fg quality bench " << width << "x" << height << " x2 "
++                  << (view_format == kFormat ? "UNORM" : "sRGB") << " view, quality " << quality_bits
++                  << ": composition median " << median(pipelines[0].composition) << " / " << median(pipelines[1].composition)
++                  << " us, pack " << median(pipelines[0].pack) << " / " << median(pipelines[1].pack)
++                  << " us, flow (both eyes) " << median(pipelines[0].flow) << " / " << median(pipelines[1].flow)
++                  << " us, whole pair " << median(pipelines[0].total) << " / " << median(pipelines[1].total)
++                  << " us (off / on, " << pipelines[1].composition.size() << " pairs)" << std::endl;
++        return;
++    }
+     const std::uint64_t masked = median(pipelines[0].composition);
+     const std::uint64_t motion = median(pipelines[1].composition);
+     const double pixels = 2.0 * width * height * double(std::max<std::uint64_t>(1, counters->motion_pairs.load()));
