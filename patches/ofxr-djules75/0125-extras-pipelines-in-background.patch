@@ -1,23 +1,42 @@
 Live round 2 fix (DCS Control, 2026-11-25): turning a frame-generation quality key on no longer stalls the frame thread.
 - 0123 made each _extras twin pipeline on its first use: the first pair after a quality key (or the fill) was turned on
   held the frame thread 369-824 ms (synthesis_pair slow step at +0.4..+1.6 s in live round 2).
-- With DCS's motion vectors on the NVIDIA backend (dcs_motion_enabled) and every key off at creation, the synthesizer
-  starts a background build of every registered twin right after its pipelines are made (start_extras_build: one
-  below-normal thread, its own references to the device, root signatures and descriptions). A pair that needs a twin
+- With DCS's motion vectors on the NVIDIA backend (dcs_motion_enabled) and every key off at creation, the first pair that
+  needs a twin (a quality key or the fill turned on from all off) starts a background build of every registered twin
+  (start_extras_build: one below-normal thread, its own references to the device, root signatures and descriptions);
+  nothing is built before. A pair that needs a twin
   not made yet composes with the plain pipeline and asks for that twin next (urgent), so a key takes effect a pair or
   two later and never waits on the frame thread. finish_extras_build joins the thread once it has ended (per pair: a
   null check and an atomic load). A rebuild leaves a running build to stop after its current pipeline; the destructor
   joins it. A synthesizer made with a key already on makes the twins at creation, as in 0123; without DCS motion they
   are still made on first use.
-- Keys off composes exactly as 0123 / 0.7.0 (no twin is bound). Cost: a one-time background pipeline build (about 20
-  ms with the driver's shader cache warm; cold, the time 0123 spent on the frame thread, now off it) and the twins'
-  pipeline objects held for the session (driver memory for at most 40 pixel-shader pipelines, estimated a few MB, not
-  measured; no render targets or buffers).
+- Keys off for the whole session composes exactly as 0123 / 0.7.0: no twin is made or bound, no extra pipeline or driver
+  memory. Once a key is turned on: a one-time background pipeline build (about 20 ms with the driver's shader cache warm;
+  cold, the time 0123 spent on the frame thread, now off it) and the twins' pipeline objects held until the next rebuild
+  (driver memory for at most 40 pixel-shader pipelines, estimated a few MB, not measured; no render targets or buffers).
 - D3D12FrameSynthesizer::FgSettings: extras_building, extras_build_us, extras_binds.
 - tests/fg_extras_async.inc (XRFG_TEST_FG_EXTRAS_ASYNC, label alone, NVIDIA hardware): a quality key turned on at the
-  first pair; every submission timed on the calling thread against the same run with every key off (at most 5 ms
+  first pair (no build before it, none in the keys-off run); every submission timed on the calling thread against the same run with every key off (at most 5 ms
   more), and the twins bound within the run.
 
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b870561..d325ee9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1994,6 +1994,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         add_test(NAME xrfg_d3d12_parallel_eye_synthesis COMMAND xrfg_d3d12_history_tests)
+         set_tests_properties(xrfg_d3d12_parallel_eye_synthesis PROPERTIES
+             ENVIRONMENT "XRFG_TEST_PARALLEL_EYES=1" TIMEOUT 600 SKIP_RETURN_CODE 77)
++        # DCS Control (0125): a quality key turned on right after the start
++        # never waits for the _extras compositions on the submitting thread
++        # (made in the background at creation with DCS's MVs); timed, so run
++        # alone. NVIDIA hardware, skipped without one.
++        add_test(NAME xrfg_d3d12_fg_extras_async COMMAND xrfg_d3d12_history_tests)
++        set_tests_properties(xrfg_d3d12_fg_extras_async PROPERTIES
++            ENVIRONMENT "XRFG_TEST_FG_EXTRAS_ASYNC=1" LABELS alone TIMEOUT 300 SKIP_RETURN_CODE 77)
+         # DCS Control (0057): the benches (GPU times printed, nothing
+         # required), labelled bench: `ctest -L bench` runs them, a build
+         # leaves them out (-LE bench). Skipped without NVIDIA hardware.
 diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
 index 8e20160..77b307d 100644
 --- a/include/xrfg/d3d12_frame_synthesizer.hpp
@@ -37,17 +56,20 @@ index 8e20160..77b307d 100644
      [[nodiscard]] FgSettings fg_settings() const noexcept;
      // Foveated layers: the session's ledger of queued Waits (see
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
-index 663eced..3eca163 100644
+index 663eced..8115da3 100644
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
-@@ -2078,11 +2078,104 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2078,11 +2078,114 @@ struct D3D12FrameSynthesizer::Impl {
          }
          return false;
      }
 +    // DCS Control (0125): with DCS's motion vectors (NVIDIA), the twins are
-+    // made at creation on a thread of their own (start_extras_build), off the
-+    // frame thread: made there on first use, they held the first pair after
-+    // a key was turned on 369-824 ms. A pair that needs a twin not made yet
++    // made on a thread of their own (start_extras_build), off the frame
++    // thread: made there on first use, they held the first pair after a key
++    // was turned on 369-824 ms. The build starts with the first pair that
++    // needs a twin (a quality key or the fill turned on from all off), so a
++    // session that never turns one on makes no twin and holds no extra
++    // pipeline, as 0.7.0. A pair that needs a twin not made yet
 +    // composes with the plain pipeline and asks for that twin next (urgent),
 +    // so the key takes effect a pair or two later; each twin is taken over as
 +    // it is ready (extras_twin). The build has its own references (device,
@@ -69,6 +91,13 @@ index 663eced..3eca163 100644
 +    std::vector<std::thread> retired_extras_builds; // joined at the destructor
 +    std::uint64_t extras_build_microseconds{};       // the last build's, once it is done
 +    std::uint64_t extras_binds{};                    // compositions recorded with a twin (tests)
++    bool extras_build_started{};                     // the background build was started for these twins
++    [[nodiscard]] bool extras_twin_missing() const noexcept {
++        for (const ExtrasTwin& twin : extras_twins) {
++            if (twin.pipeline == nullptr && !twin.failed) return true;
++        }
++        return false;
++    }
 +    void retire_extras_build() noexcept {
 +        if (extras_build != nullptr) extras_build->stop.store(true, std::memory_order_relaxed);
 +        extras_build.reset();
@@ -147,7 +176,7 @@ index 663eced..3eca163 100644
                  FAILED(device->CreateGraphicsPipelineState(&twin.description, IID_PPV_ARGS(twin.pipeline.GetAddressOf())))) {
                  twin.failed = true; // the keys then do nothing for this composition
              }
-@@ -2090,9 +2183,27 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2090,9 +2193,34 @@ struct D3D12FrameSynthesizer::Impl {
          }
          return pipeline;
      }
@@ -170,13 +199,20 @@ index 663eced..3eca163 100644
 -        return pair_extras() ? extras_twin(pipeline) : pipeline;
 +        finish_extras_build(); // DCS Control (0125)
 +        if (!pair_extras()) return pipeline;
++        // DCS Control (0125): the first pair that needs a twin starts the
++        // background build (a thread start, no pipeline made here); until a
++        // twin is there the pair composes with the plain pipeline.
++        if (!extras_build_started && extras_build == nullptr && dcs_motion_enabled() && extras_twin_missing()) {
++            extras_build_started = true;
++            start_extras_build();
++        }
 +        ID3D12PipelineState* const twin = extras_twin(pipeline);
 +        if (twin != pipeline) ++extras_binds;
 +        return twin;
      }
      // Every twin made now (the options have a key on at creation).
      void make_extras_twins() noexcept {
-@@ -2531,6 +2642,12 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2531,6 +2659,12 @@ struct D3D12FrameSynthesizer::Impl {
          if (cursor_capture_thread.joinable()) {
              cursor_capture_thread.join();
          }
@@ -189,29 +225,26 @@ index 663eced..3eca163 100644
          if (hud_capture_thread.joinable()) { // DCS Control (0053)
              hud_capture_thread.join();
          }
-@@ -7820,6 +7937,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -7820,13 +7954,18 @@ struct D3D12FrameSynthesizer::Impl {
              step_started = now;
          };
  
 +        retire_extras_build(); // DCS Control (0125): a build for the old twins is left to finish
          extras_twins.clear(); // DCS Control (0123): registered again with the pipelines
++        extras_build_started = false; // DCS Control (0125): a key turned on later builds the new ones
          result = create_root_signature_and_pipelines(node_mask);
          if (FAILED(result)) {
-@@ -7827,8 +7945,13 @@ struct D3D12FrameSynthesizer::Impl {
+             return result;
          }
          // DCS Control (0123): the _extras compositions now when the options
          // already have a quality key or the fill (else on first use).
-+        // DCS Control (0125): with DCS's motion vectors and every key off,
-+        // made in the background now, so a key turned on later never waits
-+        // for them on the frame thread.
++        // DCS Control (0125): with every key off none is made: the first pair
++        // a key is turned on for starts their background build (with_extras),
++        // so it never waits for them on the frame thread.
          if (quality_bits() != 0U || (nvidia_options.dcs_motion_occlusion_fill != 0U && dcs_motion_enabled())) {
              make_extras_twins();
-+        } else if (dcs_motion_enabled()) {
-+            start_extras_build();
          }
-         step_done(1);
-         result = device->CreateFence(
-@@ -11285,6 +11408,9 @@ D3D12FrameSynthesizer::FgSettings D3D12FrameSynthesizer::fg_settings() const noe
+@@ -11285,6 +11424,9 @@ D3D12FrameSynthesizer::FgSettings D3D12FrameSynthesizer::fg_settings() const noe
              settings.fill = impl_->nvidia_options.dcs_motion_occlusion_fill;
              settings.fill_active =
                  impl_->dcs_motion_enabled() && impl_->dcs_motion_previous_pipeline != nullptr;
@@ -259,13 +292,13 @@ index 836e248..8636c3d 100644
              D3D12WarpFixture bench_fixture(true);
 diff --git a/tests/fg_extras_async.inc b/tests/fg_extras_async.inc
 new file mode 100644
-index 0000000..06eff66
+index 0000000..df351fd
 --- /dev/null
 +++ b/tests/fg_extras_async.inc
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,126 @@
 +// DCS Control (0125): a quality key turned on right after the start, with DCS's cockpit mask and motion vectors (the
-+// NVIDIA backend), never holds the submitting thread for the _extras compositions: they are made in the background at
-+// creation and the key takes effect once they are there. Every submission is timed on the calling thread; the run with
++// NVIDIA backend), never holds the submitting thread for the _extras compositions: the first pair that needs them starts
++// their background build and the key takes effect once they are there; with every key off none is ever made. Every submission is timed on the calling thread; the run with
 +// the key turned on at the first pair may not be slower than the same run with every key off by more than 5 ms at any
 +// pair, and the twins must be bound within the run (XRFG_TEST_FG_EXTRAS_ASYNC, NVIDIA hardware).
 +void run_fg_extras_async(D3D12WarpFixture& fixture) {
@@ -373,35 +406,19 @@ index 0000000..06eff66
 +        if (!key_on) {
 +            const auto settings = synthesizer->fg_settings();
 +            require(settings.extras_binds == 0, "fg extras async: every key off binds no twin");
++            require(!settings.extras_building && settings.extras_build_us == 0, "fg extras async: every key off builds no twin");
 +        }
 +        return outcome;
 +    };
 +    static_cast<void>(run(false)); // warm-up: first-use costs of the device and the flow, not the keys
 +    const Run keyed = run(true);
 +    const Run plain = run(false);
-+    std::cout << "fg extras async: key at pair 1 (build " << (keyed.building_at_key ? "still running" : "done")
++    std::cout << "fg extras async: key at pair 1 (build " << (keyed.building_at_key ? "running before the key" : "not started before the key")
 +              << "), first keyed submission " << keyed.first_key_submit_ms << " ms, max " << keyed.max_submit_ms
 +              << " ms; keys off max " << plain.max_submit_ms << " ms; twins bound at pair " << keyed.bound_at_pair
 +              << ", background build " << keyed.build_us / 1000U << " ms" << std::endl;
++    require(!keyed.building_at_key, "fg extras async: no build before a key is on");
 +    require(keyed.bound_at_pair > 0, "fg extras async: the key took effect within the run");
 +    require(keyed.max_submit_ms <= plain.max_submit_ms + 5.0,
 +            "fg extras async: turning a key on held a submission more than 5 ms beyond the keys-off run");
 +}
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 9b14458..d325ee9 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -1985,6 +1994,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
-         add_test(NAME xrfg_d3d12_parallel_eye_synthesis COMMAND xrfg_d3d12_history_tests)
-         set_tests_properties(xrfg_d3d12_parallel_eye_synthesis PROPERTIES
-             ENVIRONMENT "XRFG_TEST_PARALLEL_EYES=1" TIMEOUT 600 SKIP_RETURN_CODE 77)
-+        # DCS Control (0125): a quality key turned on right after the start
-+        # never waits for the _extras compositions on the submitting thread
-+        # (made in the background at creation with DCS's MVs); timed, so run
-+        # alone. NVIDIA hardware, skipped without one.
-+        add_test(NAME xrfg_d3d12_fg_extras_async COMMAND xrfg_d3d12_history_tests)
-+        set_tests_properties(xrfg_d3d12_fg_extras_async PROPERTIES
-+            ENVIRONMENT "XRFG_TEST_FG_EXTRAS_ASYNC=1" LABELS alone TIMEOUT 300 SKIP_RETURN_CODE 77)
-         # DCS Control (0057): the benches (GPU times printed, nothing
-         # required), labelled bench: `ctest -L bench` runs them, a build
-         # leaves them out (-LE bench). Skipped without NVIDIA hardware.

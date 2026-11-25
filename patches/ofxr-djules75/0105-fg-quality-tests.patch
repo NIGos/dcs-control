@@ -16,7 +16,7 @@ diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
              section.start_only[13] == L"C:\\DCS W\u00e9rld\\bin",
          "live ini: UTF-16 values, a non-ASCII path kept");
 +    // DCS Control (0104): the quality keys, one bit each, as read_fg_quality reads them.
-+    write("[ofxr]\ndcs_motion_sky_occlusion=1\nnvidia_edge_choice=0\ndcs_motion_mask_band=1\nnvidia_temporal_hints=1\n");
++    write("[ofxr]\ndcs_motion_sky_occlusion=1\nnvidia_edge_choice=0\ndcs_motion_mask_band=1\nnot_a_known_key_test_only=1\n");
 +    section = same_as_readers("live ini: as the readers (quality keys)");
 +    require(section.fg_quality == (xrfg::kFgQualitySkyOcclusion | xrfg::kFgQualityMaskBand) &&
 +            xrfg::implicit_layer::read_fg_quality(directory) == section.fg_quality,
