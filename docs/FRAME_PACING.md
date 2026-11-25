@@ -55,6 +55,48 @@ In the first flight with 0010 (2026-10-06) only 87 of 8286 pairs were redrawn: 6
 
 **Optical flow settings while DCS runs** (0066): OFXR checks `ofxr_bridge.ini` every 250 ms on a thread of its own (only when the file's time or size changed). A change of `nvidia_preset`, `nvidia_input_scale`, `nvidia_bidirectional` or `nvidia_occlusion_aware` is taken in at once: the next frame rebuilds the synthesis with it (expect one short hitch, as for any rebuild). The log gets `op=live_settings result=1`: `a` the new values and `b` the old, packed as the preset (0 slow, 1 medium, 2 fast; bits 0–7), the input scale in percent (8–15), bidirectional (16) and occlusion handling (24–31); `c` which keys changed (1 preset, 2 scale, 4 bidirectional, 8 occlusion; bits 0–7) and the control revision (from bit 32). The `op=embedded_configuration` record with that revision in `a` follows, its result the rebuild's. Every other key waits for the next launch; when one differs from what the session started with, the log gets `op=live_settings result=2` with `c` naming them (1 enabled, 2 backend, 4 motion_vectors, 8 d3d11_bridge, 16 deep_pipeline, 32 pipelined_deep_hold, 64 async_arm, 128 adaptive_cadence, 256 hud_symbology, 512 cockpit_mask, 1024 cockpit_depth, 2048 dcs_motion, 4096 smooth_cursor, 8192 cursor_templates, 16384 diag_vram, 32768 visibility_mask, 65536 parallel_eye_synthesis; `c=0` when they are back). `triple_frame_gen`, `adaptive_frame_gen` and the `[overlay]` position were live already. DCS Control writes only the scale, bidirectional and occlusion keys live: a preset change re-initialises the flow (R148, DCS 2.9.31: `synthesis_initialize` 5.5 s, a 6.8 s DCS frame gap), so the app leaves it for the next launch; scale and bidirectional cost one frame of about 0.5 s.
 
+## Generated-frame quality options
+
+OFXR patches 0104 (the options) and 0105 (their tests): eight `[ofxr]` keys, one per option, NVIDIA Optical Flow only, all
+0 by default (the Frame generation page, Image quality, **Fine-tune**). With every key at 0 each generated frame is the
+same, byte for byte, as without the patches (the fixtures' output hashes). OFXR follows a change of them live like the flow
+keys (a rebuild, `op=live_settings result=1` with bit 16 in `c` and the keys' bits in bits 32-39 of `a` and `b`); the app
+writes them for the next launch.
+
+| Key (app setting) | What it does |
+|---|---|
+| `dcs_motion_sky_occlusion` (Clean edges against the sky) | On DCS's motion vectors: where something crossed the sky between the two frames, one frame's sample instead of a blend of both (the half-bright copy trailing an aircraft at night). |
+| `nvidia_edge_choice` (Sharper moving edges) | Where two motions meet, the flow vector whose two ends agree best of the four around the pixel and their mix. |
+| `flow_input_srgb` (Better motion in the dark) | On an sRGB swapchain (read in linear light) the optical flow gets sRGB-encoded brightness, as it already does on Quad Views' focus layer. |
+| `dcs_motion_mask_band` (Cleaner world beside the cockpit) | DCS's motion vectors also in the cockpit mask's margin where DCS's class atlas says world. |
+| `perceptual_checks` (Judge dark colours like bright ones) | The colour checks compare sRGB-encoded values on an sRGB swapchain. |
+| `low_confidence_current` (No double image where motion is unsure) | Where the flow is not trusted, the current frame instead of both frames blended. |
+| `nvidia_temporal_hints` (Reuse the last motion) | The flow engine starts from the previous pair's vectors (reset after a prime, a gap, a focus box that moved). |
+| `foveated_fade_flow` (Match the focus edge) | Foveated frame generation: the focus layer's fade takes the periphery layer's vectors. |
+
+Offline evidence (error against the true middle frame, mean absolute error in 8-bit sRGB codes; the DCS motion fixtures
+at 640x480 on the RTX card, `XRFG_TEST_DCS_MOTION=1`):
+
+- Night occlusion (a grey aircraft at 0.02-0.06 linear passing 30 px over a 0.002 sky, MVs at 10 or 3 pixels a texel), its
+  trailing copy: 6.3-11.1 with the composition as it ships, 0.02-0.08 with `dcs_motion_sky_occlusion`. The aircraft itself
+  0.42-0.50 -> 0.41-0.44; the strip ahead of it (10 px a texel) 1.7-2.4 -> 3.0: the coarse class map's edge.
+- `nvidia_edge_choice`: the NVIDIA occlusion fixtures' moving edges 9.2-11.0 -> 7.9-10.0 (object, both moving, thin bar,
+  Medium); never worse in any of them.
+- `flow_input_srgb`, flow alone on the night scene through an sRGB view: 0.35 -> 0.10 overall (sky 0.28 -> 0.02); bright
+  scenes unchanged.
+- `dcs_motion_mask_band`: the world inside the mask's blocks 6.7 -> 5.2, the cockpit unchanged (0).
+- `perceptual_checks`: night trail 8.3 -> 7.3, but thin wires through an sRGB view 19.7 -> 22.1: not recommended alone.
+- `low_confidence_current`: helps the night trail on the flow (5.6 -> 1.8) but every bright scene is worse (moving edges
+  9.2 -> 11.9): not recommended.
+- `nvidia_temporal_hints`: no measurable change on a sequence of continuous motion (0.738 -> 0.738).
+- `foveated_fade_flow`: the foveated bench's fade region 0.906 -> 0.911 (the periphery's vectors are coarser): no gain.
+- The four that helped together (`dcs_motion_sky_occlusion`, `flow_input_srgb`, `nvidia_edge_choice`,
+  `dcs_motion_mask_band`): no bright fixture worse (HUD, smoke, thin wires, sky unchanged), the MVs' fallback to the flow
+  0-5.6 % of the pixels.
+
+GPU (5424x5356 per eye, two eyes, 240 pairs, `XRFG_TEST_DCS_MOTION_BENCH=1 XRFG_TEST_FG_QUALITY_BENCH=<bits>`): the
+composition (1.42 ms) and the pack (0.15 ms) the same with any of the options within the bench's noise (10 and 3 us). No
+new resource: no video memory.
 ## Offline evidence and limits
 
 The release's manager and actual WebView2 tests cover both runtime routes, custom/derived caps, precise numeric values, preview invalidation, applied launch checks, restoration and the combined pipeline with the supplied signed DLSS-NR runtime. Native tests exercise OFXR's SteamVR continuous presenter while the application deliberately pauses below the half-refresh target. The exact bundled V116 DLL also passes this delayed-application fixture: presentation continues and frame order is retained. Repeated presentation during a pause is not fresh frame generation.
