@@ -291,7 +291,7 @@ void TestMotionContract() {
   Check(sizeof(cmv::Header) == 2048 && sizeof(cmv::MotionSlot) == 184 && sizeof(cmv::MotionView) == 64 &&
             offsetof(cmv::Header, slot) == 160 && offsetof(cmv::Header, readerHeartbeatQpc) == 2040 &&
             offsetof(cmv::Header, classTextureHandle) == 128 && cmv::block_magic == 0x564D4344u &&
-            cmv::format_r16g16_float == 34 && cmv::format_r8_uint == 62 && cmv::max_views == 2,
+            cmv::format_r16g16_float == 34 && cmv::format_r8_uint == 62 && cmv::periphery_views == 2 && cmv::max_views == 4,
         "motion contract: Header 2048 (slots at 160, reader heartbeat at 2040), MotionSlot 184, MotionView 64, 'DCMV'");
   cmv::Header blk{}, out{};
   Check(!cmv::seqlock_read(&blk, out), "motion contract: a never-written block reads as no data");
@@ -807,7 +807,7 @@ void TestR74Contract() {
             offsetof(cmv::Header, slotTime) == 712 && sizeof(cdp::Header) == 2048 && sizeof(cmv::Header) == 2048 &&
             offsetof(cdp::Header, readerHeartbeatQpc) == 2040 && offsetof(cmv::Header, readerHeartbeatQpc) == 2040 &&
             offsetof(cdp::SlotTime, simTime) == 32 && offsetof(cmv::SlotTime, flags) == 40 &&
-            cdp::contract_revision == 2 && cmv::contract_revision == 3 && cdp::header_flags::slot_time == 64 &&
+            cdp::contract_revision >= 2 && cmv::contract_revision >= 3 && cdp::header_flags::slot_time == 64 &&
             cmv::header_flags::slot_time == 128 && cdp::time_flags::pose_observed == cmv::time_flags::pose_observed &&
             cdp::time_flags::sim_stable == 16 && cmv::time_flags::sim_stable == 16,
         "R74a contract: SlotTime 48 bytes at depth 1808 / motion 712 (sizes 2048, heartbeat 2040 unchanged), revisions "
@@ -1653,7 +1653,7 @@ void TestPipeline() {
               t->flags == wantFlags && t->locateCalls == 2 && t->simTime == 100.011 && t->poseDisplayTime == 7400 &&
               t->poseQpc == wantRec.q0 && t->poseReturnQpc == wantRec.q1 && t->poseQpc < hd.slot[s].qpcCommit &&
               (hd.flags & cdp::header_flags::slot_time) && (hm.flags & cmv::header_flags::slot_time) &&
-              hd.revision == 2 && hm.revision == 3,
+              hd.revision == cdp::contract_revision && hm.revision == cmv::contract_revision,
           "R74a commit: slotTime of the frame in BOTH companions (byte-identical, seq == the slot's): the call with the "
           "frame's displayTime and DCS's submitted view 0 orientation (matched, 2 calls: ambiguous), its entry / return "
           "QPC before the commit, model time at its entry; the next frame's call ignored; header flags, revisions");

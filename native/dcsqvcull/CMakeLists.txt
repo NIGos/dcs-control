@@ -103,6 +103,14 @@ add_test(NAME DcsQvBinauralCoreAvx2Object
     COMMAND pwsh -NoProfile -File ${DCSQV_BINAURAL_DIR}/test/check_avx2_object.ps1 "$<TARGET_OBJECTS:DcsQvBinauralCore>")
 set_tests_properties(DcsQvBinauralCoreAvx2Object PROPERTIES PASS_REGULAR_EXPRESSION " 0 failure\\(s\\)")
 
+# Motion contract revision 4 (docs/FOCUS_MOTION.md): the vendored header compiles on its own, keeps the revision 3
+# layout for older readers, and its reader helpers (focus views, depth plane, previous slot) behave as documented.
+add_executable(DcsQvMotionContractTests test/motion_contract_test.cpp)
+target_compile_options(DcsQvMotionContractTests PRIVATE /W4 /WX /O2 /EHsc)
+target_compile_definitions(DcsQvMotionContractTests PRIVATE NOMINMAX)
+add_test(NAME DcsQvMotionContractTests COMMAND DcsQvMotionContractTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
+set_tests_properties(DcsQvMotionContractTests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 failure\\(s\\)" TIMEOUT 60)
+
 # The detour stub's code and pointer pages: a hot reload must never leave the stub without execute rights.
 add_executable(DcsQvCullDetourTests test/detour_test.cpp)
 target_compile_options(DcsQvCullDetourTests PRIVATE /O2 /EHa)
