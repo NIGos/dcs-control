@@ -18,6 +18,11 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 | --- | --- | --- |
 | ![Engine Optimizations](docs/screenshots/engine-optimizations.png) | ![Quad Views](docs/screenshots/quad-views-pimax-play.png) | ![Back to stock DCS](docs/screenshots/recovery-original-files.png) |
 
+<p align="center">
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
+  <sub><b>User Manual (PDF, 44 pages)</b>: Quick Start, every page of the app, the Engine Optimizations explained</sub>
+</p>
+
 ## What's new in 0.7
 
 **New in 0.7.0:** 0.6.7 was never released, so coming from 0.6.6 all of this is new. Full list: [release notes](docs/RELEASE_NOTES.md).
