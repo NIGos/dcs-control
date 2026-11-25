@@ -135,6 +135,9 @@ struct DiagRing {
 double g_lastListenerQ[4] = {0, 0, 0, 1};
 float g_lastHeadQ[4] = {0, 0, 0, 1};
 bool g_diagHave = false;
+// The context whose listener the diagnostic reads: the first 3D one (context 0 is DCS's 2D one, whose listener never
+// turns with the head; the world's 3D sounds play on 2 or 3). -1: none yet. Sim thread writes, control thread logs it.
+std::atomic<int> g_diagCtx{-1};
 
 inline double QuatAngle(const double a[4], const double b[4]) {
   const double d = std::fabs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
@@ -174,10 +177,20 @@ void SimFrame(uint32_t f) {
     memcpy(e.t, pe.position, sizeof(e.t));
     e.poseBase = pe.baseSpace;
   }
-  // Diagnostic: the listener of context 0 against the head pose, per frame.
-  if (e.ctxArray && e.ctxCount > 0) {
+  // Diagnostic: the listener of the first 3D context against the head pose, per frame.
+  int diagCtx = -1;
+  for (int i = 0; e.ctxArray && i < e.ctxCount && i < audv::off::kMaxContexts; ++i)
+    if (audv::Rd<uint8_t>(e.ctxArray + audv::off::kCtxStride * i, audv::off::kCtxIs2D) == 0) {
+      diagCtx = i;
+      break;
+    }
+  if (diagCtx != g_diagCtx.load(std::memory_order_relaxed)) {
+    g_diagCtx.store(diagCtx, std::memory_order_relaxed);
+    g_diagHave = false;  // another listener: no turn across the change
+  }
+  if (diagCtx >= 0) {
     double lq[4];
-    memcpy(lq, e.ctxArray + audv::off::kCtxQuat, sizeof(lq));
+    memcpy(lq, e.ctxArray + audv::off::kCtxStride * diagCtx + audv::off::kCtxQuat, sizeof(lq));
     const double hq[4] = {e.q[0], e.q[1], e.q[2], e.q[3]};
     const double lh[4] = {g_lastHeadQ[0], g_lastHeadQ[1], g_lastHeadQ[2], g_lastHeadQ[3]};
     if (g_diagHave && e.poseValid) {
@@ -894,9 +907,9 @@ void LogListenerVsPose() {
     sl += g_diag.listener[(h - 1 - i) & 255];
     sh += g_diag.headTurn[(h - 1 - i) & 255];
   }
-  Log("audio: listener-vs-pose: %u frames, listener turn %.2f deg/frame, head turn %.2f deg/frame, best match at %d "
-      "frame(s) (correlation %.2f)",
-      n, sl / n * 57.29578, sh / n * 57.29578, bestLag, best);
+  Log("audio: listener-vs-pose: %u frames, ctx %d, listener turn %.2f deg/frame, head turn %.2f deg/frame, best match "
+      "at %d frame(s) (correlation %.2f)",
+      n, g_diagCtx.load(std::memory_order_relaxed), sl / n * 57.29578, sh / n * 57.29578, bestLag, best);
 }
 
 std::wstring g_voicesCsv;
@@ -941,6 +954,8 @@ struct Loop {
   ULONGLONG lastFlag = 0, lastStats = 0, lastCtx = 0, lastDiag = 0, lastVoices = 0, lastInstall = 0, lastCfg = 0, lastWorld = 0;
   bool keyWas = false;
   uint64_t statsHrtf = 0, statsPose = 0;
+  // The "audio: idle" line's previous counts (blocks, armed blocks, pan calls, refusals by reason).
+  uint64_t idleBlocks = 0, idleArmed = 0, idlePan = 0, idleRefused[audr::kRefuseCount] = {};
   std::string passText;  // the "audio: off" reason logged for blocks too long (empty: none)
 };
 Loop g_loop;
@@ -1085,7 +1100,26 @@ void ControlTick() {
           static_cast<unsigned long long>(g_cnt.panMedian.load()), static_cast<unsigned long long>(g_cnt.panMismatch.load()),
           static_cast<unsigned long long>(g_cnt.overruns.load()), pose);
       L.statsHrtf = hc;
+    } else if (g_cfgRead.cfg.binaural && !g_userOff.load() && g_offReason.load() == kOffNone) {
+      // Binaural on and nothing rendered in 3D for 10 s: what reached the module meanwhile, so a silent session can be
+      // told apart (no blocks: not DCS's output; blocks but none armed: no binding; pan calls all refused: why).
+      const uint64_t blocks = g_cnt.blocks.load(), armed = g_cnt.armedBlocks.load(), pan = g_cnt.panCalls.load();
+      uint64_t refused[audr::kRefuseCount];
+      for (int i = 0; i < audr::kRefuseCount; ++i) refused[i] = g_cnt.refused[i].load() - L.idleRefused[i];
+      const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+      Log("audio: idle, blocks %llu (armed %llu), pan calls %llu; refused: off %llu, output %llu, not 3D %llu, offline %llu, "
+          "not mono %llu, context %llu, distance %llu, output not stereo %llu, gains %llu, pan law %llu, not at start "
+          "%llu, limit %llu",
+          u(blocks - L.idleBlocks), u(armed - L.idleArmed), u(pan - L.idlePan), u(refused[audr::kRefuseOff]),
+          u(refused[audr::kRefuseOutput]), u(refused[audr::kRefuseNot3D]), u(refused[audr::kRefuseOffline]),
+          u(refused[audr::kRefuseNotMono]), u(refused[audr::kRefuseContext]), u(refused[audr::kRefuseDistance]),
+          u(refused[audr::kRefuseStereoOut]), u(refused[audr::kRefuseGains]), u(refused[audr::kRefusePanMismatch]),
+          u(refused[audr::kRefuseNotCreation]), u(refused[audr::kRefuseLimit]));
     }
+    L.idleBlocks = g_cnt.blocks.load();
+    L.idleArmed = g_cnt.armedBlocks.load();
+    L.idlePan = g_cnt.panCalls.load();
+    for (int i = 0; i < audr::kRefuseCount; ++i) L.idleRefused[i] = g_cnt.refused[i].load();
   }
   if (g_installed.load() && now - L.lastDiag >= 60000) {
     L.lastDiag = now;

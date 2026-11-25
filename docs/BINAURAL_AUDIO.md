@@ -434,7 +434,7 @@ and the time of the moment.
 - loopback recording of a yaw sweep: ILD/ITD monotonic, front/back asymmetry, lag ≤ 1 block;
 - zero `render time exceeded` lines;
 - toggling mid-flight gives no click above −40 dBFS;
-- the log's per-context lines and `listener-vs-pose` settle the open [A] items of the hook spec (context ids, listener
+- the log's per-context lines and `listener-vs-pose` (the listener of the first 3D context, named as `ctx <n>` in the line; context 0 is DCS's 2D one) settle the open [A] items of the hook spec (context ids, listener
   lag).
 
 Then the user's blind A/B: stock vs Windows Sonic vs binaural, with six cues (wingman behind, rotor overhead, switch
@@ -638,6 +638,7 @@ redacted in the diagnostic package).
 | `audio: off (<id> not found (<why>))` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
 | `audio: kill switch (<by>): binaural OFF (...)` / `... binaural ON` | the kill switch (key or flag) |
 | `audio: running, <n> sounds, p99 <x> ms per block, ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D, the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
+| `audio: idle, blocks <n> (armed <n>), pan calls <n>; refused: off <n>, output <n>, not 3D <n>, offline <n>, not mono <n>, context <n>, distance <n>, output not stereo <n>, gains <n>, pan law <n>, not at start <n>, limit <n>` | every 10 s instead of `running,` while 3D audio is on and nothing was rendered in 3D: over those 10 s, the output blocks the module saw and how many it armed, DCS's panner calls, and why each call's sound was not given to the 3D renderer (the first reason that applied). No blocks: the module is not on DCS's output; blocks but none armed: no output bound; pan calls all refused: the reason with the count. Diagnostic only (the app does not read it) |
 | `audio: CPU budget: at most <n> sounds now (... over budget)` | a CPU back-off, down to n sounds (Checks `audio-backoff`); `(10 s under half the budget)` raises it again |
 | `audio: on (re-enabled in the settings, HRTF <set>: <n> directions)` / `audio: on (re-armed by the kill switch ..., ...)` | running again on the same binding (after Binaural=0 live, or after the overrun stop); a later `running,` line also means running |
 | `audio: HRTF <set> not usable (<why>); the default set is used` | the pilot's set was refused by the module: the Audio page and Checks (`audio-hrtf-refused`) say so with the reason |

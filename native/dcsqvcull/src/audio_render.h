@@ -173,7 +173,25 @@ struct EvRing {
 };
 
 // ---- counters (render and sim write, the control thread reads) -------------------------------------------------------
+// Why the simulation did not give a 3D sound to the binaural renderer (PanVoice, one count per panner call; the "audio:
+// idle" line logs them). The first reason that applies is counted.
+enum Refuse : int {
+  kRefuseOff = 0,        // binaural not on for this frame (settings, kill switch, an off reason, a pass or handover)
+  kRefuseOutput,         // no output bound, or the voice plays on another one (a second DCS output)
+  kRefuseNot3D,          // no sound, a 2D sound, or a voice of a 2D context
+  kRefuseOffline,        // ed_sound's engine state offline
+  kRefuseNotMono,        // a voice with more than one channel
+  kRefuseContext,        // its context is not one of the array's, is excluded ([Audio] ExcludeContexts) or 2D
+  kRefuseDistance,       // nearer than the minimum distance, or not finite
+  kRefuseStereoOut,      // the bound output is not stereo
+  kRefuseGains,          // DCS's gains are not its stereo format
+  kRefusePanMismatch,    // the pan law check failed
+  kRefuseNotCreation,    // qualifies, but a voice is taken only when it starts
+  kRefuseLimit,          // qualifies at its start, but the sound limit was reached
+  kRefuseCount
+};
 struct Counters {
+  std::atomic<uint64_t> refused[kRefuseCount] = {};
   std::atomic<uint64_t> blocks{0}, armedBlocks{0}, candidateCalls{0}, hrtfCalls{0}, repanCalls{0}, fadeIns{0},
       fadeOuts{0}, steady{0}, passCandidates{0}, coreRejected{0}, orphanTagged{0}, nonFinite{0}, framesTooLong{0},
       voiceEnded{0}, unarmedCalls{0}, overruns{0}, poseBlocks{0}, tornSnaps{0}, passBlocks{0};
@@ -189,6 +207,7 @@ struct Counters {
                                      &voiceEnded, &unarmedCalls, &overruns, &poseBlocks, &tornSnaps, &passBlocks, &panCalls, &panSolves,
                                      &panMismatch, &panMedian, &ownedVoiceFrames, &simFrames})
       c->store(0, std::memory_order_relaxed);
+    for (std::atomic<uint64_t>& c : refused) c.store(0, std::memory_order_relaxed);
     ownedNow.store(0, std::memory_order_relaxed);
     limitNow.store(binaural::kMaxSources, std::memory_order_relaxed);
     activeLastBlock.store(0, std::memory_order_relaxed);

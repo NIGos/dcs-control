@@ -316,20 +316,36 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   bool q = cfg.on && e.boundRenderer && sound && Rd<void*>(voice, off::kVRenderer) == e.boundRenderer &&
            e.engineState != off::kStateOffline && Rd<uint64_t>(sound, off::kSndIs3D) != 0 &&
            Rd<uint8_t>(voice, off::kVCtx2d) == 0 && Rd<uint32_t>(voice, off::kVChannels) == 1;
+  // Why not (the "audio: idle" line): counted only, the decision above is unchanged.
+  int refuse = -1;
+  if (!q)
+    refuse = !cfg.on                                                                           ? audr::kRefuseOff
+             : !e.boundRenderer || (sound && Rd<void*>(voice, off::kVRenderer) != e.boundRenderer) ? audr::kRefuseOutput
+             : !sound || Rd<uint64_t>(sound, off::kSndIs3D) == 0 || Rd<uint8_t>(voice, off::kVCtx2d) != 0 ? audr::kRefuseNot3D
+             : e.engineState == off::kStateOffline                                              ? audr::kRefuseOffline
+                                                                                                : audr::kRefuseNotMono;
   uint32_t ctxId = 8;
   if (q) {
     const void* ctx = Rd<void*>(sound, off::kSndCtx);
     ctxId = CtxId(e, ctx);
     q = ctxId < 8 && !(cfg.excludeMask & (1u << ctxId)) && Rd<uint8_t>(ctx, off::kCtxIs2D) == 0;
+    if (!q) refuse = audr::kRefuseContext;
   }
   const double dist = q ? Rd<double>(sound, off::kSndDist) : 0.0;
-  if (q) q = dist >= kMinDistanceM && std::isfinite(dist);
+  if (q) {
+    q = dist >= kMinDistanceM && std::isfinite(dist);
+    if (!q) refuse = audr::kRefuseDistance;
+  }
   const void* rend = e.boundRenderer;
-  if (q) q = Rd<uint32_t>(rend, off::kRChannels) == 2;
+  if (q) {
+    q = Rd<uint32_t>(rend, off::kRChannels) == 2;
+    if (!q) refuse = audr::kRefuseStereoOut;
+  }
   float g[4] = {};
   if (q) {
     memcpy(g, static_cast<const uint8_t*>(voice) + off::kVPendGain, sizeof(g));
     q = g[1] == 0.0f && g[2] == 0.0f;  // DCS's stereo format: ch0 = (gL, 0), ch1 = (0, gR)
+    if (!q) refuse = audr::kRefuseGains;
   }
   float m = 0;
   if (q) {
@@ -350,6 +366,7 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
       s.cnt->panMismatch.fetch_add(1, std::memory_order_relaxed);
       ++s.winMismatch;
       q = false;
+      refuse = audr::kRefusePanMismatch;
     } else {
       m = ms.m;
       if (!ms.median && ms.wa > 1e-12 * std::fmax(std::fabs(g[0]), 1e-30)) r->k = static_cast<float>(ms.wb / ms.wa);
@@ -359,11 +376,16 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   r->ctx = static_cast<uint8_t>(ctxId);
   if (q) r->loud = m;
   if (!q) {
+    if (refuse >= 0) s.cnt->refused[refuse].fetch_add(1, std::memory_order_relaxed);
     if (r->owned) Release(s, *r, e.now);
     return;
   }
   if (!r->owned && r->slot < 0 && initial && o.owned < std::min(cfg.limit, kSlots)) Own(s, *r, e, true);
-  if (!r->owned) return;
+  if (!r->owned) {
+    // Not taken: a voice is taken only when it starts (or by the ranking, BeginFrame), and only under the limit.
+    s.cnt->refused[initial ? audr::kRefuseLimit : audr::kRefuseNotCreation].fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   // The mono tag and the voice's metadata.
   const float mt = m > kTagFloor ? m : kTagFloor;
   const float tag[4] = {mt, 0.0f, mt, 0.0f};

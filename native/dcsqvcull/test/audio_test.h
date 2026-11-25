@@ -380,10 +380,18 @@ void Ownership() {
               !r.Owned(nearV) && !r.Owned(other) && !r.Tagged(radio) && !r.Tagged(twoD) && !r.Tagged(stereo),
           "audio ownership: 2D sounds, 2D contexts (radio, intercom), stereo waves, excluded contexts, sources under 5 cm "
           "and other renderers are never owned or tagged");
+    // The "audio: idle" line's counts: each refusal under its reason, one per panner call (two frames).
+    const auto refused = [&](int why) { return r.cnt.refused[why].load(); };
+    Check(refused(audr::kRefuseNot3D) == 4 && refused(audr::kRefuseContext) == 2 && refused(audr::kRefuseNotMono) == 2 &&
+              refused(audr::kRefuseDistance) == 2 && refused(audr::kRefuseOutput) == 2 && refused(audr::kRefuseOff) == 0 &&
+              refused(audr::kRefuseOffline) == 0,
+          "audio ownership: refusals are counted by reason (2D sound or 2D context, excluded context, stereo wave, distance, other "
+          "renderer)");
     r.env.engineState = 2;
     r.Frame(1022);
     r.Frame(1033);
     Check(!r.Owned(ok), "audio ownership: nothing is owned while the offline renderer (AVIMaker) runs");
+    Check(refused(audr::kRefuseOffline) >= 2, "audio ownership: the offline renderer's frames are counted as offline");
   }
   {
     SimRig r;
@@ -1291,7 +1299,8 @@ void Phrases() {
                            "\"audio: hooks in (ed_sound.dll 0x%08x, %s)\"", "\"audio: kill switch (%s): binaural %s\"",
                            "\"audio: ctx %d 2d=%d cockpitGain=%d output=%d crosstalk=%.3f/%.3f\"",
                            "\"audio: listener-vs-pose: ", "\"audio: on (%s, HRTF %ls: %u directions)\"",
-                           "\"audio: HRTF %ls not usable (%s); the default set is used\""};
+                           "\"audio: HRTF %ls not usable (%s); the default set is used\"",
+                           "\"audio: idle, blocks %llu (armed %llu), pan calls %llu; refused: off %llu, output %llu, "};
   int missing = 0;
   for (const char* p : phrases)
     if (src.find(p) == std::string::npos) ++missing, printf("     audio phrase missing: %s\n", p);
