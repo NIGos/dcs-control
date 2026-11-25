@@ -241,7 +241,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             {
                 foreach (var set in hrtfSets ?? [])
                     if (Binaural.IsValidHrtfName(set.Name) && !set.Name.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase))
-                        Add(Path.Combine(module, Binaural.HrtfFolder, set.Name + Binaural.HrtfExtension), set.Content, "3D headphone audio: your HRTF set " + set.Name);
+                        Add(Path.Combine(module, Binaural.HrtfFolder, set.Name + Binaural.HrtfExtension), set.Content, "3D headphone audio: one of your HRTF sets");  // the name is in the path only (records, previews)
                 if (!profile.BinauralHrtf.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && !(hrtfSets ?? []).Any(s => s.Name.Equals(profile.BinauralHrtf, StringComparison.OrdinalIgnoreCase)))
                     hrtf = Binaural.DefaultHrtf;
             }

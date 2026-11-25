@@ -41,7 +41,7 @@ struct HrtfSet {
     std::uint32_t taps = 0;             // device taps (multiple of 8)
     float datasetHeadRadiusM = 0.0f;
     // Where the near-field model starts: the set's measurement distance when it was measured closer than kNearFieldM
-    // (clamped to kNearFieldRefM .. kNearFieldM; such a set already holds the near field down to that distance), else
+    // (clamped to kNearFieldFloorM .. kNearFieldM; such a set already holds the near field down to that distance), else
     // kNearFieldM (a far-field set such as SADIE II at 1.2 m: the model unchanged).
     float nearFromM = kNearFieldM;
     float delayBase = 0.0f;             // samples added to every delay so that the shortest (largest head) is >= 0

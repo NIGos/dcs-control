@@ -6777,6 +6777,10 @@ Test("3D audio: the app's keys, defaults and ranges are binaural_config.h's (the
     }
     // The module and the app derive the same head radius (binaural_config.h HeadRadiusFromCircumferenceCm).
     Require(Math.Abs(Binaural.HeadRadiusMm(57) - 90.7183) < 1e-3 && Binaural.HeadRadiusMm(10) == Binaural.HeadRadiusMm(48) && Binaural.HeadRadiusMm(double.NaN) == Binaural.HeadRadiusMm(57), "head radius");
+    // The converter's near-field floor (what its report says about a set measured closer) is the renderer's.
+    var core = File.ReadAllText(Path.Combine(workspace, "native/binaural/include/binaural_core.h"));
+    var floor = System.Text.RegularExpressions.Regex.Match(core, @"kNearFieldFloorM = ([\d.]+)f;");
+    Require(floor.Success && double.Parse(floor.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) == DcsVr.Core.Hrtf.HrtfConverter.NearFieldFloorM, "near-field floor: " + floor.Value);
 });
 Test("3D audio: Checks refuse values outside the module's ranges, a key in use twice, and say what happens to DCS's speaker layout", () =>
 {
@@ -7073,6 +7077,70 @@ Test("3D audio: the diagnostic package lists the HRTF sets and the module's audi
             var content = reader.ReadToEnd();
             Require(!content.Contains("Ann Lee") && !System.Text.RegularExpressions.Regex.IsMatch(content, @"\b(ears|Jo)\b"), entry.FullName + " names a set: " + content);
         }
+});
+Test("3D audio: set names of earlier logs go from the diagnostic package (config line, app.log import, files), generic titles stay words", () =>
+{
+    var state = Path.Combine(root, "audio-diag2", "state"); var sg = Path.Combine(root, "audio-diag2", "Saved Games", "DCS");
+    new HrtfLibrary(state).Import(Make("audio-diag2/in/mine.sofa", "fixture"), "Kim Ro", new FixtureHrtfConverter());
+    new HrtfLibrary(state).Import(Make("audio-diag2/in/sofa.sofa", "fixture"), "SOFA file", new FixtureHrtfConverter());
+    var redact = Diagnostics.HrtfNameRedactor(state, sg);
+    // The module's config line of earlier builds (not at a line's start), a removed set (not in the library) and a
+    // two-letter name: replaced where the line names a set.
+    Require(redact("09:00:00.100 audio: config: Binaural=1 Hrtf=Ann Lee HeadCircumferenceCm=57.0 LateHeadTracking=1 NearField=1")
+        == "09:00:00.100 audio: config: Binaural=1 Hrtf=personal set HeadCircumferenceCm=57.0 LateHeadTracking=1 NearField=1", redact("audio: config: Binaural=1 Hrtf=Ann Lee HeadCircumferenceCm=57.0"));
+    Require(redact("10:00:00 [info] HRTF imported: Zo (2562 directions, 48000 Hz)") == "10:00:00 [info] HRTF imported: personal set (2562 directions, 48000 Hz)", redact("HRTF imported: Zo (2562 directions, 48000 Hz)"));
+    Require(redact(@"wrote C:\x\Scripts\DcsQvCull\hrtf\Old One.dcshrtf and {""p"": ""D:\\s\\hrtf\\Kim Ro.dcshrtf""} and hrtf/default.dcshrtf")
+        == @"wrote C:\x\Scripts\DcsQvCull\hrtf\personal set.dcshrtf and {""p"": ""D:\\s\\hrtf\\personal set 1.dcshrtf""} and hrtf/default.dcshrtf", redact(@"hrtf\Old One.dcshrtf"));
+    // The module's own words stay: "default", and "personal" for any of the pilot's sets.
+    Require(redact("audio: config: Binaural=1 Hrtf=personal HeadCircumferenceCm=57.0") == "audio: config: Binaural=1 Hrtf=personal HeadCircumferenceCm=57.0"
+        && redact("audio: on (48000 Hz stereo, HRTF personal: 145 directions)") == "audio: on (48000 Hz stereo, HRTF personal: 145 directions)", "personal stays");
+    // A generic set name (every word a common term) is replaced only where a set is named, never as a free word: the
+    // patterns run first, so "HRTF ..." lines still find their set.
+    Require(redact("HRTF SOFA file: 145 directions; the SOFA file was read") == "HRTF personal set 2: 145 directions; the SOFA file was read", redact("HRTF SOFA file: 145 directions; the SOFA file was read"));
+    Require(redact("Kim Ro said") == "personal set 1 said", "a library name as a free word");
+    // A name found by a pattern in one file goes from every file of the package (learnt in its first pass).
+    var learned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    Diagnostics.LearnHrtfNames("09:00 audio: config: Binaural=1 Hrtf=Ann Lee HeadCircumferenceCm=57.0", learned);
+    Require(learned.SetEquals(["Ann Lee"]) && Diagnostics.HrtfNameRedactor(state, sg, learned)("notes: Ann Lee") == "notes: personal set", string.Join(", ", learned));
+    var options = Make("audio-diag2/Saved Games/DCS/Config/options.lua", "options = {}");
+    Make("audio-diag2/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:00.100 audio: config: Binaural=1 Hrtf=Ann Lee HeadCircumferenceCm=57.0 LateHeadTracking=1\n09:00:01.000 perf: Ann Lee\n");
+    var zip = Path.Combine(root, "audio-diag2", "package.zip");
+    Diagnostics.CreatePackage(new DiagnosticSources(state, null, options, null, RuntimeKind.Pimax), "{}", zip);
+    using var package = System.IO.Compression.ZipFile.OpenRead(zip);
+    foreach (var entry in package.Entries)
+    {
+        using var reader = new StreamReader(entry.Open());
+        var content = reader.ReadToEnd();
+        Require(!content.Contains("Ann Lee") && !content.Contains("Kim Ro"), entry.FullName + " names a set: " + content);
+    }
+});
+Test("3D audio: the module's \"personal\" is the deployed set; off live shows as switched off while DCS runs; a removed set keeps a running session's status", () =>
+{
+    static string On(string set) => $"audio: on (48000 Hz stereo, HRTF {set}: 2562 directions, head radius 9.1 cm, near field on, at most 48 sounds)";
+    Require(Binaural.ParseStatus([On("personal")], true, true, true, "My ears") is { Hrtf: "My ears", Started: true }
+        && Binaural.ParseStatus([On("personal")], true, true, true, "default").Hrtf == "personal"
+        && Binaural.ParseStatus([On("personal")], true, false).Hrtf == "personal"
+        && Binaural.ParseStatus([On("default")], true, true, true, "My ears").Hrtf == "default", "personal resolved from the deployed ini only");
+    Require(Binaural.ParseStatus(["audio: HRTF personal not usable (file not found); the default set is used", On("default")], true, true, true, "My ears") is { HrtfFallback: "My ears", HrtfFallbackReason: "file not found", Hrtf: "default" }, "fallback");
+    Require(Binaural.ParseStatus(["audio: HRTF personal not usable (file not found); the default set is used", On("default"), "audio: HRTF personal (crossfading)"], true, true, true, "Spare") is { HrtfFallback: null, Hrtf: "Spare" }, "another set live");
+    // Turned off live (the ini now says Binaural=0): while DCS runs and the module said so, switched off in the settings;
+    // DCS closed, or the module not there yet: off in this profile.
+    string[] offLive = [On("default"), "audio: off (binaural is off in the settings)"];
+    Require(Binaural.ParseStatus(offLive, true, true, enabled: false) is { State: "switched-off", SwitchedOffBy: "settings" } live && live.Summary.StartsWith("Switched off in the settings", StringComparison.Ordinal), "live switch-off");
+    Require(Binaural.ParseStatus(offLive, true, false, enabled: false).State == "disabled" && Binaural.ParseStatus([On("default")], true, true, enabled: false).State == "disabled"
+        && Binaural.ParseStatus([], true, true, enabled: false).State == "disabled", "otherwise off in this profile");
+    var options = Make("audio-status2/Saved Games/DCS/Config/options.lua", "options = {}");
+    var module = EngineOptimizations.ModuleDirectory(options);
+    Make("audio-status2/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.dll", "MZ");
+    Make("audio-status2/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.ini", "[Audio]\nBinaural=0\nHrtf=My ears\n");
+    Make("audio-status2/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:01.000 " + On("personal") + "\n09:00:05.000 audio: off (binaural is off in the settings)\n");
+    Require(Binaural.ReadStatus(options, true) is { State: "switched-off", SwitchedOffBy: "settings", Hrtf: "My ears" } && Binaural.ReadStatus(options, false).State == "disabled", "the Audio page's status, read from the files");
+    // The pilot removed the last set while DCS plays with it: that session's status; otherwise unavailable.
+    var running = Binaural.ParseStatus([On("personal")], true, true, true, "My ears");
+    Require(Binaural.WithoutUsableSet(running, true) == running && Binaural.WithoutUsableSet(running, false).State == "unavailable"
+        && Binaural.WithoutUsableSet(Binaural.ParseStatus([], true, true, true), true).State == "unavailable"
+        && Binaural.WithoutUsableSet(Binaural.ParseStatus(["audio: off (no HRTF set: file not found)"], true, true, true), true).State == "unavailable"
+        && Binaural.WithoutUsableSet(Binaural.ParseStatus([On("personal"), "audio: kill switch (toggle_audio.flag): binaural OFF (DCS's own panning)"], true, true, true), true).State == "switched-off", "removed set");
 });
 Test("E2E: CPU Boost and Free VRAM records left by an ended helper survive a moment when the file cannot be read", () =>
 {

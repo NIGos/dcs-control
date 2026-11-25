@@ -592,6 +592,33 @@ static void TestNearFieldDistance() {
         std::printf("A7b far-field sets measured at 1.0 / 1.2 / 1.5 / 5 m render bit-identically: %s\n", same ? "yes" : "NO");
         CHECK(same);
     }
+    // The floor: a set measured closer than kNearFieldFloorM (the format allows 0.1 m; the app's converter takes it and
+    // says so) is used as measured at the floor: 0.10 and 0.15 m render bit-identically, finite, with the largest ears
+    // (the parallax lookup's point at D on each ear's ray exists), and 0.2 m does not (the clamp is not wider).
+    {
+        static_assert(kNearFieldFloorM == 0.15f, "core_test and the app's converter assume 0.15 m");
+        std::vector<Vec> outs;
+        bool finite = true;
+        for (float d : {0.10f, kNearFieldFloorM, 0.2f}) {
+            const auto file = build(d);
+            Rig rig(file, 48000, 0.0875f, true, 64, kMaxEarRadiusM);
+            CHECK(rig.ok);
+            if (!rig.ok) return;
+            Vec all;
+            int slot = 0;
+            for (float dist : {0.06f, 0.13f, 0.15f, 0.3f})
+                for (double az : {-90.0, -30.0, 120.0}) {
+                    const Vec out = RenderStatic(rig.r, slot++, FromAzEl(az, 0.0), dist, Vec(noise.begin(), noise.begin() + 4096), 480);
+                    for (float v : out) finite = finite && std::isfinite(v);
+                    all.insert(all.end(), out.begin(), out.end());
+                }
+            outs.push_back(std::move(all));
+            ReleaseHrtf(rig.set);
+        }
+        std::printf("A7b floor: sets measured at 0.10 and 0.15 m render bit-identically: %s; 0.2 m differs: %s; finite: %s\n",
+                    outs[0] == outs[1] ? "yes" : "NO", outs[2] != outs[1] ? "yes" : "NO", finite ? "yes" : "NO");
+        CHECK(outs[0] == outs[1] && outs[2] != outs[1] && finite);
+    }
     // A set measured at 0.5 m.
     const float D = 0.5f;
     const auto nearFile = build(D), farFile = build(1.2f);

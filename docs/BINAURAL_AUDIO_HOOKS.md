@@ -505,7 +505,10 @@ Where the implementation differs from or adds to the sections above:
   0x3e reads `F0 FF 83 74 22 00 00`.
 - **Threads.** The module has its own control thread (`AudioThread`, 20 ms loop): independent of the engine worker
   (which can wait minutes for Scene.dll) and of the engine kill switch. The real-time wrappers never log; they count and
-  push events to a ring this thread logs from.
+  push events to a ring this thread logs from. The thread starts only when the ini says `[Audio] Binaural=1`: at payload
+  start, or when the worker's 1 s ini reload saw a change (Live turn-on, `StartIfWanted`; the worker reaches that loop
+  once Scene.dll is loaded). With 3D audio off nothing of it runs, polls or logs, as before binaural audio existed.
+  Test: `DormantWhenOff`.
 - **FTZ/DAZ** are set only around our own DSP in each P4 call and restored before ED's next kernel runs.
 - **Status word** bits 53 (configured), 54 (active), 55 (configured but off); see `status_word.h`.
 - **Build.** The payload always links BinauralCore, compiled from `native/binaural/src` by the module's own CMake

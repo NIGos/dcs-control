@@ -89,6 +89,12 @@ target_link_libraries(DcsQvCullAudioE2ETests PRIVATE DcsQvBinauralCore user32 ke
 set_target_properties(DcsQvCullAudioE2ETests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test)
 add_test(NAME DcsQvCullAudioE2ETests COMMAND DcsQvCullAudioE2ETests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
 set_tests_properties(DcsQvCullAudioE2ETests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 failure\\(s\\)" TIMEOUT 300)
+# The payload's own copy of kernels_avx2.cpp (DcsQvBinauralCore, compiled here, not native/binaural's object): it must
+# define no function outside binaural::kernels, or the linker may keep an AVX2 COMDAT for SSE2 code (the same check as
+# native/binaural's ctest binaural_avx2_object).
+add_test(NAME DcsQvBinauralCoreAvx2Object
+    COMMAND pwsh -NoProfile -File ${DCSQV_BINAURAL_DIR}/test/check_avx2_object.ps1 "$<TARGET_OBJECTS:DcsQvBinauralCore>")
+set_tests_properties(DcsQvBinauralCoreAvx2Object PROPERTIES PASS_REGULAR_EXPRESSION " 0 failure\\(s\\)")
 
 # The detour stub's code and pointer pages: a hot reload must never leave the stub without execute rights.
 add_executable(DcsQvCullDetourTests test/detour_test.cpp)

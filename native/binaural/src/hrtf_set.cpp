@@ -136,7 +136,7 @@ HrtfSet* LoadHrtf(const void* data, std::size_t bytes, std::uint32_t deviceRate,
         s.directions = h.directionCount;
         s.triangles = h.triangleCount;
         s.datasetHeadRadiusM = h.datasetHeadRadiusM;
-        s.nearFromM = h.measurementDistanceM < kNearFieldM ? std::clamp(h.measurementDistanceM, kNearFieldRefM, kNearFieldM) : kNearFieldM;
+        s.nearFromM = h.measurementDistanceM < kNearFieldM ? std::clamp(h.measurementDistanceM, kNearFieldFloorM, kNearFieldM) : kNearFieldM;
         std::memcpy(s.name, h.name, sizeof(s.name));
         s.name[sizeof(s.name) - 1] = 0;
         s.serial = g_serial.fetch_add(1);

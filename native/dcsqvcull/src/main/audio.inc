@@ -4,7 +4,9 @@
 //
 // Independent of the engine: its own thread (the worker may wait minutes for Scene.dll, and audio also runs with the
 // engine optimizations off or in PerceptionOnly); the engine kill switch never touches it, and its own kill switch
-// (toggle_audio.flag, [Hotkeys] AudioToggle) never touches the engine. Nothing is patched unless [Audio] Binaural=1.
+// (toggle_audio.flag, [Hotkeys] AudioToggle) never touches the engine. Nothing is patched unless [Audio] Binaural=1,
+// and the control thread itself starts only once the ini says Binaural=1 (at payload start, or a Live change the
+// worker's ini reload hands to StartIfWanted): with 3D audio off the module polls nothing and logs nothing.
 //
 // Threads:
 //   - DCS simulation thread: PanWrapA / PanWrapB (P3a / P3b) -> audsim (ownership, tag, VoiceMeta);
@@ -451,6 +453,13 @@ audcfg::Read g_cfgRead;
 bool g_haveCfg = false;
 std::wstring g_hrtfName;                       // the set the current binding uses
 std::wstring g_hrtfRequested;                  // the last [Audio] Hrtf value acted on
+// A set as the log names it: "default" (the generic set) or "personal" (any of the pilot's own). The pilot names those
+// sets, often after a person, and the log reaches diagnostic packages and issues: a set's name is never logged. The app
+// knows which of the pilot's sets it deployed (DcsQvCull.ini Hrtf=).
+constexpr const wchar_t* kLogPersonalSet = L"personal";
+const wchar_t* LogSetName(const std::wstring& name) {
+  return name == binaural_config::kDefaultHrtfName ? binaural_config::kDefaultHrtfName : kLogPersonalSet;
+}
 std::wstring g_cfgIni;
 FILETIME g_cfgTime{}, g_cfgDevTime{};  // the effective ini's and the deployed ini's write times
 void* g_rejectedRenderer = nullptr;
@@ -528,7 +537,7 @@ binaural::HrtfSet* SetFor(std::wstring name, uint32_t rate, std::string* why, st
       *why = w;
       return nullptr;
     }
-    Log("audio: HRTF %ls not usable (%s); the default set is used", name.c_str(), w.c_str());
+    Log("audio: HRTF %ls not usable (%s); the default set is used", LogSetName(name), w.c_str());
     name = binaural_config::kDefaultHrtfName;
   }
   return nullptr;
@@ -680,7 +689,7 @@ void Bind(void* rend, const char* how) {
   LogOn();
   Log("audio: output %p bound (%s%s)", rend, how, old ? (old->renderer == rend ? "; validated again" : "; moved from another output") : "");
   Log("audio: on (%.0f Hz stereo, HRTF %ls: %u directions, head radius %.1f cm, near field %s, at most %d sounds)", rate,
-      used.c_str(), info.directions, cc.headRadiusM * 100.0, c.nearField ? "on" : "off", c.maxObjects);
+      LogSetName(used), info.directions, cc.headRadiusM * 100.0, c.nearField ? "on" : "off", c.maxObjects);
 }
 
 // "audio: on (<why>, HRTF <name>: <n> directions)" when binaural works again on the same binding (the app reads any
@@ -688,7 +697,7 @@ void Bind(void* rend, const char* how) {
 void LogOnAgain(const char* why) {
   if (!g_binding.load() || !g_curSet) return;
   LogOn();
-  Log("audio: on (%s, HRTF %ls: %u directions)", why, g_hrtfName.c_str(), audr::CoreDescribe(g_curSet).directions);
+  Log("audio: on (%s, HRTF %ls: %u directions)", why, LogSetName(g_hrtfName), audr::CoreDescribe(g_curSet).directions);
 }
 
 void FreeBinding(audr::Binding* b) {
@@ -747,7 +756,7 @@ void ReadConfig(bool force) {
   if (first || !audcfg::Same(prev, c))
     Log("audio: config: Binaural=%d Hrtf=%ls HeadCircumferenceCm=%.1f LateHeadTracking=%d NearField=%d MaxObjects=%d "
         "LevelTrimDb=%.1f CpuBudgetPercent=%d ExcludeContexts=0x%02x LogVoices=%d",
-        c.binaural ? 1 : 0, c.hrtf, c.headCircumferenceCm, c.lateHeadTracking ? 1 : 0, c.nearField ? 1 : 0, c.maxObjects,
+        c.binaural ? 1 : 0, LogSetName(c.hrtf), c.headCircumferenceCm, c.lateHeadTracking ? 1 : 0, c.nearField ? 1 : 0, c.maxObjects,
         c.levelTrimDb, c.cpuBudgetPercent, c.excludeContextMask, c.logVoices ? 1 : 0);
   // Live changes the core takes directly (each ramps inside the next block).
   if (audr::Binding* b = g_binding.load()) {
@@ -762,7 +771,7 @@ void ReadConfig(bool force) {
         g_curSet = set;
         newSet = true;
         g_hrtfName = used;
-        Log("audio: HRTF %ls (crossfading)", used.c_str());
+        Log("audio: HRTF %ls (crossfading)", LogSetName(used));
       }
     }
     // The head size is relative to the set's own measured head (binaural_config.h PilotItdRadiusM): set again for a new
@@ -1102,16 +1111,51 @@ DWORD WINAPI AudioThread(void*) {
   return 0;
 }
 
+// The control thread exists only once [Audio] Binaural=1 was seen: with 3D audio off (the default, and every profile
+// without it) the module starts no thread, polls nothing and logs nothing, as before binaural audio existed. Start
+// looks once at payload start; the worker's ini reload (Live) calls StartIfWanted again when the ini changed.
+SRWLOCK g_threadLock = SRWLOCK_INIT;
+bool g_threadStarted = false;               // under g_threadLock: this payload's thread was started (or, in tests, counted)
+std::atomic<int> g_testThreadStarts{0};     // tests (g_testNoThread): the threads StartIfWanted would have created
+
+// [Audio] Binaural in the effective ini (the deployed one, or [Dev] IniPath's), read without a log line.
+bool WantedInIni() {
+  std::wstring devDir;
+  const std::wstring ini = EffectiveIni(&devDir);
+  return audcfg::ReadIni(ini.c_str()).cfg.binaural;
+}
+
+// Starts the control thread when the ini asks for binaural audio and this payload has not started it yet. True when it
+// started it now. Never after Stop / Quiesce began (g_quit).
+bool StartIfWanted() {
+  if (!WantedInIni()) return false;
+  AcquireSRWLockExclusive(&g_threadLock);
+  const bool start = !g_threadStarted && !g_quit.load();
+  if (start) {
+    g_threadStarted = true;
+    if (g_testNoThread.load())
+      g_testThreadStarts.fetch_add(1);
+    else
+      g_thread = CreateThread(nullptr, 0, qvexit::Thread<AudioThread>, nullptr, 0, nullptr);
+  }
+  ReleaseSRWLockExclusive(&g_threadLock);
+  return start;
+}
+
 void Start() {
+  AcquireSRWLockExclusive(&g_threadLock);
   g_quit = false;
+  g_threadStarted = false;
+  ReleaseSRWLockExclusive(&g_threadLock);
   g_stopping = false;
   g_selfPid.store(GetCurrentProcessId());
-  if (g_testNoThread.load()) return;
-  g_thread = CreateThread(nullptr, 0, qvexit::Thread<AudioThread>, nullptr, 0, nullptr);
+  StartIfWanted();
 }
 
 bool JoinThread(DWORD ms) {
-  g_quit = true;
+  AcquireSRWLockExclusive(&g_threadLock);
+  g_quit = true;  // no StartIfWanted creates one from here on
+  ReleaseSRWLockExclusive(&g_threadLock);
   if (g_thread) {
     if (WaitForSingleObject(g_thread, ms) == WAIT_OBJECT_0) {
       CloseHandle(g_thread);

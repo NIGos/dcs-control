@@ -112,7 +112,9 @@ public static partial class Diagnostics
         var pilot = Redactor(Environment.UserName, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.MachineName, serials);
         // The pilot's own HRTF sets are named by the pilot (often after a person): every name becomes "personal set N".
         var savedGamesForNames = sources.OptionsPath is { } namesOptions ? Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(namesOptions))) : null;
-        var hrtfNames = sources.StateRoot is { } namesState ? HrtfNameRedactor(namesState, savedGamesForNames) : (text => text);
+        // Names the redaction patterns find in one file (an older log's "Hrtf=x", a removed set's path) go from every file.
+        var learnedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var hrtfNames = sources.StateRoot is { } namesState ? HrtfNameRedactor(namesState, savedGamesForNames, learnedNames) : (text => text);
         Func<string, string> redactor = text => hrtfNames(pilot(text));
         var temp = zipPath + ".tmp";
         var learning = true;
@@ -122,7 +124,7 @@ public static partial class Diagnostics
         {
             void Text(string name, string source, string content, bool truncated = false)
             {
-                if (learning) { LearnSerials(content, serials); return; }
+                if (learning) { LearnSerials(content, serials); LearnHrtfNames(content, learnedNames); return; }
                 var bytes = Encoding.UTF8.GetBytes(redactor(content));
                 var entry = zip!.CreateEntry(name, CompressionLevel.Optimal);
                 using (var output = entry.Open()) output.Write(bytes);
@@ -313,9 +315,13 @@ public static partial class Diagnostics
 
     /// <summary>Replaces the names of the pilot's HRTF sets (the library's file names and the titles inside them, and the
     /// sets deployed next to the module) with "personal set N" (N: the set's place in the library, by name), and any other
-    /// set name where the module's log, DcsQvCull.ini or a profile names one ("HRTF x: ...", "Hrtf=x", "binauralHrtf": "x",
-    /// HRTF set "x") with "personal set". "default" (the generic set) stays.</summary>
-    internal static Func<string, string> HrtfNameRedactor(string stateRoot, string? savedGamesRoot)
+    /// set name where a log, DcsQvCull.ini or a profile names one ("HRTF x: ...", "Hrtf=x", "binauralHrtf": "x", HRTF set
+    /// "x", "HRTF imported: x (", hrtf\x.dcshrtf) with "personal set". "default" (the generic set) and "personal" (the
+    /// module's own word for any of the pilot's sets) stay. The patterns that name a set run first; then the library's
+    /// names, and the names the patterns found (<paramref name="learned"/>, filled from every file of a package first), are
+    /// replaced as whole words elsewhere, except names under three characters and generic ones ("HRTF", "SOFA file",
+    /// "Subject 3": every word a common term or a number), which would rewrite ordinary text.</summary>
+    internal static Func<string, string> HrtfNameRedactor(string stateRoot, string? savedGamesRoot, HashSet<string>? learned = null)
     {
         var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var sets = new HrtfLibrary(stateRoot).List();
@@ -331,32 +337,80 @@ public static partial class Diagnostics
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         }
-        labels.Remove(Binaural.DefaultHrtf);
-        // Already a label (the free-text pass runs first, so a name that is also a word of the label is not replaced in it).
-        string Label(string name) => name.Trim().Length == 0 || name.Trim().Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) || name.StartsWith("personal set", StringComparison.Ordinal)
-            ? name : labels.TryGetValue(name.Trim(), out var l) ? l : "personal set";
-        // Free text: whole words only, and only names of three characters or more (a shorter one is still replaced where
-        // a pattern below names it as a set).
-        var words = labels.Where(p => p.Key.Length >= 3).OrderByDescending(p => p.Key.Length)
-            .Select(p => (Regex: new Regex(@"(?<![\w])" + Regex.Escape(p.Key) + @"(?![\w])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant), Label: p.Value)).ToArray();
+        foreach (var kept in labels.Keys.Where(KeptHrtfName).ToArray()) labels.Remove(kept);
+        var found = learned ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string Label(string name)
+        {
+            var key = name.Trim();
+            if (KeptHrtfName(key)) return name;
+            found.Add(key);
+            return labels.TryGetValue(key, out var l) ? l : "personal set";
+        }
+        var cacheCount = -1;
+        (Regex Regex, string Label)[] cache = [];
+        (Regex Regex, string Label)[] Words()
+        {
+            if (cacheCount == found.Count) return cache;
+            var all = new Dictionary<string, string>(labels, StringComparer.OrdinalIgnoreCase);
+            foreach (var name in found) all.TryAdd(name, "personal set");
+            cache = all.Where(p => p.Key.Length >= 3 && !KeptHrtfName(p.Key) && !GenericHrtfName(p.Key)).OrderByDescending(p => p.Key.Length)
+                .Select(p => (new Regex(@"(?<![\w])" + Regex.Escape(p.Key) + @"(?![\w])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant), p.Value)).ToArray();
+            cacheCount = found.Count;
+            return cache;
+        }
         return text =>
         {
             if (string.IsNullOrEmpty(text)) return text;
-            foreach (var (regex, label) in words) text = regex.Replace(text, label);
+            // Where a set is named first (the free-text pass would otherwise rewrite part of a name these patterns need).
             text = HrtfLogNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value));
-            text = HrtfIniNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + m.Groups[3].Value);
+            text = HrtfIniNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value));
             text = HrtfJsonNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + "\"");
-            return HrtfQuotedNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + m.Groups[3].Value);
+            text = HrtfQuotedNameRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + m.Groups[3].Value);
+            text = HrtfImportedRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value));
+            text = HrtfPathRegex().Replace(text, m => m.Groups[1].Value + Label(m.Groups[2].Value) + m.Groups[3].Value);
+            foreach (var (regex, label) in Words()) text = regex.Replace(text, label);
+            return text;
         };
     }
+
+    /// <summary>Collects the set names the redaction patterns find in <paramref name="text"/> (the package's first pass,
+    /// like <see cref="LearnSerials"/>): a name seen where a pattern names it in one file goes from every file.</summary>
+    internal static void LearnHrtfNames(string text, HashSet<string> names)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        foreach (var regex in new[] { HrtfLogNameRegex(), HrtfIniNameRegex(), HrtfJsonNameRegex(), HrtfQuotedNameRegex(), HrtfImportedRegex(), HrtfPathRegex() })
+            foreach (Match m in regex.Matches(text))
+                if (m.Groups[2].Value.Trim() is { Length: > 0 } name && !KeptHrtfName(name)) names.Add(name);
+    }
+
+    /// <summary>The module's log calls each of the pilot's sets "personal", never by its name.</summary>
+    internal const string ModulePersonalWord = "personal";
+    private static bool KeptHrtfName(string name) =>
+        name.Length == 0 || name.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) || name.Equals(ModulePersonalWord, StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("personal set", StringComparison.Ordinal);
+    // Words a set's title often is (SOFA titles such as "HRTF", "SOFA file", "KEMAR subject 3"): a name made only of these
+    // and numbers is replaced only where a pattern names it as a set, never as a free word.
+    private static readonly HashSet<string> GenericHrtfWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hrtf", "hrtfs", "hrir", "hrirs", "sofa", "file", "files", "set", "sets", "audio", "binaural", "default", "generic", "personal",
+        "kemar", "ku100", "neumann", "sadie", "ii", "dummy", "head", "measurement", "measurements", "measured", "subject", "database",
+        "data", "dataset", "simplefreefieldhrir", "freefield", "free", "field", "test", "the", "of", "and", "a",
+    };
+    private static bool GenericHrtfName(string name) =>
+        Regex.Split(name, @"[^\p{L}\p{N}]+").Where(w => w.Length > 0).All(w => GenericHrtfWords.Contains(w) || w.All(char.IsAsciiDigit));
     // "HRTF My ears: 2562 directions", "HRTF My ears (crossfading)", "HRTF My ears not usable (" (the module's log).
     [GeneratedRegex(@"(\bHRTF )([\w .-]+?)(?=: \d+ directions| \(crossfading\)| not usable \()")] private static partial Regex HrtfLogNameRegex();
-    // DcsQvCull.ini "Hrtf=My ears".
-    [GeneratedRegex(@"(?m)^(\s*Hrtf\s*=\s*)([^\r\n;]*?)(\s*\r?)$")] private static partial Regex HrtfIniNameRegex();
+    // DcsQvCull.ini "Hrtf=My ears" (to the line's end or a comment), and the module's config line of earlier builds,
+    // "audio: config: Binaural=1 Hrtf=My ears HeadCircumferenceCm=57.0 ...", anywhere in a line.
+    [GeneratedRegex(@"(?m)(\bHrtf\s*=\s*)([^\r\n;=]*?)(?=\s+HeadCircumferenceCm=|\s*;|\s*\r?$)")] private static partial Regex HrtfIniNameRegex();
     // A profile's JSON: "binauralHrtf": "My ears".
     [GeneratedRegex(@"(""binauralHrtf""\s*:\s*"")((?:[^""\\]|\\.)*)""")] private static partial Regex HrtfJsonNameRegex();
     // Checks and messages: HRTF set "My ears" (also JSON-escaped: HRTF set \"My ears\").
     [GeneratedRegex(@"(\bHRTF (?:set )?(?:\\)?"")([^""\\]*)((?:\\)?"")")] private static partial Regex HrtfQuotedNameRegex();
+    // app.log of earlier builds: "HRTF imported: My ears (2562 directions, 48000 Hz)".
+    [GeneratedRegex(@"(\bHRTF imported: )([^\r\n(]+?)(?= \(\d+ directions)")] private static partial Regex HrtfImportedRegex();
+    // A set's file, in the library or next to the module: hrtf\My ears.dcshrtf (also / and JSON's \\).
+    [GeneratedRegex(@"(\bhrtf(?:\\\\|[\\/]))([^\\/:*?""<>|\r\n]+?)(\.dcshrtf\b)", RegexOptions.IgnoreCase)] private static partial Regex HrtfPathRegex();
 
     private static string Readme(IReadOnlyList<DiagnosticEntry> entries) =>
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"

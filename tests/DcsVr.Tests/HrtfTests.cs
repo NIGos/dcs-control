@@ -203,6 +203,13 @@ static class HrtfTests
             var near = HrtfConverter.Convert(new HrirSet { SampleRate = 48000, Directions = set.Directions, Ir = set.Ir, MeasurementDistanceM = 0.5 }, personal: true);
             require(near.Report.Warnings.Any(w => w.StartsWith("Measured at 0.5 m", StringComparison.Ordinal)), string.Join("; ", near.Report.Warnings));
             require(!b.Report.Warnings.Any(w => w.StartsWith("Measured at", StringComparison.Ordinal)), "1.2 m is far field");
+            // Closer than the renderer's near-field floor (binaural_core.h kNearFieldFloorM): taken, and the report says how
+            // it is treated; the floor itself is the set's own distance.
+            var closest = HrtfConverter.Convert(new HrirSet { SampleRate = 48000, Directions = set.Directions, Ir = set.Ir, MeasurementDistanceM = 0.1 }, personal: true);
+            require(closest.Report.Warnings.Any(w => w.StartsWith("Measured at 0.1 m", StringComparison.Ordinal) && w.Contains("treated as measured at 0.15 m", StringComparison.Ordinal))
+                && Math.Abs(DcsHrtfFile.Read(closest.File).MeasurementDistanceM - 0.1f) < 1e-6, string.Join("; ", closest.Report.Warnings));
+            var atFloor = HrtfConverter.Convert(new HrirSet { SampleRate = 48000, Directions = set.Directions, Ir = set.Ir, MeasurementDistanceM = HrtfConverter.NearFieldFloorM }, personal: true);
+            require(atFloor.Report.Warnings.Any(w => w.StartsWith("Measured at 0.15 m, closer than most sets", StringComparison.Ordinal)), string.Join("; ", atFloor.Report.Warnings));
         });
 
         test("HRTF converter: rejects bad input with a clear reason", () =>

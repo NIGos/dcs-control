@@ -215,7 +215,7 @@ struct Renderer::Impl {
                     v[0] = dir[0], v[1] = dir[1], v[2] = dir[2];
                 }
                 if (D > 0.0f) {
-                    // |ear + t v| = D, t > 0; D >= kNearFieldRefM > |ez|, so the root is real and positive.
+                    // |ear + t v| = D, t > 0; D >= kNearFieldFloorM > kMaxEarRadiusM >= |ez|, so the root is real and positive.
                     const float ev = ez * v[2];
                     const float tt = -ev + std::sqrt(std::max(0.0f, ev * ev - ez * ez + D * D));
                     v[0] *= tt, v[1] *= tt, v[2] = ez + tt * v[2];

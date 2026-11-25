@@ -1525,14 +1525,14 @@ function renderAudio() {
   const layout = state?.inventory?.dcsSettings?.['sound.main_layout'], layoutValue = String(layout ?? '').replace(/"/g,'').trim().toLowerCase();
   const rows = s && ['running','switched-off'].includes(s.state) ? [
     ['Sounds in 3D', s.sounds != null ? String(s.sounds) : '—'], ['CPU per sound block (p99)', s.costMs != null ? s.costMs.toFixed(2)+' ms' : '—'],
-    ['Ears (HRTF)', s.hrtf ? (s.hrtf === 'default' ? 'Generic (KU100)' : s.hrtf) : '—'], ['Follows the head between frames', s.headTracking == null ? '—' : s.headTracking ? 'Yes' : 'No'],
+    ['Ears (HRTF)', s.hrtf ? (s.hrtf === 'default' ? 'Generic (KU100)' : s.hrtf === 'personal' ? 'Your own' : s.hrtf) : '—'], ['Follows the head between frames', s.headTracking == null ? '—' : s.headTracking ? 'Yes' : 'No'],
     ['Fewer sounds to stay in budget', s.backoffs ? `${s.backoffs} time${s.backoffs === 1 ? '' : 's'}${s.maxObjectsNow ? ', down to '+s.maxObjectsNow : ''}` : 'No'],
   ] : [];
   const lines = s?.lines?.length ? `<details class="report-details"><summary>Log lines</summary><pre class="log-lines">${escape(s.lines.join('\n'))}</pre></details>` : '';
   const open = [...box.querySelectorAll('details.report-details')].map(d => d.open);
   box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(s?.summary || 'Select DCS\'s options.lua first.')}</span></div>${pending}`
     + (profile?.binauralAudio && layout !== undefined && layoutValue !== 'stereo' ? `<p class="pimax-note">DCS's speaker layout is ${escape(LAYOUT_NAMES[layoutValue] ?? layoutValue)}. Launch DCS sets it to Stereo while 3D audio is on; Back to stock DCS puts yours back.</p>` : '')
-    + (s?.hrtfFallback ? `<p class="pimax-note">Your HRTF "${escape(s.hrtfFallback)}" could not be used (${escape(s.hrtfFallbackReason || 'refused')}), so the generic one played. Import the SOFA file again.</p>` : '')
+    + (s?.hrtfFallback ? `<p class="pimax-note">Your HRTF${s.hrtfFallback === 'personal' ? '' : ` "${escape(s.hrtfFallback)}"`} could not be used (${escape(s.hrtfFallbackReason || 'refused')}), so the generic one played. Import the SOFA file again.</p>` : '')
     + statusRows(rows, []) + lines
     + `<p class="fine">To compare: ${keyText ? `press <kbd>${escape(keyText)}</kbd> in flight` : 'set a key on the Keys & headset panel page'}, or use the button below. Turn your head while a sound plays behind you.</p>`;
   box.querySelectorAll('details.report-details').forEach((d,i) => { d.open = Boolean(open[i]); });

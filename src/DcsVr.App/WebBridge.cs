@@ -538,15 +538,19 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         // 3D headphone audio in the module's newest log (Audio page status), and the applied profile's state.
                         var audioOptions = await Task.Run(EngineOptionsPath);
                         var audioApplied = await Task.Run(service.ReadAppliedProfile);
-                        // On in the applied profile, but without an HRTF set Launch DCS deployed none of it: unavailable,
-                        // whatever an older module's log says, and not "applied" (the in-flight switch has nothing to switch).
+                        // On in the applied profile, but without an HRTF set the next Launch DCS deploys none of it:
+                        // unavailable, and not "applied" (the in-flight switch has nothing to switch), unless the running
+                        // DCS already started binaural audio with a set it loaded (the pilot removed it since): that
+                        // session's own status.
                         var audioWanted = audioApplied?.Profile.ForLaunch().UsesBinauralAudio == true;
                         var audioUsable = !audioWanted || await Task.Run(service.BinauralAudioUsable);
+                        var audioRunning = DcsRunning();
+                        var audioLive = audioOptions is null ? null : await Task.Run(() => Binaural.ReadStatus(audioOptions, audioRunning));
+                        var audioStatus = audioUsable || audioLive is null ? audioLive : Binaural.WithoutUsableSet(audioLive, audioRunning);
                         return Reply(id, new
                         {
-                            status = audioOptions is null ? null : !audioUsable ? new AudioStatus("unavailable", Binaural.UnusableReason + " DCS's own sound plays.")
-                                : await Task.Run(() => Binaural.ReadStatus(audioOptions, DcsRunning())),
-                            applied = audioWanted && audioUsable, dcsRunning = DcsRunning(),
+                            status = audioStatus,
+                            applied = audioWanted && (audioUsable || audioStatus?.State != "unavailable"), dcsRunning = audioRunning,
                         });
                     }
                     if (engine)
@@ -1032,7 +1036,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     {
                         var set = await Task.Run(() => library.Import(sofa, wanted, _hrtfConverter));
                         _pendingSofa = null; Invalidate();
-                        AppLog.Info("HRTF imported: " + set.Name + " (" + set.Directions + " directions, " + set.SampleRate + " Hz)");
+                        // Never the set's name: the pilot names it, often after a person, and app.log goes into diagnostic packages.
+                        AppLog.Info("HRTF imported: a personal set (" + set.Directions + " directions, " + set.SampleRate + " Hz)");
                         return Reply(id, new { imported = set, hrtfSets = library.List(), message = $"Imported \"{set.Name}\": {set.Directions} directions, {set.SampleRate} Hz. It is now selected." });
                     }
                     catch (HrtfNameTakenException taken) { _pendingSofa = sofa; return Reply(id, new { needName = true, taken = taken.Name, suggested = taken.Suggested }); }

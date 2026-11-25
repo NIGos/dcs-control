@@ -162,7 +162,8 @@ off or in perception-only mode, since audio is not an engine optimization.
   `Saved Games\DCS\Scripts\DcsQvCull\hrtf\<name>.dcshrtf`, through the deployment planner so that Back to stock removes it.
 - **Measurement distance:** a set measured closer than 1 m already holds some near-field effect; the converter notes
   it in the report ("Measured at 0.5 m: ..."). The renderer starts its near-field model from the file's `measurementDistanceM` D when
-  D is under 1 m (clamped to 0.25-1 m): the ILD shelf adds only the difference between the source's distance and D
+  D is under 1 m (clamped to 0.15-1 m, `kNearFieldFloorM`: just above the largest ear radius, 0.12 m; the file format
+  allows 0.1 m, and the converter's report says that such a set is treated as measured at 0.15 m): the ILD shelf adds only the difference between the source's distance and D
   (nothing at and beyond D), and each ear looks up the point at D on its own ray through the source, so a source at D
   plays the set's own filters (no parallax or ILD added twice). Sets measured at 1 m or farther, SADIE II's 1.2 m
   among them, get the model as before, bit for bit (A7b).
@@ -257,7 +258,7 @@ Pass: `0 failure(s)`.
 | A5 | Energy, front | white noise from the front: output per ear 0 dB ± 0.5 dB (front-normalised set; a measured set over 200 Hz-8 kHz, the converter's band) |
 | A6 | Front/back | KU100 front vs back, 2-8 kHz band level difference ≥ 3 dB, as in the source set ±1 dB |
 | A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; parallax: a source 0.3 m at 45° right gets each ear's own direction (the near, right ear sees it at < 45°, the left ear at > 45°) |
-| A7b | Near field from the set's distance | sets measured at 1.0, 1.2, 1.5 and 5 m render bit-identically (near field on, 0.1-1.8 m); a set measured at 0.5 m: a source at 0.5 m equals near field off (< 1e-4 RMS), ILD 0.25 m minus 0.5 m matches the shelf model from 0.5 m ±1 dB, 0.8 m minus 0.5 m 0 ± 0.5 dB, parallax from the 0.5 m sphere ± 0.5° |
+| A7b | Near field from the set's distance | sets measured at 1.0, 1.2, 1.5 and 5 m render bit-identically (near field on, 0.1-1.8 m); a set measured at 0.5 m: a source at 0.5 m equals near field off (< 1e-4 RMS), ILD 0.25 m minus 0.5 m matches the shelf model from 0.5 m ±1 dB, 0.8 m minus 0.5 m 0 ± 0.5 dB, parallax from the 0.5 m sphere ± 0.5°; sets at 0.10 and 0.15 m render bit-identically (the floor), finite with the largest ears, 0.2 m differs |
 | A8 | Latency | impulse from the front appears at sample `round(onset delay)` ± 1 with no block delay, for block sizes 1, 7, 480, 1056, 4096 |
 | A9 | Block-size invariance | the same input rendered with blocks of 480 and with random sizes 1-2048: identical within 1e-5 |
 | A10 | Crossfades | HRTF swap, head-radius change, ownership fade (w 0→1 and 1→0), kReset: no step above −60 dBFS on a 0 dBFS sine |
@@ -624,17 +625,22 @@ after a live off is live.
 **Log lines the app reads** (`Binaural.ParseStatus`; Audio page status, Last flight, Checks), all after the last
 `loader started` of `DcsQvCull.log`, each containing ` audio: `:
 
+`<set>` is `default` (the generic set) or `personal` (one of the pilot's own): the module never logs a set's name (the
+pilot names them, often after a person, and the log reaches diagnostic packages). The app takes the name of a
+`personal` set from the deployed `DcsQvCull.ini` `Hrtf=`. Older logs that still carry names are read the same way (and
+redacted in the diagnostic package).
+
 | Line | Meaning for the app |
 |---|---|
-| `audio: on (<rate> Hz stereo, HRTF <name>: <n> directions, ...)` | running, with that set |
-| `audio: HRTF <name> (crossfading)` | another set picked live |
+| `audio: on (<rate> Hz stereo, HRTF <set>: <n> directions, ...)` | running, with that set |
+| `audio: HRTF <set> (crossfading)` | another set picked live |
 | `audio: off (<reason>)` | off for the session; the reason is shown as is (Checks `audio-status`) |
 | `audio: off (<id> not found (<why>))` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
 | `audio: kill switch (<by>): binaural OFF (...)` / `... binaural ON` | the kill switch (key or flag) |
 | `audio: running, <n> sounds, p99 <x> ms per block, ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D, the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
 | `audio: CPU budget: at most <n> sounds now (... over budget)` | a CPU back-off, down to n sounds (Checks `audio-backoff`); `(10 s under half the budget)` raises it again |
-| `audio: on (re-enabled in the settings, HRTF <name>: <n> directions)` / `audio: on (re-armed by the kill switch ..., ...)` | running again on the same binding (after Binaural=0 live, or after the overrun stop); a later `running,` line also means running |
-| `audio: HRTF <name> not usable (<why>); the default set is used` | the pilot's set was refused by the module: the Audio page and Checks (`audio-hrtf-refused`) say so with the reason |
+| `audio: on (re-enabled in the settings, HRTF <set>: <n> directions)` / `audio: on (re-armed by the kill switch ..., ...)` | running again on the same binding (after Binaural=0 live, or after the overrun stop); a later `running,` line also means running |
+| `audio: HRTF <set> not usable (<why>); the default set is used` | the pilot's set was refused by the module: the Audio page and Checks (`audio-hrtf-refused`) say so with the reason |
 
 These are the module's own lines (`native/dcsqvcull/src/main/audio.inc`); the module's `Phrases` test keeps them in the
 source and the app's status test parses them verbatim.

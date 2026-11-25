@@ -171,13 +171,71 @@ foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/nati
     Write-Sha256Sidecar $target
 }
 # The engine payload carries the generic HRTF set itself, as the RCDATA resource HRTF_DEFAULT. Checked the way the app
-# reads it (DcsVr.Core PeResource, Binaural.PayloadHasDefaultHrtf), and byte for byte against native/binaural/data: a
-# payload built before the set was made, or from another one, would leave 3D audio greyed out or play another set.
+# reads it (DcsVr.Core PeResource: the resource directory's first language of type / name), and byte for byte against
+# native/binaural/data: a payload built before the set was made, or from another one, would leave 3D audio greyed out or
+# play another set. Read here by Find-PeResource (the same walk in PowerShell): loading the net10.0 DcsVr.Core.dll into
+# this pwsh would need pwsh on .NET 10 or later, which the script does not require.
+function Find-PeResource([byte[]]$image, [int]$type, [string]$name) {
+    function U32([int]$o) { [BitConverter]::ToUInt32($image, $o) }
+    function U16([int]$o) { [BitConverter]::ToUInt16($image, $o) }
+    $high = [uint32]2147483648; $low = [uint32]2147483647  # a directory entry's "name is a string" / "points to a directory" bit
+    try {
+        if ($image.Length -lt 0x40 -or (U16 0) -ne 0x5a4d) { return $null }
+        $pe = [int](U32 0x3c)
+        if ($pe -lt 0 -or $pe + 24 -gt $image.Length -or (U32 $pe) -ne 0x4550) { return $null }
+        $sections = U16 ($pe + 6); $optSize = U16 ($pe + 20); $opt = $pe + 24
+        $magic = U16 $opt
+        if ($magic -eq 0x20b) { $dirs = $opt + 112 } elseif ($magic -eq 0x10b) { $dirs = $opt + 96 } else { return $null }
+        $rsrcRva = U32 ($dirs + 16)
+        if ($rsrcRva -eq 0) { return $null }
+        $table = $opt + $optSize
+        $offset = {
+            param([uint32]$rva)
+            for ($i = 0; $i -lt $sections; $i++) {
+                $sh = $table + 40 * $i
+                $va = U32 ($sh + 12); $size = [Math]::Max((U32 ($sh + 8)), (U32 ($sh + 16))); $raw = U32 ($sh + 20)
+                if ($rva -ge $va -and $rva -lt $va + $size) { return [int64]$raw + ($rva - $va) }
+            }
+            return -1
+        }
+        $root = & $offset $rsrcRva
+        if ($root -lt 0) { return $null }
+        # A directory's entry matching an id ($id) or a string name ($text); returns its offset field, or $null.
+        $entry = {
+            param([int64]$dir, $id, $text)
+            $count = (U16 ($dir + 12)) + (U16 ($dir + 14))
+            for ($i = 0; $i -lt $count; $i++) {
+                $e = $dir + 16 + 8 * $i
+                $n = U32 $e
+                if ($n -band $high) {
+                    if ($null -eq $text) { continue }
+                    $at = $root + ($n -band $low)
+                    $len = U16 $at
+                    if ([string]::Equals([Text.Encoding]::Unicode.GetString($image, $at + 2, $len * 2), $text, [StringComparison]::OrdinalIgnoreCase)) { return U32 ($e + 4) }
+                } elseif ($null -ne $id -and $n -eq $id) { return U32 ($e + 4) }
+            }
+            return $null
+        }
+        $t = & $entry $root $type $null
+        if ($null -eq $t -or -not ($t -band $high)) { return $null }
+        $nm = & $entry ($root + ($t -band $low)) $null $name
+        if ($null -eq $nm -or -not ($nm -band $high)) { return $null }
+        $nameDir = $root + ($nm -band $low)
+        if ((U16 ($nameDir + 12)) + (U16 ($nameDir + 14)) -eq 0) { return $null }
+        $lang = U32 ($nameDir + 16 + 4)
+        if ($lang -band $high) { return $null }
+        $data = $root + $lang
+        $at2 = & $offset (U32 $data)
+        $dataSize = [int](U32 ($data + 4))
+        if ($at2 -lt 0 -or $at2 + $dataSize -gt $image.Length) { return $null }
+        $bytes = [byte[]]::new($dataSize)
+        [Array]::Copy($image, $at2, $bytes, 0, $dataSize)
+        return , $bytes
+    } catch { return $null }  # a malformed image (an offset past its end): no resource
+}
 if (Test-Path -LiteralPath (Join-Path $hrtfData 'sadie2_ku100.dcshrtf')) {
-    # Loaded from its bytes, so the published DcsVr.Core.dll is not held open by this script.
-    $peResource = [System.Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $payloadRoot 'DcsVr.Core.dll'))).GetType('DcsVr.Core.PeResource', $true)
     $payloadImage = [IO.File]::ReadAllBytes((Join-Path $payloadRoot 'components/dcsqvcull/DcsQvCullPayload.dll'))
-    $embeddedHrtf = $peResource.GetMethod('Find').Invoke($null, [object[]]@($payloadImage, [int]$peResource.GetField('RcData').GetValue($null), 'HRTF_DEFAULT'))
+    $embeddedHrtf = Find-PeResource $payloadImage 10 'HRTF_DEFAULT'
     $expectedHrtf = [IO.File]::ReadAllBytes((Join-Path $hrtfData 'sadie2_ku100.dcshrtf'))
     if ($null -eq $embeddedHrtf) { throw 'DcsQvCullPayload.dll has no HRTF_DEFAULT resource: rebuild the engine module (scripts/build-dcsqvcull.ps1) now that native/binaural/data has the generic set.' }
     if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$embeddedHrtf, $expectedHrtf)) { throw "DcsQvCullPayload.dll embeds another HRTF set ($($embeddedHrtf.Length) bytes) than native/binaural/data/sadie2_ku100.dcshrtf: rebuild the engine module." }

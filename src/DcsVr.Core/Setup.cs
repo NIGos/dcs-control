@@ -87,7 +87,7 @@ public static class Readiness
                 if (audio.State == "off" && audio.Reason is { } reason)
                     Add("audio-status", CheckState.Warning, "3D headphone audio", $"At the last DCS start it stayed off: {reason}. DCS's own sound played.");
                 if (audio.HrtfFallback is { } refused)
-                    Add("audio-hrtf-refused", CheckState.Warning, "3D headphone audio", $"At the last DCS start your HRTF set \"{refused}\" could not be used ({audio.HrtfFallbackReason}), so the generic one played. Import the SOFA file again on the Audio page.");
+                    Add("audio-hrtf-refused", CheckState.Warning, "3D headphone audio", $"At the last DCS start your HRTF set{(refused == Binaural.ModulePersonalSet ? "" : $" \"{refused}\"")} could not be used ({audio.HrtfFallbackReason}), so the generic one played. Import the SOFA file again on the Audio page.");
                 else if (audio.Backoffs > 0)
                     Add("audio-backoff", CheckState.Manual, "3D headphone audio", $"At the last DCS start it rendered fewer sounds in 3D to stay within its CPU budget{(audio.MaxObjectsNow is { } n ? $" (down to {n})" : "")}. Raise CPU budget on the Audio page if your CPU has room, or lower Most 3D sounds.");
             }

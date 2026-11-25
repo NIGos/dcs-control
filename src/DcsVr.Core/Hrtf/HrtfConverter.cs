@@ -61,6 +61,9 @@ public static class HrtfConverter
     /// <summary>A set measured closer than this has the near field in its responses; the renderer's near-field model
     /// assumes a far-field measurement (docs/BINAURAL_AUDIO.md 4.2).</summary>
     public const double NearMeasurementM = 1.0;
+    /// <summary>The closest measurement distance the renderer's near field takes from a set (binaural_core.h
+    /// kNearFieldFloorM, just above the largest ear radius): a set measured closer is used as if measured here.</summary>
+    public const double NearFieldFloorM = 0.15;
 
     public static HrtfConvertedSet Convert(HrirSet set, bool personal, int? taps = null)
     {
@@ -84,8 +87,10 @@ public static class HrtfConverter
         var outTaps = taps ?? Math.Clamp((int)Math.Round(128 * set.SampleRate / 48000 / 8) * 8, 16, 512);
         if (outTaps < DcsHrtfFile.MinTaps || outTaps > DcsHrtfFile.MaxTaps) throw new HrtfConversionException("Tap count out of range.");
         var warnings = new List<string>();
-        if (set.MeasurementDistanceM < NearMeasurementM)
-            warnings.Add($"Measured at {set.MeasurementDistanceM:0.0#} m, closer than most sets: close sounds (in the cockpit) start from the set's own near field.");
+        if (set.MeasurementDistanceM < NearFieldFloorM)
+            warnings.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Measured at {set.MeasurementDistanceM:0.0#} m, closer than 3D audio uses: it is treated as measured at {NearFieldFloorM:0.0#} m (close sounds in the cockpit start from there)."));
+        else if (set.MeasurementDistanceM < NearMeasurementM)
+            warnings.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Measured at {set.MeasurementDistanceM:0.0#} m, closer than most sets: close sounds (in the cockpit) start from the set's own near field."));
 
         // 2. Directions: unit, merged (repeats averaged), triangulated.
         var unit = new List<double[]>();

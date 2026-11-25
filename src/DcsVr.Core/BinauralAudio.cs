@@ -195,9 +195,12 @@ public static partial class Binaural
     /// A "running," line is written only while sounds were rendered in 3D, so it also means running after an "off".
     /// "off (binaural is off in the settings)" is the module following its settings (turned off live), not a failure:
     /// switched off. <paramref name="enabled"/>: the deployed [Audio] Binaural (false: the module is installed for
-    /// other features and 3D audio is off in the profile); null when not known (Last flight reads a past session).
+    /// other features and 3D audio is off in the profile; while DCS runs and the module has said it followed that, it is
+    /// switched off in the settings, live); null when not known (Last flight reads a past session).
+    /// The module calls each of the pilot's sets "personal" (never by its name): <paramref name="deployedHrtf"/>, the
+    /// deployed [Audio] Hrtf, names it; without it the status says "personal". Logs of earlier builds name the set.
     /// </summary>
-    public static AudioStatus ParseStatus(IEnumerable<string>? moduleLines, bool installed, bool dcsRunning, bool? enabled = null)
+    public static AudioStatus ParseStatus(IEnumerable<string>? moduleLines, bool installed, bool dcsRunning, bool? enabled = null, string? deployedHrtf = null)
     {
         if (!installed) return new("not-installed", "Launch DCS installs it when 3D headphone audio is on.");
         var lines = new List<string>();
@@ -206,8 +209,7 @@ public static partial class Binaural
             if (line.Contains("loader started", StringComparison.Ordinal)) { lines.Clear(); continue; }
             if (line.Contains(" audio: ", StringComparison.Ordinal) || line.StartsWith("audio: ", StringComparison.Ordinal)) lines.Add(line);
         }
-        if (enabled == false) return new("disabled", "Off in this profile. DCS's own sound plays.", Lines: lines.TakeLast(12).Select(l => l.Trim()).ToArray());
-        string? state = null, reason = null, hrtf = null, fallback = null, fallbackWhy = null; int? sounds = null, maxNow = null; double? cost = null; bool? pose = null; var backoffs = 0; var switchedOff = false;
+        string? state = null, reason = null, hrtf = null, fallback = null, fallbackWhy = null; int? sounds = null, maxNow = null; double? cost = null; bool? pose = null; var backoffs = 0; var switchedOff = false; var started = false;
         foreach (var line in lines)
         {
             var text = line[(line.IndexOf("audio: ", StringComparison.Ordinal) + 7)..].Trim();
@@ -217,7 +219,7 @@ public static partial class Binaural
                 if (NotFoundRegex().Match(reason) is { Success: true } nf) reason = $"this DCS version's sound engine is not the one it was made for ({nf.Groups[1].Value})";
                 continue;
             }
-            if (text.StartsWith("on (", StringComparison.Ordinal)) { state = "running"; reason = null; switchedOff = false; }
+            if (text.StartsWith("on (", StringComparison.Ordinal)) { state = "running"; reason = null; switchedOff = false; started = true; }
             if (KillRegex().Match(text) is { Success: true } k) switchedOff = k.Groups[1].Value == "OFF";
             if (FallbackRegex().Match(text) is { Success: true } fb) { fallback = fb.Groups[1].Value; fallbackWhy = fb.Groups[2].Value; continue; }
             if (HrtfRegex().Match(text) is { Success: true } h)
@@ -241,17 +243,24 @@ public static partial class Binaural
             }
         }
         var tail = lines.TakeLast(12).Select(l => l.Trim()).ToArray();
+        hrtf = Named(hrtf); fallback = Named(fallback);
+        var settingsOff = state == "off" && reason == SettingsOffReason;
+        // Off in the deployed settings: off in this profile, unless DCS runs and the module said it switched off live.
+        if (enabled == false && !(dcsRunning && settingsOff)) return new("disabled", "Off in this profile. DCS's own sound plays.", Lines: tail);
         if (state is null)
             return new("waiting", dcsRunning ? "Waiting for DCS's sound engine." : "Installed for the next DCS start.", Lines: tail);
-        if (state == "off" && reason == SettingsOffReason)
-            return new("switched-off", "Switched off in the settings. DCS's own sound plays.", null, Backoffs: backoffs, SwitchedOff: true, Hrtf: hrtf, Lines: tail) { SwitchedOffBy = "settings" };
-        if (state == "off") return new("off", $"Off: {reason}. DCS's own sound plays.", reason, Backoffs: backoffs, Lines: tail) { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy };
+        if (settingsOff)
+            return new("switched-off", "Switched off in the settings. DCS's own sound plays.", null, Backoffs: backoffs, SwitchedOff: true, Hrtf: hrtf, Lines: tail) { SwitchedOffBy = "settings", Started = started };
+        if (state == "off") return new("off", $"Off: {reason}. DCS's own sound plays.", reason, Backoffs: backoffs, Lines: tail) { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, Started = started };
         var parts = new List<string> { switchedOff ? "Switched off in flight" : dcsRunning ? "Running" : "Ran at the last DCS start" };
         if (sounds is { } n) parts.Add(n == 1 ? "1 sound" : n + " sounds");
         if (cost is { } t) parts.Add(t.ToString("0.0#", CultureInfo.InvariantCulture) + " ms");
         return new(switchedOff ? "switched-off" : "running", string.Join(" · ", parts), null, sounds, cost, backoffs, maxNow, switchedOff, hrtf, pose, tail)
-            { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, SwitchedOffBy = switchedOff ? "key" : null };
+            { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, SwitchedOffBy = switchedOff ? "key" : null, Started = started };
 
+        // The module's "personal": the set Launch DCS deployed (the ini's Hrtf) when that is one of the pilot's.
+        string? Named(string? name) =>
+            name == ModulePersonalSet && NormalizeHrtfName(deployedHrtf) is var d && d != DefaultHrtf && IsValidHrtfName(d) ? d : name;
         static string Inside(string text)
         {
             var open = text.IndexOf('('); var close = text.LastIndexOf(')');
@@ -261,6 +270,15 @@ public static partial class Binaural
 
     /// <summary>The module's line when its settings turn 3D audio off (native/dcsqvcull/src/main/audio.inc).</summary>
     public const string SettingsOffReason = "binaural is off in the settings";
+    /// <summary>The module's log word for any of the pilot's own sets (audio.inc LogSetName): it never logs a set's name.</summary>
+    public const string ModulePersonalSet = "personal";
+
+    /// <summary>The Audio page's status when the applied profile has 3D audio on but no HRTF set is left to render with
+    /// (the pilot removed the last one; Launch DCS would deploy none): "unavailable", unless DCS is running a session in
+    /// which the module already started binaural audio (an "on (" line since the loader started), which goes on with
+    /// the set it loaded: that session's own status.</summary>
+    public static AudioStatus WithoutUsableSet(AudioStatus? live, bool dcsRunning) =>
+        dcsRunning && live is { Started: true } ? live : new("unavailable", UnusableReason + " DCS's own sound plays.");
 
     /// <summary>The status of 3D audio from the module's newest log in the Saved Games of <paramref name="optionsPath"/>,
     /// and from the deployed DcsQvCull.ini: installed for other features with [Audio] Binaural not 1, it is "disabled".</summary>
@@ -269,13 +287,16 @@ public static partial class Binaural
         var module = EngineOptimizations.ModuleDirectory(optionsPath);
         var installed = File.Exists(Path.Combine(module, "DcsQvCull.dll"));
         bool? enabled = null;
+        string? deployedHrtf = null;
         if (installed)
         {
             // The module's own default is Binaural=0: no file or no [Audio] is off.
             try
             {
                 var ini = Path.Combine(module, LiveSettings.EngineFile);
-                enabled = File.Exists(ini) && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ini))).TryGetValue("Audio.Binaural", out var on) && on.Trim() == "1";
+                var values = File.Exists(ini) ? IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ini))) : null;
+                enabled = values is not null && values.TryGetValue("Audio.Binaural", out var on) && on.Trim() == "1";
+                if (values is not null && values.TryGetValue("Audio.Hrtf", out var set)) deployedHrtf = set.Trim();
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         }
@@ -287,7 +308,7 @@ public static partial class Binaural
                 lines = LastFlight.ReadLines(log, 8L * 1024 * 1024, l => l.Contains("audio: ", StringComparison.Ordinal) || l.Contains("loader started", StringComparison.Ordinal));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
-        return ParseStatus(lines, installed, dcsRunning, enabled);
+        return ParseStatus(lines, installed, dcsRunning, enabled, deployedHrtf);
     }
 
     [GeneratedRegex(@"^([\w. -]+?) not found \(")] private static partial Regex NotFoundRegex();
@@ -321,6 +342,8 @@ public sealed record AudioStatus(string State, string Summary, string? Reason = 
     /// <summary>With "switched-off": "key" (the in-flight key or toggle_audio.flag) or "settings" (turned off live).</summary>
     public string? SwitchedOffBy { get; init; }
     public string? HrtfFallbackReason { get; init; }
+    /// <summary>The module started binaural audio in this session (an "on (" line after the last "loader started").</summary>
+    public bool Started { get; init; }
 }
 
 /// <summary>Reads one resource's data from a PE image's resource directory (no loading, no execution).</summary>

@@ -1218,6 +1218,72 @@ void NoSetNoHooks() {
   g_rigHrtf = &TestHrtf;
 }
 
+// 3D audio off (the default, as in 0.7.0): no control thread, nothing polled, not one log line. Turned on Live, the
+// worker's ini reload (StartIfWanted) starts the thread once; never after Stop.
+void DormantWhenOff() {
+  ResetModule();
+  const std::wstring dir = TestDir(L"audio_rig");
+  const std::wstring saved = g_dir;
+  g_dir = dir;
+  audio::g_testNoThread = true;
+  const int s0 = audio::g_testThreadStarts.load();
+  int audioLines = 0;
+  for (const char* ini : {"[General]\r\nPerceptionOnly=1\r\n", "[Audio]\r\nBinaural=0\r\nHrtf=Ann Lee\r\n"}) {
+    WriteIni(dir, ini);
+    StartReportCapture();
+    audio::Start();
+    const std::string log = StopReportCapture();
+    audioLines += log.find("audio:") != std::string::npos ? 1 : 0;
+    if (ini[1] == 'G') audio::Stop();
+  }
+  const bool offIdle = audio::g_testThreadStarts.load() == s0 && audioLines == 0 && !audio::g_haveCfg && !audio::g_installed.load();
+  WriteIni(dir, "[Audio]\r\nBinaural=1\r\n");
+  const bool liveOn = audio::StartIfWanted() && audio::g_testThreadStarts.load() == s0 + 1;
+  const bool once = !audio::StartIfWanted() && audio::g_testThreadStarts.load() == s0 + 1;
+  audio::Stop();
+  const bool notAfterStop = !audio::StartIfWanted() && audio::g_testThreadStarts.load() == s0 + 1;
+  audio::Start();
+  const bool atStart = audio::g_testThreadStarts.load() == s0 + 2;
+  Check(offIdle && liveOn && once && notAfterStop && atStart,
+        "audio off: no control thread and no log line (no [Audio], Binaural=0); turned on Live the worker's reload "
+        "starts it once, never after Stop; Binaural=1 at payload start starts it");
+  ResetModule();
+  g_dir = saved;
+}
+
+// The pilot names the sets (often after a person): the module's log says "personal", never a name (config line,
+// on, crossfading, not usable, on again, an invalid name's note).
+void NoSetNamesInLog() {
+  StartReportCapture();
+  Rig r;
+  OwnedRig(r, "[Audio]\r\nBinaural=1\r\nHrtf=Ann Lee\r\nLateHeadTracking=0\r\n");
+  std::vector<float> a(2 * 480), b(2 * 480);
+  auto run = [&](const char* ini) {
+    if (ini) WriteIni(r.dir, ini);
+    Tick();
+    for (int i = 0; i < 3; ++i) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    Tick();
+  };
+  run(nullptr);
+  run("[Audio]\r\nBinaural=1\r\nHrtf=Bo Zed\r\nLateHeadTracking=0\r\n");
+  run("[Audio]\r\nBinaural=1\r\nHrtf=missing\r\nLateHeadTracking=0\r\n");
+  run("[Audio]\r\nBinaural=0\r\nHrtf=Bo Zed\r\nLateHeadTracking=0\r\n");
+  run("[Audio]\r\nBinaural=1\r\nHrtf=Bo Zed\r\nLateHeadTracking=0\r\n");
+  run("[Audio]\r\nBinaural=1\r\nHrtf=Cy's\r\nLateHeadTracking=0\r\n");
+  const std::string log = StopReportCapture();
+  RigDown(r);
+  Check(log.find("HRTF personal: ") != std::string::npos && log.find("HRTF personal (crossfading)") != std::string::npos &&
+            log.find("HRTF personal not usable (") != std::string::npos && log.find("Hrtf=personal ") != std::string::npos &&
+            log.find("re-enabled in the settings, HRTF personal: ") != std::string::npos &&
+            log.find("Hrtf is not a valid name (4 characters)") != std::string::npos && log.find("Ann") == std::string::npos &&
+            log.find("Bo Zed") == std::string::npos && log.find("Cy") == std::string::npos,
+        "audio log: a set of the pilot's is \"personal\" in every line, never its name");
+  if (log.find("Ann") != std::string::npos || log.find("Bo Zed") != std::string::npos) printf("%s\n", log.c_str());
+}
+
 // The log phrases the app reads, and the status bits.
 void Phrases() {
   const std::string src = lptest::ReadAllSources();
@@ -1463,13 +1529,15 @@ inline void Run() {
   ThunksNotExecutable();
   StopGrace();
   NoSetNoHooks();
+  DormantWhenOff();
+  NoSetNamesInLog();
   NoAlloc();
   Phrases();
   Stress();
   audio::g_testNoThread = false;
   // The test folders (ini files, flags) away.
   const std::wstring root = TestDir(L"x").substr(0, TestDir(L"x").size() - 2);
-  for (const wchar_t* sub : {L"audio_rig", L"audio_cfg", L"x"}) {
+  for (const wchar_t* sub : {L"audio_rig", L"audio_cfg", L"x"}) {  // DormantWhenOff uses audio_rig too
     const std::wstring d = root + sub + L"\\";
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((d + L"*").c_str(), &fd);

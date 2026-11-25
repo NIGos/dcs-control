@@ -15,7 +15,7 @@
 //     sources under 2 m (fading out between 1.5 and 2 m; the ear offset shrinks to 0 between 2 and 1 head radius, so
 //     a source at the head never flips the near ear's filter), plus a first-order low shelf per ear (1 kHz corner,
 //     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees (+8 dB near ear, -4 dB far ear). A set
-//     measured closer than 1 m (Header.measurementDistanceM = D) already holds the near field down to D: the shelf adds
+//     measured closer than 1 m (Header.measurementDistanceM = D, at least kNearFieldFloorM) already holds the near field down to D: the shelf adds
 //     only the difference from D (nothing at and beyond D), and each ear looks up the point at D on its own ray through
 //     the source, so a source at D plays the set's own filters. Sets measured at 1 m or farther (SADIE II: 1.2 m)
 //     get the model as described.
@@ -60,6 +60,12 @@ constexpr float kMinItdRadiusM = 0.04f, kMaxItdRadiusM = 0.15f;
 // The ear radius (Config.earRadiusM, SetEarRadius): the geometric head radius, 48-66 cm around (binaural_config.h
 // HeadRadiusFromCircumferenceCm; 0.0907 m at 57 cm), kept apart from the ITD radius, which is a fit of the set's delays.
 constexpr float kMinEarRadiusM = 0.06f, kMaxEarRadiusM = 0.12f;
+// The closest measurement distance the near field takes from a set (HrtfSet nearFromM): a set measured closer (the file
+// format allows 0.1 m) is used as if measured here. Just above the largest ear radius, so the parallax lookup's point at
+// that distance on each ear's ray always exists. The app's converter says so for such a set (HrtfConverter
+// NearFieldFloorM, compared with this value by the app's tests).
+constexpr float kNearFieldFloorM = 0.15f;
+static_assert(kNearFieldFloorM > kMaxEarRadiusM, "the near-field floor must lie outside every ear position");
 // The largest ITD scale the head size asks for: 66 cm against the 57 cm reference (binaural_config.h PilotItdRadiusM).
 constexpr float kMaxHeadSizeScale = 66.0f / 57.0f;
 

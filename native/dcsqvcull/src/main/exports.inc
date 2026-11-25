@@ -113,7 +113,7 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<WorkerThread>, nullptr, 0, nullptr);
   if (!t) return 2;
   g_workerThread = t;  // joined by DcsQvPayload_Stop
-  audio::Start();      // binaural audio: its own control thread (independent of the engine and of Scene.dll)
+  audio::Start();      // binaural audio: its own control thread, only with [Audio] Binaural=1 (independent of the engine)
   return 0;
 }
 

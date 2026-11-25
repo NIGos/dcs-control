@@ -90,7 +90,8 @@ inline Read ReadIni(const wchar_t* ini) {
     if (binaural_config::IsValidHrtfName(buf)) {
       wcsncpy_s(c.hrtf, buf, _TRUNCATE);
     } else {
-      Note(r, "audio: config: Hrtf=%ls is not a valid name, default", buf);
+      // Never the value itself: the pilot names the sets, often after a person (the log reaches diagnostic packages).
+      Note(r, "audio: config: Hrtf is not a valid name (%zu characters), default", wcslen(buf));
       wcscpy_s(c.hrtf, binaural_config::kDefaultHrtfName);
     }
   }
