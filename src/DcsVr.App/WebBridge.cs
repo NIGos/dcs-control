@@ -537,20 +537,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         // 3D headphone audio in the module's newest log (Audio page status), and the applied profile's state.
                         var audioOptions = await Task.Run(EngineOptionsPath);
                         var audioApplied = await Task.Run(service.ReadAppliedProfile);
-                        // On in the applied profile, but without an HRTF set the next Launch DCS deploys none of it:
-                        // unavailable, and not "applied" (the in-flight switch has nothing to switch), unless the running
-                        // DCS already started binaural audio with a set it loaded (the pilot removed it since): that
-                        // session's own status.
                         var audioWanted = audioApplied?.Profile.ForLaunch().UsesBinauralAudio == true;
-                        var audioUsable = !audioWanted || await Task.Run(service.BinauralAudioUsable);
                         var audioRunning = DcsRunning();
-                        var audioLive = audioOptions is null ? null : await Task.Run(() => Binaural.ReadStatus(audioOptions, audioRunning));
-                        var audioStatus = audioUsable || audioLive is null ? audioLive : Binaural.WithoutUsableSet(audioLive, audioRunning);
-                        return Reply(id, new
-                        {
-                            status = audioStatus,
-                            applied = audioWanted && (audioUsable || audioStatus?.State != "unavailable"), dcsRunning = audioRunning,
-                        });
+                        var audioStatus = audioOptions is null ? null : await Task.Run(() => Binaural.ReadStatus(audioOptions, audioRunning));
+                        return Reply(id, new { status = audioStatus, applied = audioWanted, dcsRunning = audioRunning });
                     }
                     if (engine)
                     {
@@ -727,7 +717,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     var detection = await Task.Run(() => SetupDetection.Detect(_profile, CurrentInventory, new DetectionSources { SavedRuntimes = service.SavedRuntime }));
                     _activeRoute = (DateTime.UtcNow, detection.Active);
                     var detectedRefresh = await Task.Run(() => HeadsetRefresh.Detect(detection.Profile.Runtime));
-                    return Reply(id, new { profile = detection.Profile, detected = detection.Detected, notes = detection.Notes, active = detection.Active.Summary,
+                    return Reply(id, new { profile = JsonData.ProfileNode(detection.Profile), detected = detection.Detected, notes = detection.Notes, active = detection.Active.Summary,
                         activeRoute = new { route = detection.Active.Route?.ToString(), summary = detection.Active.Summary }, headsetRefresh = detectedRefresh });
                 case "refresh": Invalidate(); await Capture(); _status = "PC rescanned."; break;
                 case "pimaxFovea":
@@ -1232,7 +1222,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         var dcsNow = DcsRunning();
         var readiness = _readiness is { } r && r.Checks.Any(c => c.Id == "closed" && (c.State == CheckState.Error) != dcsNow)
             ? r with { Checks = [.. r.Checks.Where(c => c.Id != "closed")] } : _readiness;
-        return new { version = ProductInfo.Version, profile = _profile, presets = PresetsView(), dcs = _dcs, options = _options, inventory = CurrentInventory with { DcsRunning = dcsNow }, pimax = PimaxView(),
+        // Profiles go to the page with every setting (JsonData.ProfileNode): the file leaves out those at their default.
+        return new { version = ProductInfo.Version, profile = JsonData.ProfileNode(_profile), presets = PresetsView(), dcs = _dcs, options = _options, inventory = CurrentInventory with { DcsRunning = dcsNow }, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
             issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), foreignDxgi = service.ForeignDxgi(_profile, CurrentInventory), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names, amdOnly = EngineOptimizations.AmdOnly(GpuInfo.Adapters()) }, status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
@@ -1240,16 +1231,14 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             originals = new { count = originals.Count + leftovers.Count, files = originals.Files.Concat(leftovers.Select(l => new OriginalItem(l.Path, l.RenameTo is null ? "remove" : "restore", false, l.Detail + "; not in the record of originals"))).ToArray(), state = originals.State, problem = originals.Problem, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
             launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
-            appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = dcsNow, dcsStuck = DcsStuckLast(dcsNow),
+            appliedDraft = applied?.Profile is { } appliedProfile ? JsonData.ProfileNode(appliedProfile) : null, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = dcsNow, dcsStuck = DcsStuckLast(dcsNow),
             // The settings Live mode writes while DCS runs (LiveSettings): the page tags them.
             liveFields = LiveSettings.AvailableFields(applied?.Profile, applied?.Journal),
             savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness,
             // 3D headphone audio: the pilot's own HRTF sets (the generic one is always there), and whether this build has
             // the pupil shift layer that publishes the head pose.
-            hrtfSets = service.Hrtf.List(), headPoseLayer = File.Exists(Path.Combine(service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll")),
-            // Whether 3D audio has a set to render with (the generic one in this build, or one of the pilot's own), and whether
-            // this installation can convert a SOFA file at all: the Audio page greys out what cannot work, with the reason.
-            audioUsable = service.BinauralAudioUsable(), audioUnusableReason = Binaural.UnusableReason, sofaImport = _hrtfConverter is not CliHrtfConverter || CliHrtfConverter.IsAvailable() };
+            // The SOFA converter (DcsVr.Cli hrtf-convert, out of process) ships with every build: nothing is probed here.
+            hrtfSets = service.Hrtf.List(), headPoseLayer = File.Exists(Path.Combine(service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll")) };
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>
     private object? SavedRuntimeView() => service.SavedRuntime.Current() is { } s

@@ -95,7 +95,7 @@ internal static class WebVerification
         // Pimax Play running; a new profile's default values with every feature checked on the Pimax route (Engine Optimizations too).
         Readiness.ActiveRouteProvider = () => new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
         if (neural is not null) await Step("window.dcsUi.saveRuntime("+JsonSerializer.Serialize(neural)+")");
-        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,quad:true,dlss:true,framegen:true,boost:true}})});"
+        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.ProfileNode(new VrProfile()).ToJsonString()+",{route:'Pimax',features:{engine:true,quad:true,dlss:true,framegen:true,boost:true}})});"
             + "return ui.run('refresh',ui.draft());})()");
         await Step("window.dcsUi.refreshBoostPlan ? window.dcsUi.refreshBoostPlan() : null");
         // Two presets, the second one active: the Presets page, and the Preset button on the Overview.
@@ -167,19 +167,19 @@ internal static class WebVerification
         Readiness.ActiveRouteProvider = () => new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
         if (neural is not null) await Step("window.dcsUi.saveRuntime("+JsonSerializer.Serialize(neural)+")");
         // Stock first: a new profile with nothing on, as at the first start.
-        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{}})});return ui.run('refresh',ui.draft());})()");
+        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.ProfileNode(new VrProfile()).ToJsonString()+",{route:'Pimax',features:{}})});return ui.run('refresh',ui.draft());})()");
         await Shot("v-overview-stock", "overview");
         // The features ticked one at a time in the right panel, for the video's click-through.
         var steps = new[] { "engine:true", "engine:true,boost:true", "engine:true,boost:true,quad:true", "engine:true,boost:true,quad:true,dlss:true", "engine:true,boost:true,quad:true,dlss:true,framegen:true" };
         for (var step = 0; step < steps.Length; step++)
         {
-            await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{"+steps[step]+"}})});return ui.run('refresh',ui.draft());})()");
+            await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.ProfileNode(new VrProfile()).ToJsonString()+",{route:'Pimax',features:{"+steps[step]+"}})});return ui.run('refresh',ui.draft());})()");
             await Shot($"v-step{step + 1}", "overview");
         }
         // Depth boost off, then on, on the Perception page.
         await Shot("v-depth-off", "pupil", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('depthControls'));");
         // Then every feature, Depth boost and Far depth included.
-        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,boost:true,quad:true,dlss:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
+        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.ProfileNode(new VrProfile()).ToJsonString()+",{route:'Pimax',features:{engine:true,boost:true,quad:true,dlss:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
         await Step("(()=>{"+Edit+"edit('depthBoost',true);edit('farDepth',true);edit('peripheryStability',true);})()");
         await Step("window.dcsUi.refreshBoostPlan ? window.dcsUi.refreshBoostPlan() : null");
         await Shot("v-overview", "overview");
@@ -282,11 +282,11 @@ internal static class WebVerification
         await shot("v07-topbar-end-dcs", "framegen", CloseFolds("framegen"));
         await step("(async()=>{const ui=window.dcsUi;await ui.request('dcsStatus',{simulate:false});await ui.request('dcsStatus',{stuck:null});await ui.pollDcs();ui.state.dcsRunning=false;ui.refreshWorkflow();})()");
         // Quest 3 through Virtual Desktop: the route in the top bar, its fixed focus with Hide the focus edge.
-        await step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'VirtualDesktop',features:{engine:true,boost:true,quad:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
+        await step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.ProfileNode(new VrProfile()).ToJsonString()+",{route:'VirtualDesktop',features:{engine:true,boost:true,quad:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
         await shot("v07-vd-overview", "overview", "");
         await shot("v07-vd-quad", "foveation", CloseFolds("foveation") + ScrollTo("setting-pimaxHorizontalFov"));
         // Back to the Pimax profile with every feature, as before, for the shots that follow.
-        await step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,boost:true,quad:true,dlss:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
+        await step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.ProfileNode(new VrProfile()).ToJsonString()+",{route:'Pimax',features:{engine:true,boost:true,quad:true,dlss:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
         await Edits("edit('depthBoost',true);edit('farDepth',true);edit('peripheryStability',true);edit('fpsLimit','Preserve');");
     }
 

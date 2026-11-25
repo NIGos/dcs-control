@@ -127,7 +127,7 @@ public static class EngineOptimizations
         // "the driver lacks command lists" line).
         if (lines.LastOrDefault(l => l.Contains("the driver lacks command lists", StringComparison.Ordinal) || l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal)) is { } missing)
             warnings.Add(NoCommandListsAdvice(missing));
-        // The recorders ran on the lists Windows emulates (Multi-threading without driver support, on by default): on a PC with an
+        // The recorders ran on the lists Windows emulates (Multi-threading without driver support, the pilot's choice there): on a PC with an
         // NVIDIA card something takes the driver's own lists from DCS (integrated graphics, MFAA, a hooked program), so say
         // what gives the full gain. The GPU line names DCS's adapter; a recorder's line is the fallback.
         else if ((lines.LastOrDefault(l => l.Contains("DriverCommandLists=0 (recorders on emulated lists)", StringComparison.Ordinal))
@@ -204,6 +204,12 @@ public static class EngineOptimizations
     public static bool AmdOnly(IReadOnlyList<GpuAdapter> adapters) =>
         adapters.Any(a => a.Vendor == "AMD") && !adapters.Any(a => a.Vendor == "NVIDIA");
 
+    /// <summary>"Multi-threading without driver support" left automatic (VrProfile.EngineRecordersEmulatedLists null) is
+    /// on: AMD-only graphics, where it was tested (Radeon RX 7900 XTX, GitHub #27). Off elsewhere, as in 0.7.0: on an
+    /// NVIDIA PC whose device lacks command lists it has not been tested, so the Engine page gives the advice and the
+    /// pilot can turn it on. Unknown adapters: off (the option is hidden there too).</summary>
+    public static bool EmulatedListsAutoOn() => AmdOnly(GpuInfo.Adapters());
+
     /// <summary>The Engine page shows "Multi-threading without driver support" only where it can matter: the GPU is AMD,
     /// or the latest module log says DriverCommandLists=0. Hidden on NVIDIA with command lists, where the module ignores
     /// it (on by default, so showing it while on would show it on every PC). The interface applies the same rule
@@ -214,8 +220,9 @@ public static class EngineOptimizations
     /// <summary>Whether DcsQvCull.ini gets [Model] RecordersEmulatedLists=1 when the option is on: where the option shows
     /// (<see cref="ShowsEmulatedListsOption"/>), or when the adapters could not be read. With driver command lists the
     /// module ignores the key (deferred_rec.h RecorderMode picks the offset ring whenever DriverCommandLists=1), so a PC
-    /// with them keeps the file earlier versions wrote. An NVIDIA PC whose device lacks the lists (Threaded optimization
-    /// Off, MFAA On) gets it from the launch after the module first logs DriverCommandLists=0.</summary>
+    /// with them keeps the file earlier versions wrote. An NVIDIA PC whose device lacks the lists (MFAA On, the integrated
+    /// GPU, a hooking program) gets it, when the pilot turned the option on (it is not automatic there,
+    /// <see cref="EmulatedListsAutoOn"/>), from the launch after the module first logs DriverCommandLists=0.</summary>
     public static bool EmulatedListsMatter(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists) =>
         adapters.Count == 0 || ShowsEmulatedListsOption(adapters, logNoDriverCommandLists);
 
@@ -254,7 +261,10 @@ public static class EngineOptimizations
         const string start = "Multi-threaded shadows and G-buffer cannot run: DCS's graphics device has no D3D11 command lists. DCS draws them as usual and the other optimizations still run. ";
         if (line is not null && !line.Contains("DriverCommandLists=0", StringComparison.Ordinal) && line.Contains("DriverCommandLists=1", StringComparison.Ordinal))
             return "Multi-threaded shadows and G-buffer cannot run: DCS's graphics device lacks a capability they need (" + Capabilities(line) + "). DCS draws them as usual and the other optimizations still run. Please report it with a diagnostic package.";
-        return start + (NvidiaCause(line) ?? "This graphics driver does not offer them (common on AMD cards). Turn on Multi-threading without driver support, on this page, to run them anyway, with a smaller gain.");
+        // On NVIDIA it stays off unless the pilot turns it on (untested there, EmulatedListsAutoOn), as in 0.7.0.
+        return start + (NvidiaCause(line) is { } cause
+            ? cause + " Or turn on Multi-threading without driver support, on this page, to run them anyway, with a smaller gain (not tested on NVIDIA yet)."
+            : "This graphics driver does not offer them (common on AMD cards). Turn on Multi-threading without driver support, on this page, to run them anyway, with a smaller gain.");
     }
 
     /// <summary>The recorders run on the command lists Windows emulates (Multi-threading without driver support) on a PC

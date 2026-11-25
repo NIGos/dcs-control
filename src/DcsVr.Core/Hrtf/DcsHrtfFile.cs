@@ -167,6 +167,12 @@ public static class DcsHrtfFile
     public static Data Read(ReadOnlySpan<byte> bytes)
     {
         if (Validate(bytes) is { } why) throw new InvalidDataException("Not a valid HRTF file: " + why + ".");
+        return ReadValid(bytes);
+    }
+
+    /// <summary>Reads a file <see cref="Validate"/> has accepted, without checking it again.</summary>
+    internal static Data ReadValid(ReadOnlySpan<byte> bytes)
+    {
         var h = bytes[..HeaderBytes];
         int n = (int)BinaryPrimitives.ReadUInt32LittleEndian(h[16..]), t = (int)BinaryPrimitives.ReadUInt32LittleEndian(h[20..]);
         int taps = BinaryPrimitives.ReadUInt16LittleEndian(h[24..]);

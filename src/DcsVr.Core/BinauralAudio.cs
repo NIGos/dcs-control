@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 namespace DcsVr.Core;
 
 /// <summary>
-/// 3D headphone audio, the app side (docs/BINAURAL_AUDIO.md, task D): the engine module's [Audio] section, its key names
+/// 3D headphone audio, the app side (docs/BINAURAL_AUDIO.md): the engine module's [Audio] section, its key names
 /// and ranges (the same as native/binaural/include/binaural_config.h, which a test reads and compares), the kill switch
 /// flag, DCS's speaker layout, and what the module's log says about it.
 /// </summary>
@@ -132,50 +132,41 @@ public static partial class Binaural
 
     // ---- Does the installed engine module carry the audio part, and the generic set? -----------------------------------
 
-    private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Has)> ResourceCache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>What the payload file carries, read once per size and time: the audio part (the UTF-16 name HRTF_DEFAULT
+    /// anywhere in the image) and the generic set (the RCDATA resource HRTF_DEFAULT with data).</summary>
+    private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Audio, bool DefaultHrtf)> PayloadCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly byte[] EmbeddedMarker = Encoding.Unicode.GetBytes("HRTF_DEFAULT");
+    private static (bool Audio, bool DefaultHrtf) PayloadFacts(string? payloadPath)
+    {
+        if (payloadPath is null) return default;
+        try
+        {
+            var info = new FileInfo(payloadPath);
+            if (!info.Exists || info.Length > 256L * 1024 * 1024) return default;
+            if (PayloadCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return (cached.Audio, cached.DefaultHrtf);
+            var bytes = File.ReadAllBytes(info.FullName);
+            var facts = (Audio: bytes.AsSpan().IndexOf(EmbeddedMarker) >= 0, DefaultHrtf: PeResource.Find(bytes, PeResource.RcData, "HRTF_DEFAULT") is { Length: > 0 });
+            PayloadCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, facts.Audio, facts.DefaultHrtf);
+            return facts;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return default; }
+    }
+
     /// <summary>The payload embeds the generic HRTF set: an RCDATA resource named HRTF_DEFAULT with data in its PE resource
     /// directory (binaural_config.h kEmbeddedResourceName; native/dcsqvcull embeds native/binaural/data/sadie2_ku100.dcshrtf
     /// when the build has it). The name alone is also in the module's code, so this reads the resource table. Cached by
     /// size and time.</summary>
-    public static bool PayloadHasDefaultHrtf(string? payloadPath)
-    {
-        if (payloadPath is null) return false;
-        try
-        {
-            var info = new FileInfo(payloadPath);
-            if (!info.Exists || info.Length > 256L * 1024 * 1024) return false;
-            if (ResourceCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return cached.Has;
-            var has = PeResource.Find(File.ReadAllBytes(info.FullName), PeResource.RcData, "HRTF_DEFAULT") is { Length: > 0 };
-            ResourceCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, has);
-            return has;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
-    }
+    public static bool PayloadHasDefaultHrtf(string? payloadPath) => PayloadFacts(payloadPath).DefaultHrtf;
 
     /// <summary>3D audio has a set to render with: the generic one in this build's engine module, or one of the pilot's own.
-    /// Without either, the module never patches DCS's sound engine, and Launch DCS does not deploy 3D audio at all.</summary>
+    /// A release always has the generic one (build-release.ps1 refuses to build without it); a -LocalOnly build without
+    /// it and without a set of the pilot's own leaves 3D audio off at Launch DCS (the module would refuse it anyway).</summary>
     public static bool Usable(string? payloadPath, int personalSets) => personalSets > 0 || PayloadHasDefaultHrtf(payloadPath);
-    public const string UnusableReason = "This DCS Control build has no generic HRTF set yet, and you have no set of your own.";
 
-    private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Has)> PayloadCache = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly byte[] EmbeddedMarker = Encoding.Unicode.GetBytes("HRTF_DEFAULT");
     /// <summary>The installed payload has the audio module: its generic HRTF is embedded as the resource HRTF_DEFAULT
-    /// (docs/BINAURAL_AUDIO.md, task B), whose name is in the PE resource directory as UTF-16. An earlier payload ignores
+    /// (docs/BINAURAL_AUDIO.md), whose name is in the PE resource directory as UTF-16. An earlier payload ignores
     /// [Audio], so Live mode must not report a change there as applied. Cached by size and time.</summary>
-    public static bool PayloadHasAudio(string? payloadPath)
-    {
-        if (payloadPath is null) return false;
-        try
-        {
-            var info = new FileInfo(payloadPath);
-            if (!info.Exists || info.Length > 256L * 1024 * 1024) return false;
-            if (PayloadCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return cached.Has;
-            var has = File.ReadAllBytes(info.FullName).AsSpan().IndexOf(EmbeddedMarker) >= 0;
-            PayloadCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, has);
-            return has;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
-    }
+    public static bool PayloadHasAudio(string? payloadPath) => PayloadFacts(payloadPath).Audio;
 
     // ---- What the module's log says ---------------------------------------------------------------------------------
 
@@ -273,12 +264,6 @@ public static partial class Binaural
     /// <summary>The module's log word for any of the pilot's own sets (audio.inc LogSetName): it never logs a set's name.</summary>
     public const string ModulePersonalSet = "personal";
 
-    /// <summary>The Audio page's status when the applied profile has 3D audio on but no HRTF set is left to render with
-    /// (the pilot removed the last one; Launch DCS would deploy none): "unavailable", unless DCS is running a session in
-    /// which the module already started binaural audio (an "on (" line since the loader started), which goes on with
-    /// the set it loaded: that session's own status.</summary>
-    public static AudioStatus WithoutUsableSet(AudioStatus? live, bool dcsRunning) =>
-        dcsRunning && live is { Started: true } ? live : new("unavailable", UnusableReason + " DCS's own sound plays.");
 
     /// <summary>The status of 3D audio from the module's newest log in the Saved Games of <paramref name="optionsPath"/>,
     /// and from the deployed DcsQvCull.ini: installed for other features with [Audio] Binaural not 1, it is "disabled".</summary>

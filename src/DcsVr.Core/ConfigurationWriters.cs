@@ -452,7 +452,7 @@ public static class ConfigurationWriters
         dcs_motion_mask_band={NvidiaOption(p, p.FrameGenMaskBand)}
         dcs_motion_hud_guard={NvidiaOption(p, p.FrameGenHudGuard)}
         ; Around a moving aircraft, the background seen in one real frame only taken from that frame (patches 0121, 0122): off
-        ; until flown; 1 only where Sharp HUD took the HUD out, 2 everywhere. Applies live (a short hitch).
+        ; until flown; 1 only where Sharp HUD took the HUD out, 2 everywhere. Applies live (no hitch).
         dcs_motion_occlusion_fill={(p.FrameGen == FrameGeneration.Nvidia ? (int)p.FrameGenOcclusionFill : 0)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.

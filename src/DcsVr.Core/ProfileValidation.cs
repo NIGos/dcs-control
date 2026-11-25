@@ -411,7 +411,7 @@ public static class ProfileValidation
         if (profile.EngineOptimizations && (profile.EngineShadowRecorder || profile.EngineGBufferRecorder)
             && NvidiaSettings.MfaaForDcs() is { On: true } mfaa)
             issues.Add(new("nvidia-mfaa", IssueSeverity.Warning, $"NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. With it on the driver gives DCS no D3D11 command lists, so Multi-threaded shadows and G-buffer (the biggest engine gains) "
-                + (profile.EngineRecordersEmulatedLists ? "run only on the lists Windows emulates, with a smaller gain" : "cannot run; everything else still does") + $". {mfaa.Fix}, then launch DCS again."));
+                + (profile.RecordersEmulatedListsOn ? "run only on the lists Windows emulates, with a smaller gain" : "cannot run; everything else still does") + $". {mfaa.Fix}, then launch DCS again."));
         if (!profile.Desktop && profile.EyeDistance == EyeDistanceSource.Manual && !(profile.EyeDistanceMm is >= VrProfile.EyeDistanceMin and <= VrProfile.EyeDistanceMax))
             Error("eye-distance", $"Eye distance must be between {VrProfile.EyeDistanceMin:0} and {VrProfile.EyeDistanceMax:0} mm.");
         if (profile.NeuralRendering && string.IsNullOrWhiteSpace(profile.NeuralRuntimePath))

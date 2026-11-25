@@ -209,8 +209,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // keeps the draft's own (empty) path.
         profile = ResolveNeuralRuntime(profile, out var savedNeuralSha);
         // 3D audio needs a set to render with (the generic one in this build's engine module, or the pilot's own): without
-        // one nothing of it is deployed (no Stereo speaker layout, no head pose, no [Audio]); Checks says why
-        // (audio-unavailable). profile.json keeps the pilot's choice.
+        // one nothing of it is deployed (no Stereo speaker layout, no head pose, no [Audio]). A release always has the generic
+        // one; only a -LocalOnly build may lack it. profile.json keeps the pilot's choice.
         if (profile.BinauralAudio && !BinauralAudioUsable()) profile = profile with { BinauralAudio = false };
         var appliedFovea = fovea.Applies ? AppliedFovea.From(profile, fovea.Pimax?.Stamp) : null;
         var errors = ProfileValidation.Validate(profile, inventory).Where(i => i.Severity == IssueSeverity.Error).ToArray();

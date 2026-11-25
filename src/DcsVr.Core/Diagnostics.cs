@@ -114,7 +114,10 @@ public static partial class Diagnostics
         var savedGamesForNames = sources.OptionsPath is { } namesOptions ? Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(namesOptions))) : null;
         // Names the redaction patterns find in one file (an older log's "Hrtf=x", a removed set's path) go from every file.
         var learnedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var hrtfNames = sources.StateRoot is { } namesState ? HrtfNameRedactor(namesState, savedGamesForNames, learnedNames) : (text => text);
+        // Without any set of the pilot's own (in the library or deployed next to the module) there is no name to remove:
+        // the name patterns do not run at all.
+        var personalSets = sources.StateRoot is { } namesState && HasPersonalSets(namesState, savedGamesForNames);
+        var hrtfNames = personalSets ? HrtfNameRedactor(sources.StateRoot!, savedGamesForNames, learnedNames) : (text => text);
         Func<string, string> redactor = text => hrtfNames(pilot(text));
         var temp = zipPath + ".tmp";
         var learning = true;
@@ -124,7 +127,7 @@ public static partial class Diagnostics
         {
             void Text(string name, string source, string content, bool truncated = false)
             {
-                if (learning) { LearnSerials(content, serials); LearnHrtfNames(content, learnedNames); return; }
+                if (learning) { LearnSerials(content, serials); if (personalSets) LearnHrtfNames(content, learnedNames); return; }
                 var bytes = Encoding.UTF8.GetBytes(redactor(content));
                 var entry = zip!.CreateEntry(name, CompressionLevel.Optimal);
                 using (var output = entry.Open()) output.Write(bytes);
@@ -206,8 +209,9 @@ public static partial class Diagnostics
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             }
             // 3D headphone audio: the HRTF sets in the library (names and facts; never a SOFA file or where it was) and the
-            // module's audio lines of the last DCS start. The deployed .dcshrtf files are binary and stay out.
-            if (sources.StateRoot is { } audioState) Text("dcs-control/audio.txt", "DCS Control", learning ? "" : AudioSummary(audioState, savedGamesRoot));
+            // module's audio lines of the last DCS start. The deployed .dcshrtf files are binary and stay out. Not written when
+            // 3D audio never ran (the module logs no audio line while it is off) and the pilot has no set of their own.
+            if (sources.StateRoot is { } audioState && AudioSummary(audioState, savedGamesRoot, personalSets) is { } audio) Text("dcs-control/audio.txt", "DCS Control", learning ? "" : audio);
             if (sources.DcsExecutable is { } exe && Path.GetDirectoryName(exe) is { } bin)
             {
                 Folder("dcs/bin/CheekyFoveatedDLSS", Path.Combine(bin, "CheekyFoveatedDLSS"));
@@ -285,10 +289,11 @@ public static partial class Diagnostics
         + (toggles.Count == 0 ? "  none in these logs\n" : string.Concat(toggles.Select(t => "  " + t + "\n")));
 
     /// <summary>The package's audio.txt: the HRTF library (each set as "personal set N", never its name) and the "audio:"
-    /// lines of the module's newest log.</summary>
-    internal static string AudioSummary(string stateRoot, string? savedGamesRoot)
+    /// lines of the module's newest log. Null when there is neither a set of the pilot's own nor an audio line.</summary>
+    internal static string? AudioSummary(string stateRoot, string? savedGamesRoot, bool personalSets = true)
     {
         var sets = new HrtfLibrary(stateRoot).List();
+        var audioLines = 0;
         var text = new StringBuilder($"3D headphone audio\n\nHRTF sets in the library: {sets.Count} of the pilot's own (named \"personal set 1\" and so on here; the generic KU100 set is inside the engine module):\n");
         if (sets.Count == 0) text.Append("  none\n");
         for (var i = 0; i < sets.Count; i++)
@@ -307,10 +312,25 @@ public static partial class Diagnostics
                 var audio = lines.Skip(start + 1).ToList();
                 foreach (var line in audio.Take(40).Concat(audio.Count > 80 ? ["  …"] : []).Concat(audio.Skip(Math.Max(40, audio.Count - 40)))) text.Append("  ").Append(line.Trim()).Append('\n');
                 if (audio.Count == 0) text.Append("  none\n");
+                audioLines = audio.Count;
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { text.Append("  unreadable: ").Append(e.Message).Append('\n'); }
         }
-        return HrtfNameRedactor(stateRoot, savedGamesRoot)(text.ToString());
+        if (sets.Count == 0 && audioLines == 0) return null;
+        return personalSets ? HrtfNameRedactor(stateRoot, savedGamesRoot)(text.ToString()) : text.ToString();
+    }
+
+    /// <summary>The pilot has a set of their own: in the library, or deployed next to the module.</summary>
+    internal static bool HasPersonalSets(string stateRoot, string? savedGamesRoot)
+    {
+        if (new HrtfLibrary(stateRoot).List().Count > 0) return true;
+        if (savedGamesRoot is null) return false;
+        try
+        {
+            var deployed = Path.Combine(savedGamesRoot, "Scripts", EngineOptimizations.ModuleFolder, "hrtf");
+            return Directory.Exists(deployed) && Directory.EnumerateFiles(deployed, "*" + Binaural.HrtfExtension).Any();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>Replaces the names of the pilot's HRTF sets (the library's file names and the titles inside them, and the

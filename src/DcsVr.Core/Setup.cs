@@ -72,9 +72,7 @@ public static class Readiness
             Add("engine-dcs-version", CheckState.Warning, "DCS version", "At the last DCS start: " + string.Join(" ", offOnThisBuild));
         // 3D headphone audio: the set picked is still in the library, the head pose has its layer, and what the module said
         // at the last DCS start (it stays off, with DCS's own sound, on anything unexpected).
-        if (profile.UsesBinauralAudio && !service.BinauralAudioUsable())
-            Add("audio-unavailable", CheckState.Warning, "3D headphone audio", Binaural.UnusableReason + " Launch DCS leaves 3D audio off.");
-        else if (profile.UsesBinauralAudio)
+        if (profile.UsesBinauralAudio)
         {
             if (!profile.BinauralHrtf.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && Binaural.IsValidHrtfName(profile.BinauralHrtf) && !service.Hrtf.Contains(profile.BinauralHrtf))
                 Add("audio-hrtf-missing", CheckState.Warning, "3D headphone audio", $"Your HRTF set \"{profile.BinauralHrtf}\" is missing, so the generic one is used. Import the SOFA file again on the Audio page, or choose Generic.");

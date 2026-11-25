@@ -214,7 +214,7 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
         Require(ConfigurationWriters.Ofxr(nvidia).Contains("\n" + key + "=0\n") && ConfigurationWriters.Ofxr(turnOn(nvidia)).Contains("\n" + key + "=1\n")
             && ConfigurationWriters.Ofxr(turnOn(nvidia with { FrameGen = FrameGeneration.FidelityFx })).Contains("\n" + key + "=0\n"), key + ": off by default, 1 only with NVIDIA frame generation");
     }
-    // Off, they are not in the profile file (0.7.0 refuses keys it does not know); on, they are.
+    // Off, they are not in the profile file; on, they are (0.7.0 refuses keys it does not know: the test below checks a whole default profile).
     var qualitySaved = JsonData.Serialize(nvidia);
     Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
     var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
@@ -224,7 +224,7 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
         && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = OcclusionFill.WithSharpHud }).Contains("\ndcs_motion_occlusion_fill=1\n")
         && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = OcclusionFill.Always }).Contains("\ndcs_motion_occlusion_fill=2\n")
         && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.FidelityFx, FrameGenOcclusionFill = OcclusionFill.Always }).Contains("\ndcs_motion_occlusion_fill=0\n") && new VrProfile().FrameGenOcclusionFill == OcclusionFill.Off, "Occlusion fill: off by default, 1 (Sharp HUD only) or 2 (always) only with NVIDIA frame generation");
-    // A profile saved with the fill off carries no key, so 0.7.0 opens it; on, it round-trips.
+    // A profile saved with the fill off carries no key for it; on, it round-trips.
     Require(!JsonData.Serialize(nvidia).Contains("frameGenOcclusionFill") && JsonData.Serialize(nvidia with { FrameGenOcclusionFill = OcclusionFill.WithSharpHud }).Contains("\"frameGenOcclusionFill\": \"WithSharpHud\"")
         && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenOcclusionFill = OcclusionFill.Always })).FrameGenOcclusionFill == OcclusionFill.Always, "Occlusion fill key only in profiles that turn it on");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.
@@ -233,6 +233,42 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
         && JsonData.Serialize(JsonData.Deserialize<VrProfile>(node.ToJsonString())) == JsonData.Serialize(nvidia), "every setting in the node, the profile the same");
     Require(ControlService.ChangedSettings(nvidia with { FrameGenOcclusionFill = OcclusionFill.Always, FrameGenHudGuard = true }, nvidia).Order().SequenceEqual(new[] { "frameGenHudGuard", "frameGenOcclusionFill" })
         && ControlService.ChangedSettings(nvidia, nvidia with { FrameGenSkyOcclusion = true }).SequenceEqual(["frameGenSkyOcclusion"]) && ControlService.ChangedSettings(nvidia, nvidia).Count == 0, "set and back off: a change each way");
+});
+Test("Profiles for 0.7.0: a profile that changed no setting new since 0.7.0 has none of their keys, and 0.7.0's strict reader opens it", () =>
+{
+    // Every profile setting new since 0.7.0 (3D audio, the Fine-tune options, emulated lists made automatic). 0.7.0
+    // refuses keys it does not know: simulated by these options' strict reader with exactly these members taken out.
+    string[] newSince070 = ["binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects",
+        "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey",
+        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard", "frameGenOcclusionFill"];
+    var strict070 = new System.Text.Json.JsonSerializerOptions
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(allowIntegerValues: false) },
+        TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver { Modifiers = { info =>
+        {
+            if (info.Type != typeof(VrProfile)) return;
+            foreach (var gone in info.Properties.Where(p => newSince070.Contains(p.Name)).ToArray()) info.Properties.Remove(gone);
+        } } }
+    };
+    foreach (var profile in new VrProfile[] { new(), new() { EngineOptimizations = true, FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated } })
+    {
+        var saved = JsonData.Serialize(profile);
+        var keys = System.Text.Json.Nodes.JsonNode.Parse(saved)!.AsObject().Select(k => k.Key).ToArray();
+        Require(!keys.Intersect(newSince070).Any() && !keys.Contains("engineRecordersEmulatedLists"), "keys new since 0.7.0 in a default profile: " + string.Join(", ", keys.Intersect(newSince070)));
+        Require(System.Text.Json.JsonSerializer.Deserialize<VrProfile>(saved, strict070) is not null, "0.7.0's reader opens it");
+    }
+    // Each one changed is written, and round-trips; at its default again it is gone.
+    var changed = new VrProfile { BinauralAudio = true, BinauralHrtf = "My ears", HeadCircumferenceCm = 60, BinauralLateHeadTracking = false, BinauralNearField = false,
+        BinauralMaxObjects = 16, BinauralLevelTrimDb = -3, BinauralCpuBudgetPercent = 40, BinauralExcludeContexts = "3", BinauralLogVoices = true, AudioToggleKey = "Off", EngineRecordersEmulatedLists = false };
+    var written = JsonData.Serialize(changed);
+    var writtenKeys = System.Text.Json.Nodes.JsonNode.Parse(written)!.AsObject().Select(k => k.Key).ToHashSet();
+    Require(newSince070.Take(11).All(writtenKeys.Contains) && writtenKeys.Contains("engineRecordersEmulatedLists"), "changed: written");
+    Require(JsonData.Serialize(JsonData.Deserialize<VrProfile>(written)) == written, "changed: round-trips");
+    Require(JsonData.Serialize(new VrProfile { HeadCircumferenceCm = Binaural.HeadCircumferenceDefault, BinauralNearField = true, BinauralHrtf = "DEFAULT" }) == JsonData.Serialize(new VrProfile()), "57 cm, on by default and any case of default: unchanged, not written");
+    Require(throws(() => System.Text.Json.JsonSerializer.Deserialize<VrProfile>(written, strict070)), "a profile that changed one does not open in 0.7.0 (the reader is strict)");
+    static bool throws(Action a) { try { a(); return false; } catch (System.Text.Json.JsonException) { return true; } }
 });
 Test("Explicit manifest keeps extension metadata", () =>
 {
@@ -2907,15 +2943,20 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     Require(EngineShaderCache.InUse(state, options) == (cache, null) && EngineShaderCache.InUse(state, null) == (null, null), "Used: the state folder");
     Directory.Delete(module, true);
 });
-Test("Recorders on emulated command lists: on by default, [Model] RecordersEmulatedLists only where it can matter, not live, shown only where it can matter", () =>
+Test("Recorders on emulated command lists: automatic (on with AMD-only graphics), [Model] RecordersEmulatedLists only where it can matter, not live, shown only where it can matter", () =>
 {
-    var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
-    Require(on.EngineRecordersEmulatedLists && on.UsesRecordersEmulatedLists && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineRecordersEmulatedLists, "on by default, also for a profile without the key");
-    Require(!JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineRecordersEmulatedLists\":false}")!.EngineRecordersEmulatedLists, "an explicit false loads as false (the one-time migration turns 0.7.0's on)");
-    Require(JsonData.Serialize(on).Contains("\"engineRecordersEmulatedLists\": true", StringComparison.Ordinal) && JsonData.Serialize(on with { EngineRecordersEmulatedLists = false }).Contains("\"engineRecordersEmulatedLists\": false", StringComparison.Ordinal),
-        "saved with its value either way, under the key 0.7.0 knows");
+    var auto = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
+    var on = auto with { EngineRecordersEmulatedLists = true };
+    // The tests' adapter is an RTX 4090: automatic is off there, as in 0.7.0; the pilot can turn it on.
+    Require(auto.EngineRecordersEmulatedLists is null && !auto.RecordersEmulatedListsOn && !auto.UsesRecordersEmulatedLists && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineRecordersEmulatedLists is null, "automatic by default, also for a profile without the key; off on NVIDIA");
+    Require(on.UsesRecordersEmulatedLists && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineRecordersEmulatedLists\":false}")!.EngineRecordersEmulatedLists == false, "the pilot's choice either way (an explicit false loads as false; the one-time migration makes 0.7.0's automatic)");
+    Require(!JsonData.Serialize(auto).Contains("engineRecordersEmulatedLists", StringComparison.Ordinal) && JsonData.Serialize(on).Contains("\"engineRecordersEmulatedLists\": true", StringComparison.Ordinal)
+        && JsonData.Serialize(on with { EngineRecordersEmulatedLists = false }).Contains("\"engineRecordersEmulatedLists\": false", StringComparison.Ordinal), "automatic: not saved; a choice: saved under the key 0.7.0 knows");
+    { var gpus = GpuInfo.Adapters; try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")]; Require(auto.RecordersEmulatedListsOn && auto.UsesRecordersEmulatedLists && !(auto with { EngineRecordersEmulatedLists = false }).RecordersEmulatedListsOn, "AMD only: automatic is on, the pilot's off stays off"); }
+      finally { GpuInfo.Adapters = gpus; } }
     // On a PC with driver command lists (the default of the writer, Launch passes EmulatedListsMatter) the file is as before.
     var off = on with { EngineRecordersEmulatedLists = false };
+    Require(!ConfigurationWriters.DcsQvCull(auto, emulatedListsMatter: true).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "NVIDIA without lists, automatic: not written (0.7.0's off and advice)");
     Require(ConfigurationWriters.DcsQvCull(on) == ConfigurationWriters.DcsQvCull(off) && !ConfigurationWriters.DcsQvCull(on).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "driver command lists: on writes nothing, the file equals off's");
     Require(!ConfigurationWriters.DcsQvCull(off, emulatedListsMatter: true).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "off: the key is not written");
     var text = ConfigurationWriters.DcsQvCull(on, emulatedListsMatter: true);
@@ -2948,7 +2989,8 @@ Test("Recorders on emulated command lists: on by default, [Model] RecordersEmula
     File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(1));
     Require(EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: no driver command lists");
     // Launch's ini on this PC: the tests' adapter is an RTX 4090, so the log decides.
-    Require(EngineOptimizations.EmulatedListsMatter(module), "NVIDIA whose log says DriverCommandLists=0: the key is written");
+    Require(EngineOptimizations.EmulatedListsMatter(module) && !EngineOptimizations.EmulatedListsAutoOn(), "NVIDIA whose log says DriverCommandLists=0: the key is written when the pilot turned it on (not automatic there)");
+    Require(EngineOptimizations.NoCommandListsAdvice().Contains("Or turn on Multi-threading without driver support", StringComparison.Ordinal) && EngineOptimizations.NoCommandListsAdvice().Contains("not tested on NVIDIA", StringComparison.Ordinal), "NVIDIA without lists: the advice names the option, the pilot's to turn on");
     File.WriteAllText(log, "loader: starting payload\nenv: GPU NVIDIA GeForce RTX 5090 (DCS's device, vendor 0x10de); DriverCommandLists=1\n");
     File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(2));
     Require(!EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: driver command lists");
@@ -2966,7 +3008,7 @@ Test("Recorders on emulated command lists: on by default, [Model] RecordersEmula
     {
         GpuInfo.Adapters = () => [radeon];
         Require(!EngineOptimizations.Read(options, null, false).Warnings.Any(w => w.Contains("emulates", StringComparison.Ordinal)), "AMD only on emulated lists: nothing to fix, no note");
-        Require(EngineOptimizations.EmulatedListsMatter(module) && EngineOptimizations.EmulatedListsMatter((string?)null), "AMD only: written, whatever the log says");
+        Require(EngineOptimizations.EmulatedListsMatter(module) && EngineOptimizations.EmulatedListsMatter((string?)null) && EngineOptimizations.EmulatedListsAutoOn(), "AMD only: written, whatever the log says, and automatic is on");
         GpuInfo.Adapters = () => []; Require(EngineOptimizations.EmulatedListsMatter(module), "adapters unknown: written (inert with lists)");
     }
     finally { GpuInfo.Adapters = adapters; }
@@ -2976,10 +3018,10 @@ Test("Live mode: [Model] RecordersEmulatedLists following the module's log does 
     var applied = new VrProfile { EngineOptimizations = true };
     string[] changed = ["Model.RecordersEmulatedLists", "Prefetch.Mode"];
     Require(LiveSettings.ProfileChanges(LiveSettings.EngineFile, changed, applied, applied).SequenceEqual(["Prefetch.Mode"]), "the setting unchanged: the key is not a change");
-    Require(LiveSettings.ProfileChanges(LiveSettings.EngineFile, changed, applied with { EngineRecordersEmulatedLists = false }, applied).SequenceEqual(changed), "the setting changed: it is (and waits for the next launch)");
+    Require(LiveSettings.ProfileChanges(LiveSettings.EngineFile, changed, applied with { EngineRecordersEmulatedLists = true }, applied).SequenceEqual(changed), "the setting changed: it is (and waits for the next launch)");
     Require(LiveSettings.ProfileChanges(LiveSettings.PupilFile, changed, applied, applied).SequenceEqual(changed), "other files: unchanged");
 });
-Test("Profile migration: Multi-threading without driver support turned on once in the draft and presets of 0.7.0, a later choice kept", () =>
+Test("Profile migration: Multi-threading without driver support made automatic once in the draft and presets of 0.7.0, a later choice kept", () =>
 {
     var state = Path.GetFullPath(Path.Combine(root, "migration-emulated-lists")); if (Directory.Exists(state)) Directory.Delete(state, true);
     Directory.CreateDirectory(Path.Combine(state, "presets"));
@@ -2995,16 +3037,16 @@ Test("Profile migration: Multi-threading without driver support turned on once i
     var ran = ProfileMigrations.Run(state);
     Require(ran.SequenceEqual([ProfileMigrations.EmulatedListsOn]), "runs once on a state folder without the record");
     var draft = drafts.Load()!;
-    Require(draft.Profile.EngineRecordersEmulatedLists && draft.Dcs == @"C:\DCS\bin\DCS.exe" && draft.Profile with { EngineRecordersEmulatedLists = false } == ProfileValidation.ResolveFeatures(old), "the draft: on, everything else as it was");
+    Require(draft.Profile.EngineRecordersEmulatedLists is null && draft.Dcs == @"C:\DCS\bin\DCS.exe" && draft.Profile with { EngineRecordersEmulatedLists = false } == ProfileValidation.ResolveFeatures(old), "the draft: automatic, everything else as it was");
     var preset = File.ReadAllText(presets.PathOf("Airfield"));
-    Require(JsonData.Deserialize<VrProfile>(preset).EngineRecordersEmulatedLists && preset == oldJson.Replace("\"engineRecordersEmulatedLists\": false", "\"engineRecordersEmulatedLists\": true", StringComparison.Ordinal),
-        "a preset: only that value changes, byte for byte");
-    Require(System.Text.Json.Nodes.JsonNode.Parse(preset)!.AsObject().Select(p => p.Key).SequenceEqual(keysBefore), "no key added or removed: 0.7.0 still reads the file");
+    Require(JsonData.Deserialize<VrProfile>(preset).EngineRecordersEmulatedLists is null && JsonData.Deserialize<VrProfile>(File.ReadAllText(presets.PathOf("Already on"))).EngineRecordersEmulatedLists == true,
+        "a preset: automatic; one already on keeps it");
+    Require(System.Text.Json.Nodes.JsonNode.Parse(preset)!.AsObject().Select(p => p.Key).SequenceEqual(keysBefore.Where(k => k != "engineRecordersEmulatedLists")), "only that key taken out (0.7.0 reads a missing key as false): 0.7.0 still reads the file");
     Require(File.ReadAllText(presets.PathOf("Broken")) == "{ not json", "a file that is not JSON is left alone");
     // A choice made after the update is kept: the record says it ran.
     drafts.Save(draft.Profile with { EngineRecordersEmulatedLists = false }, null, null);
     File.WriteAllText(presets.PathOf("Airfield"), oldJson);
-    Require(ProfileMigrations.Run(state).Count == 0 && !drafts.Load()!.Profile.EngineRecordersEmulatedLists && File.ReadAllText(presets.PathOf("Airfield")) == oldJson, "never again: the pilot's off stays off");
+    Require(ProfileMigrations.Run(state).Count == 0 && drafts.Load()!.Profile.EngineRecordersEmulatedLists == false && File.ReadAllText(presets.PathOf("Airfield")) == oldJson, "never again: the pilot's off stays off");
     Require(File.Exists(ProfileMigrations.MarkerPath(state)) && !File.Exists(Path.Combine(state, "presets", "migrations.json")), "recorded next to the draft");
     // A damaged record counts as done: an earlier choice is never undone on a guess.
     File.WriteAllText(ProfileMigrations.MarkerPath(state), "{ damaged");
@@ -3031,13 +3073,13 @@ Test("Profile migration: a hand-edited file with a repeated key, a file that can
         ran = ProfileMigrations.Run(state);
     Require(ran.Count == 0, "a file that cannot be written: not done yet");
     var hand = File.ReadAllText(presets.PathOf("Hand"));
-    Require(!hand.Contains("\"engineRecordersEmulatedLists\": false", StringComparison.Ordinal) && System.Text.RegularExpressions.Regex.Matches(hand, "\"engineRecordersEmulatedLists\": true").Count == 2
-        && System.Text.RegularExpressions.Regex.Matches(hand, "\"developerOptions\": false").Count == 2, "a repeated key: every occurrence on, everything else kept");
-    Require(new DraftStore(state).Load() is { } draft && draft.Profile.EngineRecordersEmulatedLists, "the draft with repeated keys: on, and it still loads");
+    Require(!hand.Contains("engineRecordersEmulatedLists", StringComparison.Ordinal)
+        && System.Text.RegularExpressions.Regex.Matches(hand, "\"developerOptions\": false").Count == 2, "a repeated key: every occurrence taken out, everything else kept");
+    Require(new DraftStore(state).Load() is { } draft && draft.Profile.EngineRecordersEmulatedLists is null, "the draft with repeated keys: automatic, and it still loads");
     Require(File.ReadAllText(presets.PathOf("Locked")) == oldJson, "the locked file: unchanged for now");
     // Meanwhile the pilot turns it off in an updated preset: only the file left over is tried again.
     File.WriteAllText(presets.PathOf("Hand"), oldJson);
-    Require(ProfileMigrations.Run(state).SequenceEqual([ProfileMigrations.EmulatedListsOn]) && JsonData.Deserialize<VrProfile>(File.ReadAllText(presets.PathOf("Locked"))).EngineRecordersEmulatedLists
+    Require(ProfileMigrations.Run(state).SequenceEqual([ProfileMigrations.EmulatedListsOn]) && JsonData.Deserialize<VrProfile>(File.ReadAllText(presets.PathOf("Locked"))).EngineRecordersEmulatedLists is null
         && File.ReadAllText(presets.PathOf("Hand")) == oldJson, "the next start: only the file left over, the pilot's off elsewhere stays");
     // A record that cannot be written: nothing changes at all this start.
     var blocked = Path.GetFullPath(Path.Combine(root, "migration-blocked")); if (Directory.Exists(blocked)) Directory.Delete(blocked, true);
@@ -3045,22 +3087,25 @@ Test("Profile migration: a hand-edited file with a repeated key, a file that can
     Directory.CreateDirectory(ProfileMigrations.MarkerPath(blocked)); // a folder where the record goes: it cannot be written
     Require(ProfileMigrations.Run(blocked).Count == 0 && File.ReadAllText(Path.Combine(blocked, "presets", "Day.json")) == oldJson, "no record, no change");
     Directory.Delete(ProfileMigrations.MarkerPath(blocked));
-    Require(ProfileMigrations.Run(blocked).Count == 1 && JsonData.Deserialize<VrProfile>(File.ReadAllText(Path.Combine(blocked, "presets", "Day.json"))).EngineRecordersEmulatedLists, "next start: done");
+    Require(ProfileMigrations.Run(blocked).Count == 1 && JsonData.Deserialize<VrProfile>(File.ReadAllText(Path.Combine(blocked, "presets", "Day.json"))).EngineRecordersEmulatedLists is null, "next start: done");
     Directory.Delete(state, true); Directory.Delete(blocked, true);
 });
 Test("Start profile: the applied profile, the draft, and the one-time update of Multi-threading without driver support", () =>
 {
     var applied = new VrProfile { EngineOptimizations = true, EngineRecordersEmulatedLists = false };
-    var on = applied with { EngineRecordersEmulatedLists = true };
+    var on = applied with { EngineRecordersEmulatedLists = null }; // automatic: on with AMD-only graphics
     SavedDraft Draft(VrProfile p, string? dcs = @"C:\DCS\bin\DCS.exe") => new(p, dcs, @"C:\SG\Config\options.lua", DateTimeOffset.UtcNow);
     const string exe = @"C:\DCS\bin\DCS.exe", lua = @"C:\SG\Config\options.lua";
     Require(StartProfile.Choose(null, null, null, null, true) is null, "nothing saved: the defaults");
     // Without a usable draft (none, damaged or newer): the update ran now, so the applied profile gets it and is kept as the draft.
-    Require(StartProfile.Choose(applied, exe, lua, null, true) is { SaveDraft: true, Status: StartProfile.EmulatedListsStatus, Dcs: exe } s1 && s1.Profile == on, "applied without a draft: on, saved as the draft");
+    Require(StartProfile.Choose(applied, exe, lua, null, true) is { SaveDraft: true, Status: StartProfile.AppliedStatus, Dcs: exe } s1 && s1.Profile == on, "applied without a draft: automatic, saved as the draft (NVIDIA: nothing changes, the applied line)");
+    { var gpus = GpuInfo.Adapters; try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")];
+        Require(StartProfile.Choose(applied, exe, lua, null, true) is { SaveDraft: true, Status: StartProfile.EmulatedListsStatus } && StartProfile.Choose(applied, exe, lua, Draft(on), true) is { Status: StartProfile.EmulatedListsStatus, SaveDraft: false }, "AMD only: it turns on, said plainly"); }
+      finally { GpuInfo.Adapters = gpus; } }
     Require(StartProfile.Choose(applied, exe, lua, null, false) is { SaveDraft: false, Status: StartProfile.AppliedStatus } s2 && s2.Profile == applied, "the update ran earlier: the applied profile as it is");
-    Require(StartProfile.Choose(on, exe, lua, null, true) is { SaveDraft: false } s3 && s3.Profile == on, "applied already on: nothing to save");
+    Require(StartProfile.Choose(on, exe, lua, null, true) is { SaveDraft: false } s3 && s3.Profile == on, "applied already automatic: nothing to save");
     // The migrated draft equals the applied profile but for this setting: said plainly, not "differs".
-    Require(StartProfile.Choose(applied, exe, lua, Draft(on), true) is { Status: StartProfile.EmulatedListsStatus, SaveDraft: false } s4 && s4.Profile == on, "only the update differs: its own line");
+    Require(StartProfile.Choose(applied, exe, lua, Draft(on), true) is { Status: StartProfile.AppliedStatus, SaveDraft: false } s4 && s4.Profile == on, "only the update differs: not \"differs\"");
     Require(StartProfile.Choose(applied, exe, lua, Draft(on with { FrameGen = FrameGeneration.Nvidia }), true)!.Status.Contains("differs", StringComparison.Ordinal), "other changes too: the draft differs");
     Require(StartProfile.Choose(applied, exe, lua, Draft(applied), false) is { Status: StartProfile.AppliedStatus } s5 && s5.Profile == applied, "a draft equal to the applied profile: the applied one");
     Require(StartProfile.Choose(null, null, null, Draft(on, null), false) is { Dcs: null, Status: "Your last draft is back. Launch DCS applies it." }, "no applied profile: the draft");
@@ -3073,7 +3118,7 @@ Test("Go back and update again: the files the earlier version left get the profi
     var state = RollbackState("migration", "{\"profile\": " + old + ", \"dcs\": null, \"options\": null, \"savedAt\": \"2026-11-20T10:00:00+00:00\"}", ("Day.json", old));
     var settings = new AppSettingsStore(state); var now = new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero);
     installer.Install(six, stateRoot: state); installer.Install(seven, stateRoot: state);
-    bool On(string relative) => JsonData.Deserialize<VrProfile>(relative == "draft.json" ? System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(state, relative))).RootElement.GetProperty("profile").GetRawText() : File.ReadAllText(Path.Combine(state, relative))).EngineRecordersEmulatedLists;
+    bool On(string relative) => JsonData.Deserialize<VrProfile>(relative == "draft.json" ? System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(state, relative))).RootElement.GetProperty("profile").GetRawText() : File.ReadAllText(Path.Combine(state, relative))).EngineRecordersEmulatedLists is null;
     // The new version: the update runs; the pilot then saves a preset with it off.
     Require(new Rollback(state, target, "0.6.7-preview", () => now).Reconcile(settings).ReturnedPresets.Count == 0 && ProfileMigrations.Run(state).Count == 1 && On("draft.json") && On("presets/Day.json"), "updated");
     File.WriteAllText(Path.Combine(state, "presets", "Night.json"), old);
@@ -5387,8 +5432,8 @@ Test("NVIDIA MFAA On is named before the flight and in the engine status; Thread
             NvidiaSettings.MfaaForDcs = () => new(true, true);
             Require(ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-mfaa").Message.Contains("MFAA is On in the DCS program profile", StringComparison.Ordinal), "MFAA warning");
             Require(EngineOptimizations.NoCommandListsAdvice().Contains("Antialiasing - MFAA is On", StringComparison.Ordinal), "MFAA advice");
-            // Multi-threading without driver support on (the default): the recorders still run, on emulated lists.
-            var mfaaOn = ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-mfaa").Message;
+            // Multi-threading without driver support turned on (on NVIDIA the pilot's choice): the recorders still run, on emulated lists.
+            var mfaaOn = ProfileValidation.Validate(profile with { EngineRecordersEmulatedLists = true }).Single(i => i.Code == "nvidia-mfaa").Message;
             var mfaaOff = ProfileValidation.Validate(profile with { EngineRecordersEmulatedLists = false }).Single(i => i.Code == "nvidia-mfaa").Message;
             Require(mfaaOn.Contains("run only on the lists Windows emulates", StringComparison.Ordinal) && !mfaaOn.Contains("cannot run", StringComparison.Ordinal)
                 && mfaaOff.Contains("cannot run", StringComparison.Ordinal), "MFAA warning: smaller gain with emulated lists on, cannot run with them off");
@@ -5678,7 +5723,7 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
     static VrProfile AllOn(VrProfile p)
     {
         object o = p with { };
-        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => x.PropertyType == typeof(bool) && x.SetMethod is { IsPublic: true } && x.Name != nameof(VrProfile.Desktop))) prop.SetValue(o, true);
+        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => (x.PropertyType == typeof(bool) || x.PropertyType == typeof(bool?)) && x.SetMethod is { IsPublic: true } && x.Name != nameof(VrProfile.Desktop))) prop.SetValue(o, true);
         return (VrProfile)o;
     }
     var vr = AllOn(new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, Runtime = RuntimeKind.Pimax,
@@ -5735,7 +5780,7 @@ Test("Every value the profile checks accept is written inside the range its comp
     static VrProfile AllOn(VrProfile p)
     {
         object o = p with { };
-        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => x.PropertyType == typeof(bool) && x.SetMethod is { IsPublic: true } && x.Name != nameof(VrProfile.Desktop))) prop.SetValue(o, true);
+        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => (x.PropertyType == typeof(bool) || x.PropertyType == typeof(bool?)) && x.SetMethod is { IsPublic: true } && x.Name != nameof(VrProfile.Desktop))) prop.SetValue(o, true);
         return (VrProfile)o;
     }
     string? Read(string relative) => File.Exists(Path.Combine(workspace, relative)) ? File.ReadAllText(Path.Combine(workspace, relative)) : null;
@@ -5850,6 +5895,8 @@ Test("The engine module's invariant fixtures are what the app writes for every E
         foreach (var prop in typeof(VrProfile).GetProperties().Where(x => x.PropertyType == typeof(bool) && x.SetMethod is { IsPublic: true } && (on || x.Name.StartsWith("Engine", StringComparison.Ordinal))
             && x.Name is not (nameof(VrProfile.EngineOptimizations) or nameof(VrProfile.EngineDevMode) or nameof(VrProfile.EngineThreeViews) or nameof(VrProfile.Desktop))))
             prop.SetValue(o, on);
+        // The pilot's choice (null is automatic, off on the tests' NVIDIA card).
+        typeof(VrProfile).GetProperty(nameof(VrProfile.EngineRecordersEmulatedLists))!.SetValue(o, on);
         return (VrProfile)o;
     }
     // [Model] ShadowRecorderHelpers follows this PC's processor count: the fixture holds the value for more than 8. Written as on a PC
@@ -6867,7 +6914,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         eye with { BinauralAudio = true, PupilShift = true }, new() { BinauralAudio = true, Runtime = RuntimeKind.VirtualDesktop, QuadViews = QuadProvider.None },
     ];
     var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
-    var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
+    var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(p => JsonData.ProfileNode(p).ToJsonString())) + "]"); // as the bridge sends them (every key)
     var harness = Path.Combine(dir, "harness.js");
     File.WriteAllText(harness, """
         const fs = require('fs'), vm = require('vm');
@@ -6948,7 +6995,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
     }
     Require(mismatches.Count == 0, "app.js differs from C#:\n  " + string.Join("\n  ", mismatches));
 });
-// ---- 3D headphone audio (docs/BINAURAL_AUDIO.md, task D) ------------------------------------------------------------
+// ---- 3D headphone audio (docs/BINAURAL_AUDIO.md) ------------------------------------------------------------------
 VrProfile AudioOn(VrProfile? p = null) => (p ?? new VrProfile()) with { BinauralAudio = true };
 T Throws2<T>(Action action) where T : Exception { try { action(); } catch (T e) { return e; } throw new Exception("Expected " + typeof(T).Name); }
 Test("3D audio: off by default with the generic ears; the profile round-trips every audio setting through JSON", () =>
@@ -6960,13 +7007,14 @@ Test("3D audio: off by default with the generic ears; the profile round-trips ev
     var all = p with { BinauralAudio = true, BinauralHrtf = "My ears", HeadCircumferenceCm = 59.5, BinauralLateHeadTracking = false, BinauralNearField = false, BinauralMaxObjects = 32,
         BinauralLevelTrimDb = -3.5, BinauralCpuBudgetPercent = 40, BinauralExcludeContexts = "3, 1", BinauralLogVoices = true, AudioToggleKey = "119:5" };
     var json = JsonData.Serialize(all);
-    Require(JsonData.Deserialize<VrProfile>(json) == all, "round trip");
+    Require(JsonData.Deserialize<VrProfile>(json) == all && JsonData.ProfileNode(p)["headCircumferenceCm"]?.GetValue<double>() == 57, "round trip; the profile node has them at their defaults");
     foreach (var derived in new[] { "usesBinauralAudio", "usesHeadPosePublish", "usesAudioToggleKey", "perceptionLayerRequired" })
         Require(!json.Contains("\"" + derived + "\"", StringComparison.Ordinal), "a derived value is not saved (0.6.6 refuses keys it does not know): " + derived);
     // A profile saved before 3D audio existed loads with it off and the defaults.
+    // (At their defaults they are not written at all: the 0.7.0 profile test above.)
     var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { Id = "old", Name = "Old" }))!.AsObject();
     foreach (var key in new[] { "binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects", "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey" })
-        Require(node.Remove(key), "saved key " + key);
+        Require(!node.ContainsKey(key), "not saved at its default: " + key);
     Require(JsonData.Deserialize<VrProfile>(node.ToJsonString()) == new VrProfile { Id = "old", Name = "Old" }, "an older profile loads with 3D audio off");
 });
 Test("3D audio: the engine module is installed for it alone (also on a monitor), and the layer only for the head pose in VR", () =>
@@ -7073,7 +7121,7 @@ Test("3D audio: Checks refuse values outside the module's ranges, a key in use t
     Require(Binaural.LayoutName("\"\"") == "Auto" && Binaural.LayoutName("suround_5_1") == "5.1" && Binaural.NameFrom("..\\My: ears?") == "_My_ ears_" && Binaural.NameFrom("default") == "default-personal" && Binaural.NameFrom("") == "personal"
         && Binaural.IsValidHrtfName(Binaural.NameFrom(new string('x', 90))) && Binaural.ExcludeContextsValue("") is null, "names and layouts");
 });
-Test("3D audio: .dcshrtf validation is hrtf_format.h's, check for check", () =>
+Test("3D audio: .dcshrtf validation is hrtf_format.h's, check for check (DcsHrtfFile, the one C# reader the page and the converter share)", () =>
 {
     var good = HrtfFile.Synthetic("Test set");
     var facts = HrtfFile.Validate(good, out var why);
@@ -7089,10 +7137,11 @@ Test("3D audio: .dcshrtf validation is hrtf_format.h's, check for check", () =>
     string? Broken(Action<byte[]> damage, bool fixHeader = true, bool fixPayload = false)
     {
         var bytes = (byte[])good.Clone(); damage(bytes);
-        if (fixPayload) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(48), HrtfFile.Fnv1a(bytes.AsSpan(256)));
-        if (fixHeader) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(56), HrtfFile.HeaderChecksum(bytes));
+        if (fixPayload) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(48), DcsVr.Core.Hrtf.DcsHrtfFile.Fnv1a(bytes.AsSpan(256)));
+        if (fixHeader) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(56), HeaderChecksum(bytes));
         HrtfFile.Validate(bytes, out var reason); return reason;
     }
+    static ulong HeaderChecksum(byte[] b) { var h = b[..256]; h.AsSpan(56, 8).Clear(); return DcsVr.Core.Hrtf.DcsHrtfFile.Fnv1a(h); }
     void U32(byte[] b, int o, uint v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o), v);
     void F32(byte[] b, int o, float v) => System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(o), v);
     Require(Broken(b => b[0] = 0) == "not an HRTF file (magic)" && Broken(b => b[4] = 2) == "unsupported version" && Broken(b => b[70] ^= 1, fixHeader: false) == "header checksum"
@@ -7142,16 +7191,6 @@ Test("3D audio: SOFA import converts once into the library; a taken name, a refu
     if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found"); return; }
     var real = Throws2<HrtfConversionException>(() => library.Import(sofa, "real", new CliHrtfConverter(Path.GetDirectoryName(cli))));
     Require(real.Message.StartsWith("The SOFA file was not converted: this is not a SOFA file", StringComparison.Ordinal) && library.List().Count == 0 && Directory.GetFiles(library.Folder).Length == 0, real.Message);
-});
-Test("3D audio: the app's .dcshrtf check and the converter's agree (the converter's fixture passes the app's check, the app's test set passes the converter's)", () =>
-{
-    var fixture = File.ReadAllBytes(Path.Combine(workspace, "native/binaural/test/data/csharp_converter_fixture.dcshrtf"));
-    Require(HrtfFile.Validate(fixture, out var why) is not null, "the app refuses the converter's output: " + why);
-    Require(DcsVr.Core.Hrtf.DcsHrtfFile.Validate(fixture) is null, "the converter refuses its own fixture");
-    var synthetic = HrtfFile.Synthetic("cross check");
-    Require(DcsVr.Core.Hrtf.DcsHrtfFile.Validate(synthetic) is null, "the converter's check refuses the app's test set: " + DcsVr.Core.Hrtf.DcsHrtfFile.Validate(synthetic));
-    var broken = (byte[])fixture.Clone(); broken[^1] ^= 0x5a;
-    Require(HrtfFile.Validate(broken, out _) is null && DcsVr.Core.Hrtf.DcsHrtfFile.Validate(broken) is not null, "both refuse a damaged file");
 });
 Test("3D audio: the module's log gives the Audio page's status, Last flight and Checks (running, off with a reason, switched off, CPU back-off)", () =>
 {
@@ -7298,7 +7337,7 @@ Test("3D audio Live: every setting is written at once to a module with the audio
     var autoOn = WhileDcsRuns(h, () => h.Service.ApplyLive(monitor with { BinauralAudio = true }, E2eInventory(h)));
     Require(autoOn.Waiting.Contains("binauralAudio") && autoOn.Written.Count == 0, "Auto: waits: " + autoOn.Message);
 });
-Test("3D audio: without any HRTF set (no generic one in the build, none of the pilot's own) nothing of it is deployed, and Checks says why", () =>
+Test("3D audio: without any HRTF set (a -LocalOnly build without the generic one, none of the pilot's own) nothing of it is deployed", () =>
 {
     var f = E2e("audio-noset");
     var payload = Path.Combine(f.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
@@ -7309,7 +7348,6 @@ Test("3D audio: without any HRTF set (no generic one in the build, none of the p
     var plan = f.Service.Preview(profile, E2eInventory(f));
     Require(!plan.Files.Any(p => p.Path.EndsWith("DcsQvCull.ini", StringComparison.Ordinal) || p.Path.Contains("pupilshift", StringComparison.OrdinalIgnoreCase) || p.Path.EndsWith("PupilShift.ini", StringComparison.Ordinal))
         && !plan.Files.Any(p => p.LuaChanges?.Any(c => c.Path.Contains("main_layout", StringComparison.Ordinal)) == true), "no [Audio], no head pose, the speaker layout untouched");
-    Require(Readiness.Check(profile, E2eInventory(f), f.Service).Checks.Any(c => c.Id == "audio-unavailable" && c.State == CheckState.Warning), "Checks: audio-unavailable");
     // One set of the pilot's own makes it usable (the module renders with it).
     f.Service.Hrtf.Import(Make("e2e/audio-noset/mine.sofa", "fixture"), "mine", new FixtureHrtfConverter());
     Require(f.Service.BinauralAudioUsable() && f.Service.Preview(profile with { BinauralHrtf = "mine" }, E2eInventory(f)).Files.Any(p => p.Path.EndsWith("DcsQvCull.ini", StringComparison.Ordinal)), "a personal set: deployed");
@@ -7333,7 +7371,7 @@ Test("3D audio: the diagnostic package lists the HRTF sets and the module's audi
     new HrtfLibrary(state).Import(Make("audio-diag/Private folder/jo.sofa", "fixture"), "Jo", new FixtureHrtfConverter());
     Make("audio-diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:00.500 audio: HRTF Ann Lee not usable (payload checksum); the default set is used\n09:00:01.000 audio: on (48000 Hz stereo, HRTF ears: 145 directions, head radius 8.8 cm, near field on, at most 48 sounds)\n09:00:02.000 perf: fps=80\n09:00:05.000 audio: HRTF Jo (crossfading)\n09:00:10.000 audio: running, 7 sounds, p99 0.12 ms per block\n");
     Make("audio-diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.ini", "[Audio]\nBinaural=1\nHrtf=ears\n");
-    var text = Diagnostics.AudioSummary(state, sg);
+    var text = Diagnostics.AudioSummary(state, sg)!;
     Require(text.Contains("2 of the pilot's own") && text.Contains("personal set 2: 145 directions, 48000 Hz") && text.Contains("HRTF personal set 1: 145 directions") && text.Contains("HRTF personal set 2 (crossfading)")
         && text.Contains("HRTF personal set not usable") && text.Contains("audio: running, 7 sounds") && !text.Contains("perf:") && !text.Contains("Private folder") && !text.Contains(".sofa")
         && !text.Contains("ears", StringComparison.OrdinalIgnoreCase) && !text.Contains("Ann Lee") && !text.Contains("Jo", StringComparison.Ordinal), text);
@@ -7351,6 +7389,13 @@ Test("3D audio: the diagnostic package lists the HRTF sets and the module's audi
             var content = reader.ReadToEnd();
             Require(!content.Contains("Ann Lee") && !System.Text.RegularExpressions.Regex.IsMatch(content, @"\b(ears|Jo)\b"), entry.FullName + " names a set: " + content);
         }
+    // 3D audio never on and no set of the pilot's own: no audio.txt, and the set-name patterns do not run.
+    var none = Path.Combine(root, "audio-diag-none", "state"); var noneSg = Path.Combine(root, "audio-diag-none", "Saved Games", "DCS");
+    Make("audio-diag-none/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:02.000 perf: fps=80\n");
+    var noneOptions = Make("audio-diag-none/Saved Games/DCS/Config/options.lua", "options = {}");
+    Require(Diagnostics.AudioSummary(none, noneSg) is null && !Diagnostics.HasPersonalSets(none, noneSg), "never on, no set: no summary");
+    var noneEntries = Diagnostics.CreatePackage(new DiagnosticSources(none, null, noneOptions, null, RuntimeKind.Pimax), "{\"draft\": {\"binauralHrtf\": \"default\"}}", Path.Combine(root, "audio-diag-none", "package.zip"));
+    Require(!noneEntries.Any(e => e.Name == "dcs-control/audio.txt"), "no audio.txt: " + string.Join(", ", noneEntries.Select(e => e.Name)));
 });
 Test("3D audio: set names of earlier logs go from the diagnostic package (config line, app.log import, files), generic titles stay words", () =>
 {
@@ -7409,12 +7454,6 @@ Test("3D audio: the module's \"personal\" is the deployed set; off live shows as
     Make("audio-status2/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.ini", "[Audio]\nBinaural=0\nHrtf=My ears\n");
     Make("audio-status2/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "09:00:00.000 DcsQvCull loader started\n09:00:01.000 " + On("personal") + "\n09:00:05.000 audio: off (binaural is off in the settings)\n");
     Require(Binaural.ReadStatus(options, true) is { State: "switched-off", SwitchedOffBy: "settings", Hrtf: "My ears" } && Binaural.ReadStatus(options, false).State == "disabled", "the Audio page's status, read from the files");
-    // The pilot removed the last set while DCS plays with it: that session's status; otherwise unavailable.
-    var running = Binaural.ParseStatus([On("personal")], true, true, true, "My ears");
-    Require(Binaural.WithoutUsableSet(running, true) == running && Binaural.WithoutUsableSet(running, false).State == "unavailable"
-        && Binaural.WithoutUsableSet(Binaural.ParseStatus([], true, true, true), true).State == "unavailable"
-        && Binaural.WithoutUsableSet(Binaural.ParseStatus(["audio: off (no HRTF set: file not found)"], true, true, true), true).State == "unavailable"
-        && Binaural.WithoutUsableSet(Binaural.ParseStatus([On("personal"), "audio: kill switch (toggle_audio.flag): binaural OFF (DCS's own panning)"], true, true, true), true).State == "switched-off", "removed set");
 });
 Test("E2E: CPU Boost and Free VRAM records left by an ended helper survive a moment when the file cannot be read", () =>
 {

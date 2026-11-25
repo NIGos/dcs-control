@@ -1,39 +1,15 @@
-using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Text;
+using DcsVr.Core.Hrtf;
 
 namespace DcsVr.Core;
 
 /// <summary>
-/// The .dcshrtf v1 format (native/binaural/include/hrtf_format.h) as far as the app needs it: every check of the
-/// header's Validate(), so a file the module would refuse is never offered or deployed, and the facts the page shows.
-/// The app never writes the format itself: the converter does (task A, <see cref="IHrtfConverter"/>).
+/// The .dcshrtf files as the app needs them: the facts the page shows, from <see cref="DcsHrtfFile"/> (the format's one
+/// C# reader and writer, check for check hrtf_format.h's Validate(), so a file the module would refuse is never offered
+/// or deployed), and a small test set. The pilot's sets are written by the converter (<see cref="IHrtfConverter"/>).
 /// </summary>
 public static class HrtfFile
 {
-    public const uint Magic = 0x54524844; // "DHRT"
-    public const ushort Version = 1, HeaderBytes = 256;
-    public const uint MinSampleRate = 22050, MaxSampleRate = 192000, MinDirections = 6, MaxDirections = 16384;
-    public const ushort MinTaps = 16, MaxTaps = 512;
-    public const long MaxFileBytes = 64L << 20;
-    public const uint FlagMinimumPhase = 1, FlagDiffuseFieldEq = 2, FlagFrontNormalised = 4, FlagPersonal = 8, KnownFlags = 15;
-
-    public static ulong Fnv1a(ReadOnlySpan<byte> data, ulong h = 0xcbf29ce484222325)
-    {
-        foreach (var b in data) { h ^= b; h *= 0x100000001b3; }
-        return h;
-    }
-    public static ulong PayloadBytes(uint directions, uint triangles, uint taps) =>
-        (ulong)directions * (16 + 8) + (ulong)triangles * 12 + (ulong)directions * 2 * taps * 4;
-    /// <summary>The header checksum: FNV-1a 64 of the 256 header bytes with the checksum field (offset 56) zero.</summary>
-    public static ulong HeaderChecksum(ReadOnlySpan<byte> header)
-    {
-        Span<byte> copy = stackalloc byte[HeaderBytes];
-        header[..HeaderBytes].CopyTo(copy);
-        copy.Slice(56, 8).Clear();
-        return Fnv1a(copy);
-    }
-
     /// <summary>A small valid set from a rigid spherical head (Woodworth delays, a level difference per side): the stand-in
     /// for the converter's output in the tests and the offline interface verification, never offered to a pilot as an
     /// HRTF. <paramref name="stepDeg"/> sets the grid (20° gives 145 directions from −60° to +90°).</summary>
@@ -47,99 +23,45 @@ public static class HrtfFile
                 dirs.Add(((float)(Math.Cos(e) * Math.Cos(a)), (float)Math.Sin(e), (float)(-Math.Cos(e) * Math.Sin(a))));
             }
         dirs.Add((0, 1, 0));
-        uint n = (uint)dirs.Count, t = n - 2;
-        var payload = PayloadBytes(n, t, taps);
-        var bytes = new byte[HeaderBytes + (long)payload];
-        var span = bytes.AsSpan();
-        int o = HeaderBytes;
-        foreach (var d in dirs) { BinaryPrimitives.WriteSingleLittleEndian(span[o..], d.X); BinaryPrimitives.WriteSingleLittleEndian(span[(o + 4)..], d.Y); BinaryPrimitives.WriteSingleLittleEndian(span[(o + 8)..], d.Z); o += 16; }
-        foreach (var d in dirs)
+        int n = dirs.Count, t = n - 2;
+        var directions = new float[n * 3]; var delays = new float[n * 2]; var triangles = new uint[t * 3]; var ir = new float[n * 2 * taps];
+        for (var i = 0; i < n; i++)
         {
+            var d = dirs[i];
+            directions[i * 3] = d.X; directions[i * 3 + 1] = d.Y; directions[i * 3 + 2] = d.Z;
             // Lateral angle from the median plane; +z is right, so the right ear leads for z > 0.
             var lateral = Math.Asin(Math.Clamp(d.Z, -1f, 1f));
             var itd = headRadiusM / 343.0 * (Math.Abs(lateral) + Math.Sin(Math.Abs(lateral))) * sampleRate;
             float lead = 8, lag = (float)(8 + itd);
-            BinaryPrimitives.WriteSingleLittleEndian(span[o..], lateral > 0 ? lag : lead); BinaryPrimitives.WriteSingleLittleEndian(span[(o + 4)..], lateral > 0 ? lead : lag); o += 8;
-        }
-        for (uint i = 1; i + 1 < n; i++) { BinaryPrimitives.WriteUInt32LittleEndian(span[o..], 0); BinaryPrimitives.WriteUInt32LittleEndian(span[(o + 4)..], i); BinaryPrimitives.WriteUInt32LittleEndian(span[(o + 8)..], i + 1); o += 12; }
-        foreach (var d in dirs)
+            delays[i * 2] = lateral > 0 ? lag : lead; delays[i * 2 + 1] = lateral > 0 ? lead : lag;
             for (var ear = 0; ear < 2; ear++)
             {
                 var side = ear == 0 ? -d.Z : d.Z; // towards this ear: louder
                 var gain = (float)Math.Pow(10, 6 * side / 20);
-                for (var k = 0; k < taps; k++) { BinaryPrimitives.WriteSingleLittleEndian(span[o..], k == 0 ? gain : k == 1 ? -0.25f * gain : 0); o += 4; }
+                ir[(i * 2 + ear) * taps] = gain; ir[(i * 2 + ear) * taps + 1] = -0.25f * gain;
             }
-        BinaryPrimitives.WriteUInt32LittleEndian(span, Magic); BinaryPrimitives.WriteUInt16LittleEndian(span[4..], Version); BinaryPrimitives.WriteUInt16LittleEndian(span[6..], HeaderBytes);
-        BinaryPrimitives.WriteUInt32LittleEndian(span[8..], FlagMinimumPhase | FlagFrontNormalised | (personal ? FlagPersonal : 0));
-        BinaryPrimitives.WriteUInt32LittleEndian(span[12..], sampleRate); BinaryPrimitives.WriteUInt32LittleEndian(span[16..], n); BinaryPrimitives.WriteUInt32LittleEndian(span[20..], t);
-        BinaryPrimitives.WriteUInt16LittleEndian(span[24..], taps); BinaryPrimitives.WriteSingleLittleEndian(span[28..], (float)headRadiusM);
-        BinaryPrimitives.WriteSingleLittleEndian(span[32..], 1.2f); BinaryPrimitives.WriteSingleLittleEndian(span[36..], 1f);
-        BinaryPrimitives.WriteUInt64LittleEndian(span[40..], payload); BinaryPrimitives.WriteUInt64LittleEndian(span[48..], Fnv1a(span[HeaderBytes..]));
-        var name = Encoding.UTF8.GetBytes(title); name.AsSpan(0, Math.Min(name.Length, 63)).CopyTo(span[64..]);
-        Encoding.UTF8.GetBytes("Synthetic spherical head (test fixture)").CopyTo(span[128..]);
-        BinaryPrimitives.WriteUInt64LittleEndian(span[56..], HeaderChecksum(span));
-        return bytes;
+        }
+        for (var i = 1; i + 1 < n; i++) { triangles[(i - 1) * 3] = 0; triangles[(i - 1) * 3 + 1] = (uint)i; triangles[(i - 1) * 3 + 2] = (uint)(i + 1); }
+        var flags = DcsHrtfFile.FileFlags.MinimumPhase | DcsHrtfFile.FileFlags.FrontNormalised | (personal ? DcsHrtfFile.FileFlags.Personal : 0);
+        return DcsHrtfFile.Write(new(flags, sampleRate, taps, (float)headRadiusM, 1.2f, 1f, title, "Synthetic spherical head (test fixture)", directions, delays, triangles, ir));
     }
 
-    /// <summary>hrtf_format.h Validate(), byte for byte the same checks in the same order: null and the facts when the
-    /// file is valid, else the first problem in <paramref name="why"/> (the header's own wording).</summary>
+    /// <summary>The facts of a valid file (<see cref="DcsHrtfFile.Validate"/>, hrtf_format.h's checks), else null with the
+    /// first problem in <paramref name="why"/> (the header's own wording).</summary>
     public static HrtfFacts? Validate(byte[] data, out string? why)
     {
-        why = null;
-        if (data.Length < HeaderBytes) { why = "too small"; return null; }
-        if (data.Length > MaxFileBytes) { why = "too large"; return null; }
-        uint U32(int o) => BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(o));
-        ushort U16(int o) => BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(o));
-        ulong U64(int o) => BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(o));
-        float F32(int o) => BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(o));
-        if (U32(0) != Magic) { why = "not an HRTF file (magic)"; return null; }
-        if (U16(4) != Version) { why = "unsupported version"; return null; }
-        if (U16(6) != HeaderBytes) { why = "header size"; return null; }
-        if (HeaderChecksum(data) != U64(56)) { why = "header checksum"; return null; }
-        uint flags = U32(8), rate = U32(12), n = U32(16), t = U32(20); ushort taps = U16(24);
-        float radius = F32(28), distance = F32(32), frontGain = F32(36);
-        if ((flags & ~KnownFlags) != 0) { why = "unknown flags"; return null; }
-        if ((flags & FlagMinimumPhase) == 0) { why = "not minimum phase"; return null; }
-        if (rate is < MinSampleRate or > MaxSampleRate) { why = "sample rate"; return null; }
-        if (n is < MinDirections or > MaxDirections) { why = "direction count"; return null; }
-        if (t < 4 || t > 2 * n) { why = "triangle count"; return null; }
-        if (taps is < MinTaps or > MaxTaps) { why = "tap count"; return null; }
-        if (!(radius >= 0.04f && radius <= 0.15f)) { why = "head radius"; return null; }
-        if (!(distance >= 0.1f && distance <= 10.0f)) { why = "measurement distance"; return null; }
-        if (!(frontGain > 0) || !float.IsFinite(frontGain)) { why = "front gain"; return null; }
-        if (data.AsSpan(64, 64).IndexOf((byte)0) < 0 || data.AsSpan(128, 96).IndexOf((byte)0) < 0) { why = "strings"; return null; }
-        if (U16(26) != 0) { why = "reserved field"; return null; }
-        var payload = PayloadBytes(n, t, taps);
-        if (U64(40) != payload) { why = "payload size field"; return null; }
-        if ((ulong)data.Length != HeaderBytes + payload) { why = "file size"; return null; }
-        if (Fnv1a(data.AsSpan(HeaderBytes)) != U64(48)) { why = "payload checksum"; return null; }
-        int directions = HeaderBytes, delays = directions + (int)n * 16, triangles = delays + (int)n * 8, ir = triangles + (int)t * 12;
-        var maxDelay = 0.01f * rate;
-        var horizontal = 0; var up = false; var down = false;
-        for (var i = 0; i < n; i++)
+        why = DcsHrtfFile.Validate(data);
+        if (why is not null) return null;
+        var d = DcsHrtfFile.ReadValid(data);
+        int horizontal = 0; bool up = false, down = false;
+        for (var i = 0; i < d.DirectionCount; i++)
         {
-            float x = F32(directions + i * 16), y = F32(directions + i * 16 + 4), z = F32(directions + i * 16 + 8);
-            if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)) { why = "direction not finite"; return null; }
-            if (MathF.Abs(x * x + y * y + z * z - 1.0f) > 1e-3f) { why = "direction not unit"; return null; }
-            float left = F32(delays + i * 8), right = F32(delays + i * 8 + 4);
-            if (!(left >= 0 && left <= maxDelay && right >= 0 && right <= maxDelay)) { why = "delay"; return null; }
+            var y = d.Directions[i * 3 + 1];
             if (MathF.Abs(y) < 0.05f) horizontal++;
             up |= y > 0.7f; down |= y < -0.5f;
         }
-        for (var i = 0; i < t; i++)
-        {
-            uint a = U32(triangles + i * 12), b = U32(triangles + i * 12 + 4), c = U32(triangles + i * 12 + 8);
-            if (a >= n || b >= n || c >= n || a == b || b == c || a == c) { why = "triangle index"; return null; }
-        }
-        var irCount = (long)n * 2 * taps;
-        for (long i = 0; i < irCount; i++)
-        {
-            var v = F32(ir + (int)(i * 4));
-            if (!float.IsFinite(v) || MathF.Abs(v) > 64.0f) { why = "impulse response value"; return null; }
-        }
-        static string Text(ReadOnlySpan<byte> field) { var end = field.IndexOf((byte)0); return Encoding.UTF8.GetString(field[..(end < 0 ? field.Length : end)]).Trim(); }
-        return new(Text(data.AsSpan(64, 64)), Text(data.AsSpan(128, 96)), (int)rate, (int)n, (int)t, taps, radius * 1000.0, distance, (flags & FlagPersonal) != 0,
-            (flags & FlagDiffuseFieldEq) != 0, (flags & FlagFrontNormalised) != 0, horizontal, up, down);
+        return new(d.Name.Trim(), d.Source.Trim(), (int)d.SampleRate, d.DirectionCount, d.TriangleCount, d.Taps, d.DatasetHeadRadiusM * 1000.0, d.MeasurementDistanceM,
+            d.Flags.HasFlag(DcsHrtfFile.FileFlags.Personal), d.Flags.HasFlag(DcsHrtfFile.FileFlags.DiffuseFieldEq), d.Flags.HasFlag(DcsHrtfFile.FileFlags.FrontNormalised), horizontal, up, down);
     }
 }
 
@@ -151,7 +73,9 @@ public sealed record HrtfFacts(string Title, string Source, int SampleRate, int 
     bool Personal, bool DiffuseFieldEq, bool FrontNormalised, int Horizontal, bool Above, bool Below)
 {
     /// <summary>The largest time difference between the ears the fitted radius stands for (Woodworth, 90 degrees), ms.</summary>
-    public double MaxItdMs => HeadRadiusMm / 1000 / 343 * (Math.PI / 2 + 1) * 1000;
+    public double MaxItdMs => ItdMs(HeadRadiusMm);
+    /// <summary>Woodworth's largest time difference between the ears for a head of <paramref name="headRadiusMm"/>, ms.</summary>
+    public static double ItdMs(double headRadiusMm) => headRadiusMm / 1000 / 343 * (Math.PI / 2 + 1) * 1000;
 
     /// <summary>The plain warnings the page shows with the conversion report.</summary>
     public IReadOnlyList<string> Warnings()
@@ -170,12 +94,16 @@ public sealed record HrtfFacts(string Title, string Source, int SampleRate, int 
 /// <summary>One HRTF set in the app's library: the file name (the [Audio] Hrtf value) and its facts, where it came from
 /// (the SOFA file's name only, never its folder), when it was imported and what the converter warned about.</summary>
 public sealed record HrtfSet(string Name, string Title, string Source, int SampleRate, int Directions, int Taps, double HeadRadiusMm, string? FromFile,
-    DateTimeOffset? Imported, IReadOnlyList<string> Warnings, long Bytes, double? Coverage = null);
+    DateTimeOffset? Imported, IReadOnlyList<string> Warnings, long Bytes, double? Coverage = null)
+{
+    /// <summary>The largest time difference between the ears its head radius stands for, ms (the page shows it).</summary>
+    public double MaxItdMs => HrtfFacts.ItdMs(HeadRadiusMm);
+}
 
 /// <summary>A set the plan deploys: Scripts\DcsQvCull\hrtf\&lt;Name&gt;.dcshrtf.</summary>
 public sealed record HrtfDeployment(string Name, byte[] Content);
 
-/// <summary>The SOFA converter (docs/BINAURAL_AUDIO.md section 4.2, task A: src/DcsVr.Core/Hrtf and the CLI command
+/// <summary>The SOFA converter (docs/BINAURAL_AUDIO.md section 4.2: src/DcsVr.Core/Hrtf and the CLI command
 /// <c>hrtf-convert &lt;in.sofa&gt; &lt;out.dcshrtf&gt; [--name]</c>). It writes a .dcshrtf at <paramref name="outputPath"/>,
 /// or throws <see cref="HrtfConversionException"/> with a plain reason (wrong convention, NaN data, fewer than 100
 /// directions, an unsupported rate). The app validates the result again before keeping it.</summary>
@@ -190,7 +118,7 @@ public sealed class HrtfConversionException(string message) : Exception(message)
 
 /// <summary>
 /// The converter of this installation through its contract interface: <c>DcsVr.Cli hrtf-convert in out --name name</c>
-/// next to the app (task A adds the command). Exit 0 with the file written is a conversion; lines starting with
+/// next to the app (every build ships it). Exit 0 with the file written is a conversion; lines starting with
 /// "warning:" are its warnings and "coverage: N%" its grid coverage. Any other exit is a refusal, whose reason is the
 /// last line it printed on stderr. Runs hidden, at below-normal priority, for at most two minutes.
 /// </summary>
@@ -269,7 +197,7 @@ public sealed class FixtureHrtfConverter : IHrtfConverter
         var text = File.ReadAllText(sofaPath);
         if (text.StartsWith("reject:", StringComparison.Ordinal)) throw new HrtfConversionException("The SOFA file was not converted: " + text[7..].Split('\n')[0].Trim() + ".");
         var bytes = HrtfFile.Synthetic(name);
-        if (text.StartsWith("invalid", StringComparison.Ordinal)) bytes[HrtfFile.HeaderBytes + 3] ^= 0x5a;
+        if (text.StartsWith("invalid", StringComparison.Ordinal)) bytes[DcsHrtfFile.HeaderBytes + 3] ^= 0x5a;
         File.WriteAllBytes(outputPath, bytes);
         return new(text.StartsWith("warn", StringComparison.Ordinal) ? ["Fixture warning: the measurement distance was assumed."] : [], 0.93);
     }
@@ -319,7 +247,7 @@ public sealed class HrtfLibrary(string stateRoot)
         try
         {
             var path = FileOf(name); var info = new FileInfo(path);
-            if (!info.Exists || info.Length > HrtfFile.MaxFileBytes) { Cache.TryRemove(info.FullName, out _); return null; }
+            if (!info.Exists || info.Length > DcsHrtfFile.MaxFileBytes) { Cache.TryRemove(info.FullName, out _); return null; }
             var sideInfo = new FileInfo(SidecarOf(name));
             long sideLength = sideInfo.Exists ? sideInfo.Length : -1; var sideWritten = sideInfo.Exists ? sideInfo.LastWriteTimeUtc : default;
             if (Cache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc
@@ -390,7 +318,7 @@ public sealed class HrtfLibrary(string stateRoot)
         {
             var conversion = converter.Convert(info.FullName, temp, name, cancel);
             var length = File.Exists(temp) ? new FileInfo(temp).Length : 0;
-            if (length == 0 || length > HrtfFile.MaxFileBytes) throw new HrtfConversionException("The converter wrote no usable file.");
+            if (length == 0 || length > DcsHrtfFile.MaxFileBytes) throw new HrtfConversionException("The converter wrote no usable file.");
             var bytes = File.ReadAllBytes(temp);
             if (HrtfFile.Validate(bytes, out var why) is null) throw new HrtfConversionException($"The converted file is not valid ({why}), so it is not used.");
             AtomicFile.WriteText(SidecarOf(name), JsonData.Serialize(new Sidecar(info.Name, DateTimeOffset.Now, conversion.Warnings, conversion.Coverage)));

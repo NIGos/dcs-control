@@ -677,7 +677,9 @@ const HIDE_PARTS = [
 const usesFarDepth = p => Boolean(p.farDepth && !p.desktop && quad(p));
 /** The recorders can run on emulated command lists (a recorder is on), and do (VrProfile.UsesRecordersEmulatedLists). */
 const emulatedListsCan = p => Boolean(p.engineOptimizations && (p.engineShadowRecorder || p.engineGBufferRecorder));
-const usesRecordersEmulatedLists = p => Boolean(p.engineRecordersEmulatedLists && emulatedListsCan(p));
+/** Multi-threading without driver support is on: the pilot's choice, or automatic (null) on AMD-only graphics (VrProfile.RecordersEmulatedListsOn). */
+const emulatedListsOn = p => p.engineRecordersEmulatedLists ?? Boolean(typeof state === 'object' && state?.gpu?.amdOnly);
+const usesRecordersEmulatedLists = p => Boolean(emulatedListsOn(p) && emulatedListsCan(p));
 // </uses-rules>
 const coverageOwned = p => quad(p) || stereoCheeky(p);
 const boost = p => p.cpuBoost;
@@ -832,18 +834,18 @@ function buildFields() {
   // one fold, a toggle each and the fill's mode, hidden with FidelityFX as the Optical flow fold is.
   { const nvidia = p => p.frameGen === 'Nvidia', fidelityFg = p => p.frameGen === 'FidelityFx', ones = ['frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand'];
     const fillOn = p => (p.frameGenOcclusionFill || 'Off') !== 'Off';
-    more = disclosure(c,'Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default.',p => { const n = nvidia(p) ? ones.filter(k => p[k]).length + (fillOn(p) ? 1 : 0) : 0; return n ? n+' on' : 'All off'; }); more.dataset.hide = 'flow';
+    more = disclosure(c,'<span class="tag">EXPERIMENTAL</span> Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default. GPU cost: about 0.1 ms at 2X, 0.7 ms at 3X; Always fill 0.3 / 1.1 ms.',p => { const n = nvidia(p) ? ones.filter(k => p[k]).length + (fillOn(p) ? 1 : 0) : 0; return n ? n+' on' : 'All off'; }); more.dataset.hide = 'flow'; more.id = 'frameGenFineTune';
     toggles = toggleList(more);
     field(toggles,'frameGenSkyOcclusion','Clean edges against the sky',['No faint copy trailing an aircraft over the sky, most visible at night.','Where an aircraft crossed the sky between two frames, one frame is used instead of a blend of both. The HUD and smoke are left as they are.'],'toggle',null,nvidia,'',fidelityFg);
-    field(toggles,'frameGenHudGuard','Keep the HUD steady over the sky',['No smeared HUD or dark aircraft over the night sky.','Over the sky, colours are compared as you see them, so a dark stroke is not taken for the sky.'],'toggle',null,nvidia,'',fidelityFg);
+    field(toggles,'frameGenHudGuard','Keep the HUD steady over the sky',['No smeared HUD or dark aircraft over the night sky.','Over the sky, colors are compared as you see them, so a dark stroke is not taken for the sky.'],'toggle',null,nvidia,'',fidelityFg);
     field(toggles,'frameGenEdgeChoice','Sharper moving edges','Picks the motion that fits best where two motions meet.','toggle',null,nvidia,'',fidelityFg);
     field(toggles,'frameGenMaskBand','Cleaner world beside the cockpit','Uses DCS\'s own motion right up to the cockpit frame.','toggle',null,nvidia,'',fidelityFg);
-    // OFXR dcs_motion_occlusion_fill 0/1/2. With Sharp HUD (1) fills only frames Sharp HUD took the HUD out of, so the HUD
+    // OFXR dcs_motion_occlusion_fill 0/1/2. Only with Sharp HUD (1) fills only frames Sharp HUD took the HUD out of, so the HUD
     // never moves; Always (2) also with the HUD in the image. Saved only when on (0.7.0 refuses keys it does not know).
-    // With Sharp HUD picked while Sharp HUD is off: a line under the choice says what it needs (it stays pickable).
-    const fill = segmented(field(more,'frameGenOcclusionFill','Fill around moving aircraft',['Less smear just behind and ahead of a moving aircraft.','With Sharp HUD: only while Sharp HUD takes the HUD out, so the HUD never moves. Always: also over the HUD, which can shift a little where an aircraft passes behind it. Always costs about 0.3 ms of GPU at 2X, 1.1 ms at 3X.'],
-      'select',[['Off','Off · default'],['WithSharpHud','With Sharp HUD'],['Always','Always']],nvidia,'',fidelityFg,
-      {prop:'frameGenOcclusionFill',get:p => p.frameGenOcclusionFill || 'Off',set:(p,v) => p.frameGenOcclusionFill = v}),{Off:'Off',WithSharpHud:'With Sharp HUD',Always:'Always'});
+    // Only with Sharp HUD picked while Sharp HUD is off: a line under the choice says what it needs (it stays pickable).
+    const fill = segmented(field(more,'frameGenOcclusionFill','Fill around moving aircraft',['Less smear just behind and ahead of a moving aircraft.','Only with Sharp HUD: only while Sharp HUD takes the HUD out, so the HUD never moves. Always: also over the HUD, which can shift a little where an aircraft passes behind it. Always costs about 0.3 ms of GPU at 2X, 1.1 ms at 3X.'],
+      'select',[['Off','Off · default'],['WithSharpHud','Only with Sharp HUD'],['Always','Always']],nvidia,'',fidelityFg,
+      {prop:'frameGenOcclusionFill',get:p => p.frameGenOcclusionFill || 'Off',set:(p,v) => p.frameGenOcclusionFill = v}),{Off:'Off',WithSharpHud:'Only with Sharp HUD',Always:'Always'});
     fill.segmentNote = p => p.frameGenOcclusionFill === 'WithSharpHud' && !p.frameGenHudSymbology ? 'Needs Sharp HUD.' : ''; }
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
@@ -887,9 +889,10 @@ function buildFields() {
   const engine = p => p.engineOptimizations;
   c = card('engineControls','Engine Optimizations',['More FPS from the same CPU; the image does not change.','About 50 to 60% more FPS on a busy airfield in VR, until the GPU is the limit.']);
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30 and 2.9.31, single player.'],'toggle');
-  // [Model] RecordersEmulatedLists, on by default: shown only where it can matter (EngineOptimizations.ShowsEmulatedListsOption):
-  // an AMD-only PC or a module log with DriverCommandLists=0. With driver command lists the module ignores it. Read when DCS starts, so not live.
-  field(c,'engineRecordersEmulatedLists','Multi-threading without driver support',['Multi-threaded shadows and G-buffer for AMD Radeon and other cards without D3D11 command lists. A smaller gain than on NVIDIA.','Runs them on the command lists Windows emulates. Tested on a Radeon RX 7900 XTX. Applies at the next DCS start.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
+  // [Model] RecordersEmulatedLists, automatic: on for AMD-only graphics, off elsewhere (untested on NVIDIA without lists) until the pilot turns it on.
+  // Shown only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only PC or a module log with DriverCommandLists=0.
+  // With driver command lists the module ignores it. Read when DCS starts, so not live.
+  field(c,'engineRecordersEmulatedLists','Multi-threading without driver support',['Multi-threaded shadows and G-buffer for AMD Radeon and other cards without D3D11 command lists. A smaller gain than on NVIDIA.','Runs them on the command lists Windows emulates. On by default with AMD graphics, where it was tested (Radeon RX 7900 XTX). Applies at the next DCS start.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden,{prop:'engineRecordersEmulatedLists',get:emulatedListsOn,set:(p,v) => p.engineRecordersEmulatedLists = v});
   // The parts, biggest measured gain first, folded: all on is the tested set.
   // The fold counts like the Engine row on the Overview: the terrain prefetch fix is one more part when it skips repeats.
   more = disclosure(c,'Individual optimizations','All on is best. Turn one off only if a problem points to it.',p => `${ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0)} of ${ENGINE_PARTS.length + 1} on`);
@@ -1036,9 +1039,7 @@ function buildFields() {
   const audioOn = usesBinauralAudio;
   c = card('audioControls','<span class="tag">EXPERIMENTAL</span> 3D headphone audio',['Sounds come from where they are: front, back, above. For headphones.','Engines, wingmen, missiles and cockpit switches get a direction you can hear, behind and above you too. Radio and intercom stay as DCS plays them. Works in VR and on a monitor.']);
   needsNote(c,'audioNeeds');
-  // Without any HRTF set (no generic one in this build, none of the pilot's own) it cannot run: greyed out, the reason
-  // above it (renderAudioNeeds); a profile that has it on can still turn it off.
-  field(c,'binauralAudio','3D headphone audio',['Replaces DCS\'s left and right panning with 3D sound.','Distance, doppler and the canopy stay DCS\'s own. It uses a little CPU on DCS\'s sound thread, not the GPU. Its key on the Keys & headset panel page switches it off and on in flight, to compare.'],'toggle',null,p => state?.audioUsable !== false || Boolean(p.binauralAudio));
+  field(c,'binauralAudio','Turn on',['Replaces DCS\'s left and right panning with 3D sound.','Distance, doppler and the canopy stay DCS\'s own. It uses a little CPU on DCS\'s sound thread, not the GPU. Its key on the Keys & headset panel page switches it off and on in flight, to compare.'],'toggle');
   field(c,'headCircumferenceCm','Head size',['Measure around your head, just above the eyebrows and ears.','A tape measure or a piece of string will do. It sets how far apart your ears sound: 57 cm is the average.'],'number',[48,66,.5],audioOn,'cm');
   { const row = document.createElement('div'); row.className = 'inline-actions head-presets'; row.id = 'headPresets';
     row.innerHTML = [['Small',54],['Medium',57],['Large',60]].map(([t,v]) => `<button type="button" class="button quiet" data-head="${v}" aria-label="Head size ${t}, ${v} cm">${t} · ${v} cm</button>`).join('');
@@ -1271,14 +1272,14 @@ function renderEngine() {
   const s = engineStatus, box = $('engineStatus'); if (!box) return;
   if (!s) { box.innerHTML = '<p class="fine">Select the DCS settings file on the DCS &amp; headset page first.</p>'; return; }
   const report = s.lastReport ? `<dt>Last test report</dt><dd>${escape(new Date(s.lastReportAt).toLocaleString('en-GB'))}</dd>` : '';
-  // Depth boost, Visual realism, Far depth or frame generation alone installs the module too, with none of the
-  // optimizations (its Perception-only mode; VrProfile.UsesEngineModule).
-  const moduleUsed = Boolean(profile && (profile.engineOptimizations || usesDepthBoost(profile) || usesVisualRealism(profile) || usesFarDepth(profile) || (profile.frameGen !== 'Off' && !profile.desktop)));
+  // Depth boost, Visual realism, Far depth, frame generation or 3D headphone audio alone installs the module too, with none of the
+  // optimizations (its Perception-only mode; VrProfile.UsesEngineModule, EngineModuleRequired).
+  const moduleUsed = Boolean(profile && (profile.engineOptimizations || usesDepthBoost(profile) || usesVisualRealism(profile) || usesFarDepth(profile) || (profile.frameGen !== 'Off' && !profile.desktop) || usesBinauralAudio(profile)));
   const pending = profile && moduleUsed !== (s.state !== 'not-installed') ? `<p class="fine">${moduleUsed ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
   const frameGenOn = Boolean(profile && profile.frameGen !== 'Off' && !profile.desktop);
   // Every feature VrProfile.UsesEngineModule counts: frame generation takes the cockpit outline, depth and motion from it.
   const names = profile ? [usesDepthBoost(profile) ? 'Depth boost' : null, usesVisualRealism(profile) ? 'Visual realism' : null, usesFarDepth(profile) ? 'Far depth' : null,
-    frameGenOn ? 'frame generation' : null, usesHudSymbology(profile) ? 'Sharp HUD' : null].filter(Boolean) : [];
+    frameGenOn ? 'frame generation' : null, usesHudSymbology(profile) ? 'Sharp HUD' : null, usesBinauralAudio(profile) ? '3D headphone audio' : null].filter(Boolean) : [];
   const users = names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names.join('');
   const perceptionOnly = profile && !profile.engineOptimizations && users ? `<p class="fine">Used by ${users} only: none of the optimizations run, and there is no test suite.</p>` : '';
   const devNote = profile?.engineOptimizations && profile.engineDevMode ? '<p class="pimax-note warn">Developer mode is on: DCS loads the module and its settings from the developer paths, not the ones this release installs. Turn it off on the left for normal flying.</p>' : '';
@@ -1461,17 +1462,15 @@ function renderHrtfOptions() {
   if (f.input.dataset.options !== html) { f.input.dataset.options = html; f.input.innerHTML = html; }
   f.input.value = options.find(([v]) => v.toLowerCase() === value.toLowerCase())[0];
   const personal = sets.find(s => s.name.toLowerCase() === value.toLowerCase());
-  // Import needs this installation's SOFA converter; it is also the way in when 3D audio has no set at all yet.
-  const canImport = state?.sofaImport !== false;
-  $('hrtfImport').disabled = busy || !canImport || !(profile.binauralAudio || state?.audioUsable === false);
-  $('hrtfImport').title = canImport ? '' : 'This DCS Control cannot convert SOFA files yet.';
+  // Import runs the SOFA converter every build ships (DcsVr.Cli hrtf-convert, out of process).
+  $('hrtfImport').disabled = busy || !profile.binauralAudio;
   $('hrtfRemove').hidden = !personal; $('hrtfRemove').disabled = busy || !personal;
 }
 /** What the chosen set is, after an import or for the set selected: the conversion report in plain words. */
 function hrtfReportHtml(s, fresh) {
   // The fitted radius is a Woodworth fit of the measured onsets (larger than the head itself): shown as the largest
   // time difference between the ears it stands for, not as a head size.
-  const itd = (Number(s.headRadiusMm) / 1000 / 343 * (Math.PI / 2 + 1) * 1000).toFixed(2);
+  const itd = Number(s.maxItdMs).toFixed(2); // HrtfSet.MaxItdMs
   return `<p><b>${escape(fresh ? `Imported "${s.name}"` : s.title || s.name)}</b>: ${s.directions} measured directions, ${(s.sampleRate/1000).toLocaleString('en-US')} kHz`
     + `${s.coverage != null ? `, ${Math.round(s.coverage*100)}% of the sphere covered` : ''}, sound reaches the two ears up to ${itd} ms apart.</p>`
     + (s.warnings?.length ? `<ul>${s.warnings.map(w => `<li>${escape(w)}</li>`).join('')}</ul>` : '<p>No warnings.</p>');
@@ -1519,8 +1518,7 @@ let hrtfFixture = null;
 function renderAudioNeeds() {
   if (!profile) return;
   const name = String(profile.binauralHrtf || 'default'), missing = name.toLowerCase() !== 'default' && !(state?.hrtfSets || []).some(s => s.name.toLowerCase() === name.toLowerCase());
-  const unusable = state?.audioUsable === false ? [`${state.audioUnusableReason || 'There is no HRTF set to render with.'} ${state?.sofaImport === false ? 'It comes with a later DCS Control.' : 'Import your own SOFA file to use it.'}`] : null;
-  showNeeds('audioNeeds', unusable || (!profile.binauralAudio ? null : missing ? [`Your HRTF "${name}" is missing, so the generic one is used. Import the SOFA file again, or choose Generic.`,['audioHrtfFix','binauralHrtf','Choose HRTF']] : null), false);
+  showNeeds('audioNeeds', (!profile.binauralAudio ? null : missing ? [`Your HRTF "${name}" is missing, so the generic one is used. Import the SOFA file again, or choose Generic.`,['audioHrtfFix','binauralHrtf','Choose HRTF']] : null), false);
 }
 let audioTimer, audioSequence = 0, audioStatus = null;
 /** The module's audio lines, read again every 5 s while the page is open. */
@@ -1533,13 +1531,16 @@ async function refreshAudio() {
 }
 /** DCS's speaker layout ids (options.lua sound.main_layout) as its Audio options name them (Binaural.LayoutName). */
 const LAYOUT_NAMES = {'':'Auto', stereo:'Stereo', mono:'Mono', stereo_2_1:'2.1', quadraphonic:'Quadraphonic', suround_5_1:'5.1', surround_5_1:'5.1', suround_7_1:'7.1', surround_7_1:'7.1', spatial_8_1_4_4:'Spatial 8.1.4.4'};
-const AUDIO_STATE = {'not-installed':['Not installed',''], disabled:['Off in this profile',''], unavailable:['Not available',''], waiting:['Ready: starts with DCS',''], running:['Running','loaded'], 'switched-off':['Switched off',''], off:['Off','failed']};
+const AUDIO_STATE = {'not-installed':['Not installed',''], disabled:['Off in this profile',''], waiting:['Ready: starts with DCS',''], running:['Running','loaded'], 'switched-off':['Switched off',''], off:['Off','failed']};
 function renderAudio() {
   const box = $('audioStatus'); if (!box) return;
   const r = audioStatus, s = r?.status;
   if (!r) { box.innerHTML = '<p class="fine">Reading the status…</p>'; $('audioToggleNow').disabled = true; return; }
   const [label, tone] = s ? AUDIO_STATE[s.state] || [s.state,''] : ['Unknown',''];
-  const pending = profile && state?.audioUsable !== false && Boolean(profile.binauralAudio) !== Boolean(r.applied) ? `<p class="fine">${profile.binauralAudio ? 'Launch DCS turns it on with this profile.' : 'Launch DCS turns it off with this profile.'}</p>` : '';
+  // One pending line: what Launch DCS changes takes the place of a summary that only says it is not running yet.
+  const pendingText = profile && Boolean(profile.binauralAudio) !== Boolean(r.applied) ? (profile.binauralAudio ? 'Launch DCS turns it on with this profile.' : 'Launch DCS turns it off with this profile.') : '';
+  const asSummary = pendingText && (!s || ['not-installed','disabled','waiting'].includes(s.state));
+  const pending = pendingText && !asSummary ? `<p class="fine">${pendingText}</p>` : '';
   const key = parseKey(profile?.audioToggleKey ?? HOTKEYS.audioToggleKey.fallback), keyText = key && key[0] ? keyLabel(key) : null;
   const layout = state?.inventory?.dcsSettings?.['sound.main_layout'], layoutValue = String(layout ?? '').replace(/"/g,'').trim().toLowerCase();
   const rows = s && ['running','switched-off'].includes(s.state) ? [
@@ -1549,13 +1550,14 @@ function renderAudio() {
   ] : [];
   const lines = s?.lines?.length ? `<details class="report-details"><summary>Log lines</summary><pre class="log-lines">${escape(s.lines.join('\n'))}</pre></details>` : '';
   const open = [...box.querySelectorAll('details.report-details')].map(d => d.open);
-  box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(s?.summary || 'Select DCS\'s options.lua first.')}</span></div>${pending}`
+  box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(asSummary ? pendingText : s?.summary || 'Select DCS\'s options.lua first.')}</span></div>${pending}`
     + (profile?.binauralAudio && layout !== undefined && layoutValue !== 'stereo' ? `<p class="pimax-note">DCS's speaker layout is ${escape(LAYOUT_NAMES[layoutValue] ?? layoutValue)}. Launch DCS sets it to Stereo while 3D audio is on; Back to stock DCS puts yours back.</p>` : '')
     + (s?.hrtfFallback ? `<p class="pimax-note">Your HRTF${s.hrtfFallback === 'personal' ? '' : ` "${escape(s.hrtfFallback)}"`} could not be used (${escape(s.hrtfFallbackReason || 'refused')}), so the generic one played. Import the SOFA file again.</p>` : '')
     + statusRows(rows, []) + lines
     + `<p class="fine">To compare: ${keyText ? `press <kbd>${escape(keyText)}</kbd> in flight` : 'set a key on the Keys & headset panel page'}, or use the button below. Turn your head while a sound plays behind you.</p>`;
   box.querySelectorAll('details.report-details').forEach((d,i) => { d.open = Boolean(open[i]); });
   $('audioToggleNow').disabled = busy || !r.dcsRunning || !r.applied;
+  $('audioToggleNow').textContent = s?.state === 'switched-off' ? 'Switch 3D audio on' : 'Switch 3D audio off';
 }
 async function toggleAudioNow() {
   if (busy) return;
@@ -1718,13 +1720,19 @@ function updateControls() {
   // Perception, Visual realism and the headset panel. Each opens the page that configures it.
   const names = {};
   const tile = ([target,label,active,title,detail]) => { if (!active) { title = names[target] || title; detail = String(detail).replace(/^Off · /,''); } else detail = String(detail).replace(/^(Bundled|Pimax native|NVIDIA|FidelityFX) · /,''); return `<button type="button" class="stage ${active ? 'on' : 'off'}" data-page="${target}" aria-label="${escape(title)}: ${active ? 'on' : 'off'}. Open settings"><span>${label}<em>${active ? 'ON' : 'OFF'}</em></span><b>${escape(title)}</b><small>${escape(detail)}</small></button>`; };
-  // Then, in VR, what the checklist does not show (as the "Also on" line under it): Perception, Visual realism, the headset panel.
-  const look = [['pupil','EYES &amp; DEPTH','Perception',g => g.section === 'perception','Depth boost, Far depth, Pupil shift'],['visual','COLOR, NIGHT &amp; G','Visual realism',g => g.section === 'visual','Color, night vision, G vision'],['audio','3D AUDIO','Audio',g => g.section === 'audio','Sound from all around'],['osd','HEADSET PANEL','Keys & headset panel',g => g.page === 'osd','Status panel in the headset']].map(([target,label,name,test,offer]) => {
+  // Then what the checklist does not show (as the "Also on" line under it): in VR Perception, Visual realism and the headset
+  // panel; 3D audio in its own group, also on a monitor (it needs no headset). Three tiles a row, so neither group wraps.
+  const look = [['pupil','EYES &amp; DEPTH','Perception',g => g.section === 'perception','Depth boost, Far depth, Pupil shift'],['visual','COLOR, NIGHT &amp; G','Visual realism',g => g.section === 'visual','Color, night vision, G vision'],['osd','HEADSET PANEL','Keys & headset panel',g => g.page === 'osd','Status panel in the headset']].map(([target,label,name,test,offer]) => {
     const list = FEATURE_GUIDE.filter(g => test(g) && g.on(profile)).map(g => g.name === 'Color modes' ? 'Color: '+profile.colorMode : g.name);
     return [target,label,list.length > 0,name,list.length ? list.join(' · ') : offer];
   });
+  const sound = [['audio','3D AUDIO','Audio',g => g.section === 'audio','Sound from all around']].map(([target,label,name,test,offer]) => {
+    const list = FEATURE_GUIDE.filter(g => test(g) && g.on(profile)).map(g => g.name);
+    return [target,label,list.length > 0,name,list.length ? list.join(' · ') : offer];
+  });
   const extra = `<div class="stage-group extra"><div class="stage-group-label">In the headset</div><div class="stage-row">${look.map(tile).join('')}</div></div>`;
-  $('pipeline').innerHTML = profile.desktop ? '' : extra;
+  const audio = `<div class="stage-group extra sound"><div class="stage-group-label">Sound</div><div class="stage-row">${sound.map(tile).join('')}</div></div>`;
+  $('pipeline').innerHTML = (profile.desktop ? '' : extra) + audio;
   // What DLSS 5 still needs, on its own page; everything else to fix is listed once, in Checks.
   const notes = featureNotes(profile);
   $('dlssMissing').innerHTML = notes.dlss.filter(n => n[0] === 'needs').map(() => `<div class="needs"><span>DLSS 5 needs your nvngx_dlssnr.dll runtime file.</span></div>`).join('');
@@ -1781,7 +1789,8 @@ function renderNavState() {
 }
 /** Under the checklist: the Perception, Visual realism and headset panel features that apply at launch, each opening its page. */
 function renderAlsoOn() {
-  const on = FEATURE_GUIDE.filter(g => (['perception','visual','audio'].includes(g.section) || g.page === 'osd') && g.on(profile));
+  // 3D audio has its own Sound tile, on a monitor too.
+  const on = FEATURE_GUIDE.filter(g => (['perception','visual'].includes(g.section) || g.page === 'osd') && g.on(profile));
   const name = g => g.name === 'Color modes' ? 'Color '+profile.colorMode : g.name;
   $('alsoOn').innerHTML = on.length ? 'Also on: '+on.map(g => `<button type="button" class="link-button" data-open-page="${g.page}" title="Open ${escape(g.name)} settings">${escape(name(g))}</button>`).join(', ') : '';
   // In VR the "In the headset" tiles right below say the same, with ON and OFF: the line would only repeat them.
@@ -1964,7 +1973,7 @@ const CHECK_INFO = {
   'audio-contexts':['3D audio contexts',null], 'audio-hotkey':['3D audio key',{reveal:'audioToggleKey',label:'Change'}], 'audio-hotkey-dcs':['3D audio key',{reveal:'audioToggleKey',label:'Change'}],
   'audio-layout':['DCS speaker layout',{page:'audio',label:'Open'}], 'audio-spatial':['Windows spatial sound in DCS',{page:'audio',label:'Open'}],
   'audio-head-pose':['Follow the head between frames',{reveal:'binauralLateHeadTracking',label:'Open'}], 'audio-status':['3D headphone audio',{page:'audio',label:'Open'}],
-  'audio-unavailable':['3D headphone audio',{page:'audio',label:'Open'}], 'audio-hrtf-refused':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}],
+  'audio-hrtf-refused':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}],
   'audio-backoff':['3D audio CPU budget',{reveal:'binauralCpuBudgetPercent',label:'Open'}],
   'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}], 'quad-vertical-offset':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}], 'quad-offset-gaze':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}],
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],
@@ -2620,7 +2629,8 @@ function initializeUpdates() {
   $('updateAuto').addEventListener('change',e => setUpdateChecks(e.target.checked));
 }
 async function initialize() {
-  const groups = {engine:'Performance',foveation:'VR',setup:'Setup',support:'Help'};
+  // 3D audio works on a monitor too: its own group after VR, which Optimizations only hides.
+  const groups = {engine:'Performance',foveation:'VR',audio:'Sound',setup:'Setup',support:'Help'};
   pages.forEach(p => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = PAGE_KEYS[p[0]] ? p[1]+' ('+PAGE_KEYS[p[0]].join(' ')+')' : p[1]; if (PAGE_KEYS[p[0]]) b.setAttribute('aria-keyshortcuts',PAGE_KEYS[p[0]].join('+').replace('Ctrl','Control')); b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div><span class="nav-state" id="navState-${p[0]}" hidden></span>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
   buildFields(); buildFeatureList(); nameMoreButtons(); navigate('overview');
   // Launch and Apply ask once before setting another program's dxgi.dll aside (ReShade, an overlay).

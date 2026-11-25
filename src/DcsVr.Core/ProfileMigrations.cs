@@ -16,9 +16,10 @@ namespace DcsVr.Core;
 /// </summary>
 public static class ProfileMigrations
 {
-    /// <summary>"Multi-threading without driver support" ([Model] RecordersEmulatedLists) became on by default after 0.7.0
-    /// (tested on a Radeon, GitHub #27). Profiles saved by 0.7.0 and earlier store "engineRecordersEmulatedLists": false
-    /// (every value is written), which would keep it off.</summary>
+    /// <summary>"Multi-threading without driver support" ([Model] RecordersEmulatedLists) became automatic in 0.7.1: on for
+    /// AMD-only graphics (tested on a Radeon, GitHub #27), off elsewhere as before. Profiles saved by 0.7.0 and earlier
+    /// store "engineRecordersEmulatedLists": false (every value is written, and false was the default), which would keep
+    /// it off on a Radeon: the key is taken out, so the profile is automatic (0.7.0 reads a missing key as false).</summary>
     public const string EmulatedListsOn = "recorders-emulated-lists-on";
     public const string FileName = "migrations.json";
     private const string Key = "engineRecordersEmulatedLists";
@@ -39,14 +40,14 @@ public static class ProfileMigrations
         var left = new List<string>(); var changed = 0;
         foreach (var file in todo)
         {
-            try { if (TurnOnEmulatedLists(Path.Combine(stateRoot, file), file == "draft.json")) changed++; }
+            try { if (MakeEmulatedListsAutomatic(Path.Combine(stateRoot, file), file == "draft.json")) changed++; }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 left.Add(file);
-                log?.Invoke($"Profile update (multi-threading without driver support on by default): {file} could not be written now ({e.Message}); it is tried again at the next start.");
+                log?.Invoke($"Profile update (multi-threading without driver support automatic): {file} could not be written now ({e.Message}); it is tried again at the next start.");
             }
         }
-        if (changed > 0) log?.Invoke($"Multi-threading without driver support is now on by default: turned on in {changed} saved profile file(s).");
+        if (changed > 0) log?.Invoke($"Multi-threading without driver support is now automatic (on for AMD-only graphics) in {changed} saved profile file(s).");
         var rest = new Dictionary<string, List<string>>(record.Pending);
         if (left.Count > 0) { rest[EmulatedListsOn] = left; Write(stateRoot, record with { Pending = rest }, log); return []; }
         rest.Remove(EmulatedListsOn);
@@ -67,10 +68,11 @@ public static class ProfileMigrations
                 yield return Path.Combine("presets", Path.GetFileName(file));
     }
 
-    /// <summary>Sets "engineRecordersEmulatedLists" from false to true in the profile (the draft's "profile" object, or
-    /// a preset's root), every occurrence when a hand-edited file repeats it; changes nothing else. A profile without the
-    /// key already loads with the new default; a file that is gone or not JSON is left alone. True when it was rewritten.</summary>
-    internal static bool TurnOnEmulatedLists(string path, bool inDraft)
+    /// <summary>Takes "engineRecordersEmulatedLists": false out of the profile (the draft's "profile" object, or a preset's
+    /// root), every occurrence when a hand-edited file repeats it, so the profile is automatic; changes nothing else. A
+    /// profile without the key already is, true stays; a file that is gone or not JSON is left alone. True when it was
+    /// rewritten.</summary>
+    internal static bool MakeEmulatedListsAutomatic(string path, bool inDraft)
     {
         if (!File.Exists(path)) return false;
         JsonDocument document;
@@ -105,8 +107,7 @@ public static class ProfileMigrations
     {
         writer.WriteStartObject();
         foreach (var property in profile.EnumerateObject())
-            if (IsOff(property)) writer.WriteBoolean(property.Name, true);
-            else property.WriteTo(writer);
+            if (!IsOff(property)) property.WriteTo(writer);
         writer.WriteEndObject();
     }
 
@@ -165,26 +166,28 @@ public static class ProfileMigrations
 public sealed record StartProfile(VrProfile Profile, string? Dcs, string? Options, string Status, bool SaveDraft = false)
 {
     public const string AppliedStatus = "Showing the applied profile. Launch DCS uses it as it is.";
-    public const string EmulatedListsStatus = "Multi-threading without driver support is now on by default; Launch DCS applies it.";
+    public const string EmulatedListsStatus = "Multi-threading without driver support is now on for AMD graphics; Launch DCS applies it.";
 
     /// <summary>The applied profile (its saved profile.json, with the DCS files it was written for), unless the draft left
     /// on screen last time differs (settings, DCS install or options.lua). A draft that differs from the applied profile
-    /// only by Multi-threading without driver support turned on (the one-time update of profiles from 0.7.0 and earlier,
-    /// <see cref="ProfileMigrations"/>) says so instead of "differs". Without a usable draft, when that update ran at
-    /// this start, the applied profile gets the same change and is kept as the draft. Null: nothing saved, the defaults.</summary>
+    /// only by Multi-threading without driver support made automatic (the one-time update of profiles from 0.7.0 and
+    /// earlier, <see cref="ProfileMigrations"/>) says so instead of "differs" (on AMD-only graphics, where that turns it
+    /// on; elsewhere nothing changes, and the applied line is shown). Without a usable draft, when that update ran at this
+    /// start, the applied profile gets the same change and is kept as the draft. Null: nothing saved, the defaults.</summary>
     public static StartProfile? Choose(VrProfile? applied, string? appliedDcs, string? appliedOptions, SavedDraft? draft, bool emulatedListsMigrated)
     {
         if (applied is null)
             return draft is null ? null : new(draft.Profile, draft.Dcs, draft.Options, "Your last draft is back. Launch DCS applies it.");
-        var migratedApplied = applied with { EngineRecordersEmulatedLists = true };
+        var migratedApplied = applied with { EngineRecordersEmulatedLists = null };
+        var status = migratedApplied.RecordersEmulatedListsOn ? EmulatedListsStatus : AppliedStatus;
         if (draft is null)
-            return emulatedListsMigrated && !applied.EngineRecordersEmulatedLists
-                ? new(migratedApplied, appliedDcs, appliedOptions, EmulatedListsStatus, SaveDraft: true)
+            return emulatedListsMigrated && applied.EngineRecordersEmulatedLists == false
+                ? new(migratedApplied, appliedDcs, appliedOptions, status, SaveDraft: true)
                 : new(applied, appliedDcs, appliedOptions, AppliedStatus);
         var samePaths = ControlService.SamePath(draft.Dcs, appliedDcs) && ControlService.SamePath(draft.Options, appliedOptions);
         if (samePaths && ControlService.SameDraft(draft.Profile, applied)) return new(applied, appliedDcs, appliedOptions, AppliedStatus);
-        var onlyEmulatedLists = samePaths && !applied.EngineRecordersEmulatedLists && draft.Profile.EngineRecordersEmulatedLists && ControlService.SameDraft(draft.Profile, migratedApplied);
+        var onlyEmulatedLists = samePaths && applied.EngineRecordersEmulatedLists == false && draft.Profile.EngineRecordersEmulatedLists is null && ControlService.SameDraft(draft.Profile, migratedApplied);
         return new(draft.Profile, draft.Dcs ?? appliedDcs, draft.Options ?? appliedOptions,
-            onlyEmulatedLists ? EmulatedListsStatus : "Your last draft is back; it differs from the applied profile. Undo changes brings it back.");
+            onlyEmulatedLists ? status : "Your last draft is back; it differs from the applied profile. Undo changes brings it back.");
     }
 }

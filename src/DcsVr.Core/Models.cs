@@ -111,13 +111,13 @@ public sealed record VrProfile
     /// the motion vectors did not hold, instead of the optical flow's blend that smears the edge into a halo. NVIDIA
     /// frame generation with DCS's motion vectors only. Measured offline (synthetic fixtures, sRGB error against the true
     /// middle frame, fork patch 0122): behind a moving model by day 17.4 -> 8.0, ahead of it 12.0 -> 8.8, the whole image
-    /// 1.44 -> 1.33; at night smaller gains; about 0.09 ms more GPU a pair at 5424 px, no extra memory. A HUD left in the
+    /// 1.44 -> 1.33; at night smaller gains. GPU per pair at 5424 px (OFXR 0123's bench): Always +0.27 ms at 2X and +1.13 ms at 3X (the quality keys together +0.12 / +0.67 ms); no render targets or buffers. A HUD left in the
     /// image (Sharp HUD off) moves with it where an aircraft passes behind it (a semi-transparent HUD up to 9% worse), so
     /// <see cref="OcclusionFill.WithSharpHud"/> (mode 1) fills only where Sharp HUD took the symbols out, and
     /// <see cref="OcclusionFill.Always"/> (mode 2) everywhere. Off until flown (an A/B in the headset decides). OFXR takes a
     /// change of the key in while DCS runs without a rebuild (fork patch 0123: set on each synthesizer, no hitch): live
     /// (LiveSettings). Dev builds of feat/fg-engine-data saved it as a bool with "frameGenOcclusionFillOverHud"; such a
-    /// profile loads as With Sharp HUD, or Always with the second key on (JsonData.LegacyOcclusionFill). The
+    /// profile loads as Only with Sharp HUD, or Always with the second key on (JsonData.LegacyOcclusionFill). The
     /// Image quality "Fine-tune" fold. Written only when on, so a profile with it off is what 0.7.0 reads.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public OcclusionFill FrameGenOcclusionFill { get; init; }
     /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
@@ -506,12 +506,18 @@ public sealed record VrProfile
     /// D3D11 command lists (typically AMD Radeon), on the lists the D3D11 runtime emulates, with copy-based constant
     /// uploads. Tested on a Radeon RX 7900 XTX (GitHub #27): a whole flight without errors, about 7 % more FPS than with
     /// the recorders off; a smaller gain than with driver lists. Read when a recorder installs (DCS start), so it waits
-    /// for the next launch. On by default since the version after 0.7.0; profiles saved earlier store false and are
-    /// turned on once (<see cref="ProfileMigrations"/>). Written to DcsQvCull.ini only where it can matter
-    /// (<see cref="EngineOptimizations.EmulatedListsMatter"/>): a PC with driver command lists keeps its file unchanged.</summary>
-    public bool EngineRecordersEmulatedLists { get; init; } = true;
-    /// <summary>It matters: <see cref="EngineRecordersEmulatedLists"/> with Engine Optimizations and a recorder on.</summary>
-    public bool UsesRecordersEmulatedLists => EngineRecordersEmulatedLists && EngineOptimizations && (EngineShadowRecorder || EngineGBufferRecorder);
+    /// for the next launch. Null (the default since 0.7.1, not written to the profile): automatic, on for AMD-only graphics
+    /// (<see cref="DcsVr.Core.EngineOptimizations.EmulatedListsAutoOn"/>) and off elsewhere, as in 0.7.0: an NVIDIA PC
+    /// without command lists (MFAA, the integrated GPU, a hooking program) is untested on them, so it keeps 0.7.0's off
+    /// with the advice, and the pilot can still turn it on. True or false: the pilot's choice. Profiles saved by 0.7.0 and
+    /// earlier store false, their default, and become automatic once (<see cref="ProfileMigrations"/>). Written to
+    /// DcsQvCull.ini only where it can matter (<see cref="DcsVr.Core.EngineOptimizations.EmulatedListsMatter(string?)"/>):
+    /// a PC with driver command lists keeps its file unchanged.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? EngineRecordersEmulatedLists { get; init; }
+    /// <summary>On: the pilot's choice, or automatic (<see cref="EngineRecordersEmulatedLists"/> null) on AMD-only graphics.</summary>
+    [JsonIgnore] public bool RecordersEmulatedListsOn => EngineRecordersEmulatedLists ?? DcsVr.Core.EngineOptimizations.EmulatedListsAutoOn();
+    /// <summary>It matters: <see cref="RecordersEmulatedListsOn"/> with Engine Optimizations and a recorder on.</summary>
+    public bool UsesRecordersEmulatedLists => RecordersEmulatedListsOn && EngineOptimizations && (EngineShadowRecorder || EngineGBufferRecorder);
     /// <summary>[Model] PlainTriangleCounter: a statistics-only triangle counter updated without a locked instruction.</summary>
     public bool EnginePlainCounter { get; init; } = true;
     /// <summary>[Timing] CacheUs: how often the cached time is refreshed, in microseconds.</summary>
@@ -709,39 +715,41 @@ public sealed record VrProfile
 
     // 3D headphone audio (docs/BINAURAL_AUDIO.md): the engine module's [Audio] section, every key re-read in flight. Off
     // by default; a profile without these properties loads as off with the defaults below (binaural_config.h kKeys).
+    // Each is written to the profile only when it differs from its default ([WrittenWhenChanged]), as the frame
+    // generation Fine-tune keys: a profile that never changed them is one 0.7.0 opens (it refuses keys it does not know).
     /// <summary>[Audio] Binaural: DCS's left/right panning of the mono 3D sounds of the world and the cockpit is replaced
     /// by HRTF rendering (direction per ear: time, level and the ear's own colouring), so sounds come from front, back,
     /// above. Radio and intercom stay as DCS plays them. For headphones; on a monitor too (with head tracking). Off by
     /// default; Launch DCS installs the engine module for it, in its Perception-only mode when Engine Optimizations are off.</summary>
-    public bool BinauralAudio { get; init; }
+    [WrittenWhenChanged] public bool BinauralAudio { get; init; }
     /// <summary>[Audio] Hrtf: "default" (the generic SADIE II KU100 set embedded in the module) or the name of a set
     /// imported from the pilot's own SOFA file (<see cref="HrtfLibrary"/>). Any value, also a hand-edited one, is held as
     /// the module reads it (<see cref="Binaural.NormalizeHrtfName"/>): null or any case of "default" is the generic set, a
     /// name is trimmed.</summary>
-    public string BinauralHrtf { get => _binauralHrtf; init => _binauralHrtf = Binaural.NormalizeHrtfName(value); }
+    [WrittenWhenChanged] public string BinauralHrtf { get => _binauralHrtf; init => _binauralHrtf = Binaural.NormalizeHrtfName(value); }
     private readonly string _binauralHrtf = Binaural.DefaultHrtf;
     /// <summary>[Audio] HeadCircumferenceCm: the head size the time difference between the ears is scaled to (48 to 66;
     /// 54, 57 and 60 are Small, Medium and Large).</summary>
-    public double HeadCircumferenceCm { get; init; } = Binaural.HeadCircumferenceDefault;
+    [WrittenWhenChanged] public double HeadCircumferenceCm { get; init; } = Binaural.HeadCircumferenceDefault;
     /// <summary>[Audio] LateHeadTracking: the head followed at audio rate between DCS frames, from the head pose the pupil
     /// shift layer publishes (PupilShift.ini [HeadPose] Publish=1, VR only). On by default.</summary>
-    public bool BinauralLateHeadTracking { get; init; } = true;
+    [WrittenWhenChanged] public bool BinauralLateHeadTracking { get; init; } = true;
     /// <summary>[Audio] NearField: sources nearer than about 2 m (the cockpit) rendered per ear. On by default.</summary>
-    public bool BinauralNearField { get; init; } = true;
+    [WrittenWhenChanged] public bool BinauralNearField { get; init; } = true;
     /// <summary>[Audio] MaxObjects: the most sounds rendered in 3D at once (the loudest); the rest keep DCS's panning.</summary>
-    public int BinauralMaxObjects { get; init; } = Binaural.MaxObjectsDefault;
+    [WrittenWhenChanged] public int BinauralMaxObjects { get; init; } = Binaural.MaxObjectsDefault;
     /// <summary>[Audio] LevelTrimDb: level of the 3D sounds only, against DCS's own mix.</summary>
-    public double BinauralLevelTrimDb { get; init; }
+    [WrittenWhenChanged] public double BinauralLevelTrimDb { get; init; }
     /// <summary>[Audio] CpuBudgetPercent: the share of each audio block 3D audio may use before it renders fewer sounds.</summary>
-    public int BinauralCpuBudgetPercent { get; init; } = Binaural.CpuBudgetDefault;
+    [WrittenWhenChanged] public int BinauralCpuBudgetPercent { get; init; } = Binaural.CpuBudgetDefault;
     /// <summary>[Audio] ExcludeContexts: DCS sound context ids (0 to 7, comma separated) left to DCS's panning. Profile file
     /// only (for diagnosis: which id is which is only known from a live log); written only when set.</summary>
-    public string? BinauralExcludeContexts { get; init; }
+    [WrittenWhenChanged] public string? BinauralExcludeContexts { get; init; }
     /// <summary>[Audio] LogVoices: a per-sound CSV next to the module's log, for diagnosis. Off by default.</summary>
-    public bool BinauralLogVoices { get; init; }
+    [WrittenWhenChanged] public bool BinauralLogVoices { get; init; }
     /// <summary>[Hotkeys] AudioToggle: switches 3D audio off and back on in flight, to compare (DCS's own panning while
     /// off). "virtual-key:modifiers"; "Off" disables it.</summary>
-    public string AudioToggleKey { get; init; } = NeuralHotkeys.AudioDefault;
+    [WrittenWhenChanged] public string AudioToggleKey { get; init; } = NeuralHotkeys.AudioDefault;
     /// <summary>3D audio runs: on, in VR or on a monitor (it needs no headset).</summary>
     [JsonIgnore] public bool UsesBinauralAudio => BinauralAudio;
     /// <summary>The pupil shift layer publishes the head pose for 3D audio's late head tracking: a VR flight with both on.</summary>
@@ -855,6 +863,11 @@ public sealed record InventorySnapshot
     public bool? AutoexecHudAfterDlss { get; init; }
 }
 
+/// <summary>A profile setting written to the JSON only when it differs from a new profile's value (JsonData), so a
+/// profile that never changed a setting new since 0.7.0 is one 0.7.0 opens.</summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class WrittenWhenChangedAttribute : Attribute;
+
 public static class JsonData
 {
     public static JsonSerializerOptions Options { get; } = Create(withProfileConverter: true);
@@ -866,10 +879,25 @@ public static class JsonData
             WriteIndented = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-            Converters = { new JsonStringEnumConverter(allowIntegerValues: false) }
+            Converters = { new JsonStringEnumConverter(allowIntegerValues: false) },
+            TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver { Modifiers = { OmitAtDefault } }
         };
         if (withProfileConverter) options.Converters.Add(new VrProfileConverter(Create(withProfileConverter: false)));
         return options;
+    }
+
+    /// <summary>A <see cref="VrProfile"/> property marked <see cref="WrittenWhenChangedAttribute"/> is written only when it
+    /// differs from the value a new profile has (also when that is not the type's default: 57 cm, true).</summary>
+    private static void OmitAtDefault(System.Text.Json.Serialization.Metadata.JsonTypeInfo info)
+    {
+        if (info.Type != typeof(VrProfile)) return;
+        var defaults = new VrProfile();
+        foreach (var property in info.Properties)
+            if (property.AttributeProvider is System.Reflection.PropertyInfo member && member.IsDefined(typeof(WrittenWhenChangedAttribute), false))
+            {
+                var initial = member.GetValue(defaults);
+                property.ShouldSerialize = (_, value) => !Equals(value, initial);
+            }
     }
 
     /// <summary>Settings earlier versions saved and this one no longer has: the self-reported limiter, its FPS and the
@@ -955,12 +983,13 @@ public static class JsonData
         return profile with { FreeVramApps = profile.FreeVramApps.Concat(old).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), BoostCloseApps = [] };
     }
 
-    /// <summary>The profile settings written only when they differ from their default ([JsonIgnore(WhenWritingDefault)]:
-    /// profile.json leaves them out while off, so 0.7.0 still opens it), camelCase, each with its default as JSON.</summary>
+    /// <summary>The profile settings written only when they differ from their default ([JsonIgnore(WhenWritingDefault)],
+    /// [JsonIgnore(WhenWritingNull)] or [WrittenWhenChanged]: profile.json leaves them out at their default, so 0.7.0 still
+    /// opens it), camelCase, each with its default as JSON.</summary>
     private static readonly (string Name, System.Text.Json.Nodes.JsonNode? Default)[] WrittenWhenSet = [.. typeof(VrProfile).GetProperties()
-        .Where(p => p.GetCustomAttributes(typeof(JsonIgnoreAttribute), false).OfType<JsonIgnoreAttribute>().Any(a => a.Condition == JsonIgnoreCondition.WhenWritingDefault))
-        .Select(p => (JsonNamingPolicy.CamelCase.ConvertName(p.Name),
-            JsonSerializer.SerializeToNode(p.PropertyType.IsValueType ? Activator.CreateInstance(p.PropertyType) : null, p.PropertyType, Options)))];
+        .Where(p => p.IsDefined(typeof(WrittenWhenChangedAttribute), false) || p.GetCustomAttributes(typeof(JsonIgnoreAttribute), false).OfType<JsonIgnoreAttribute>()
+            .Any(a => a.Condition is JsonIgnoreCondition.WhenWritingDefault or JsonIgnoreCondition.WhenWritingNull))
+        .Select(p => (JsonNamingPolicy.CamelCase.ConvertName(p.Name), JsonSerializer.SerializeToNode(p.GetValue(new VrProfile()), p.PropertyType, Options)))];
     /// <summary>A profile as a JSON object with every setting, those written only when set included at their defaults, so
     /// two profiles compare and merge setting by setting (Live mode: a setting turned off is false, not missing).</summary>
     public static System.Text.Json.Nodes.JsonObject ProfileNode(VrProfile profile)

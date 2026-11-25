@@ -258,14 +258,14 @@ window.runWebSmoke = async function() {
         && $('seg-fpsLimit').querySelector('[data-value=MatchRefresh]').classList.contains('is-default') && !$('seg-fpsLimit').querySelector('[data-value=Custom]').classList.contains('is-default'));
       check('With DLSS 5 on, Pimax native is a disabled segment that says why',ui.profile.neuralRendering && $('seg-quadViews').querySelector('[data-value=PimaxNative]').disabled && $('seg-quadViews').querySelector('[data-value=PimaxNative]').title.includes('not with DLSS 5')
         && !$('segnote-quadViews').hidden && $('segnote-quadViews').textContent.includes('not with DLSS 5') && $('seg-quadViews').getAttribute('aria-describedby').split(' ').includes('segnote-quadViews'));
-      // Fill around moving aircraft: With Sharp HUD while Sharp HUD is off stays pickable and says what it needs.
+      // Fill around moving aircraft: Only with Sharp HUD while Sharp HUD is off stays pickable and says what it needs.
       { const keep = ['frameGen','frameGenOcclusionFill','frameGenHudSymbology'].map(k => [k,ui.profile[k]]), note = $('segnote-frameGenOcclusionFill');
         Object.assign(ui.profile,{frameGen:'Nvidia',frameGenOcclusionFill:'WithSharpHud',frameGenHudSymbology:false}); ui.invalidate();
         const needs = !note.hidden && note.textContent === 'Needs Sharp HUD.' && !$('seg-frameGenOcclusionFill').querySelector('[data-value=WithSharpHud]').disabled;
         ui.profile.frameGenHudSymbology = true; ui.invalidate(); const withHud = note.hidden;
         ui.profile.frameGenHudSymbology = false; ui.profile.frameGenOcclusionFill = 'Always'; ui.invalidate(); const always = note.hidden;
         keep.forEach(([k,v]) => { if (v === undefined) delete ui.profile[k]; else ui.profile[k] = v; }); ui.invalidate();
-        check('Fill around moving aircraft: "Needs Sharp HUD." under With Sharp HUD while Sharp HUD is off, nowhere else',needs && withHud && always); }
+        check('Fill around moving aircraft: "Needs Sharp HUD." under Only with Sharp HUD while Sharp HUD is off, nowhere else',needs && withHud && always); }
       // Home and End pick the first and last choice that can be picked; arrows skip a disabled one (Pimax native with DLSS 5 on).
       { const provider = ui.profile.quadViews, at = v => $('seg-quadViews').querySelector(`[data-value=${v}]`), key = (b,k) => b.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true,cancelable:true}));
         ui.navigate('foveation'); const from = radios('quadViews').find(b => b.getAttribute('aria-checked') === 'true'); from.focus();
@@ -378,9 +378,9 @@ window.runWebSmoke = async function() {
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
       { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-frameGenHudSymbology','setting-frameGenFoveated',
-          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes','audioControls'];
+          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes','audioControls','frameGenFineTune'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its fifteen settings and cards (3D headphone audio included)',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its sixteen settings, cards and folds (3D headphone audio and frame generation Fine-tune included)',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -420,7 +420,7 @@ window.runWebSmoke = async function() {
         && why({...base,engineOptimizations:false}) === 'Turn on Engine Optimizations to change these.'
         && fs.every(f => f.condition(base) && !f.condition({...base,engineOptimizations:false}))); }
     { const lists = $('setting-engineRecordersEmulatedLists');
-      check('Multi-threading without driver support: on the Engine page, on by default, not EXPERIMENTAL, hidden on NVIDIA with command lists (also while on), not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === true && !lists.querySelector('.tag') && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
+      check('Multi-threading without driver support: on the Engine page, automatic by default (on only with AMD-only graphics), not EXPERIMENTAL, hidden on NVIDIA with command lists (also while on), not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists == null && $('input-engineRecordersEmulatedLists').checked === Boolean(ui.state?.gpu?.amdOnly) && !lists.querySelector('.tag') && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
     { const prewarm = $('setting-engineShaderCachePrewarm'), threads = $('setting-engineShaderCompileWorkers');
       check('Shader preparation sits in the Engine page\'s Advanced fold: menu prep on, Auto threads by default, not live',prewarm && threads && prewarm.closest('details') && prewarm.closest('details') === threads.closest('details') && prewarm.closest('details') !== $('setting-engineDevMode').closest('details') && ui.profile.engineShaderCachePrewarm === true && ui.profile.engineShaderCompileWorkers === 0 && !(ui.state?.liveFields || []).some(p => p.startsWith('engineShader')));
       const box = document.createElement('div');
@@ -500,7 +500,7 @@ window.runWebSmoke = async function() {
     edit('quadSharpening',.62); await sleep(900); check('The draft is saved after an edit',ui.savedDraft === JSON.stringify(ui.draft()));
     check('Profile name follows the route and the checked features',ui.profile.name === 'Pimax · Quad Views + DLSS 5 + Frame generation + CPU Boost' && ui.profile.id === 'pimax-qv-dlss5-fg-boost' && $('profileName').textContent === ui.profile.name);
     check('Overview shows a CPU Boost card next to the other features',$('feature-boost').closest('#page-overview') && $('feature-boost').classList.contains('on'));
-    check('Overview shows Perception, Visual realism, 3D audio and Keys & headset panel as a third tile group in VR',$('pipeline').querySelectorAll('.stage-group.extra .stage').length === 4 && $('pipeline').querySelector('.stage-group.extra [data-page=audio]').classList.contains('on') === Boolean(ui.profile.binauralAudio) &&$('pipeline').querySelector('.stage-group.extra [data-page=osd]').classList.contains('on') === (ui.profile.frameGen !== 'Off' || Boolean(ui.profile.headsetPanel)));
+    check('Overview shows Perception, Visual realism and Keys & headset panel as a tile group in VR (three, so the row does not wrap), and 3D audio in its own Sound group',$('pipeline').querySelectorAll('.stage-group.extra:not(.sound) .stage').length === 3 && $('pipeline').querySelectorAll('.stage-group.sound .stage').length === 1 && $('pipeline').querySelector('.stage-group.sound [data-page=audio]').classList.contains('on') === Boolean(ui.profile.binauralAudio) &&$('pipeline').querySelector('.stage-group.extra [data-page=osd]').classList.contains('on') === (ui.profile.frameGen !== 'Off' || Boolean(ui.profile.headsetPanel)));
     edit('quadViews','PimaxNative');
     check('DLSS 5 with Quad Views keeps the bundled provider and the focus adapter, explained in one short note',ui.profile.quadViews === 'QuadViewsFoveated' && ui.profile.quadFocusAdapter && $('featureNotes-quad').textContent.includes("can't host") && $('featureNotes-quad').textContent.length < 60 && $('input-quadViews').querySelector('[value=PimaxNative]').disabled);
     check('DLSS 5 without its runtime file asks for it inline',ui.profile.neuralRuntimePath || $('featureNotes-dlss').textContent.includes('Select file'));
@@ -871,16 +871,6 @@ window.runWebSmoke = async function() {
     { const f = path => ui.fields.find(x => x.path === path), why = path => $('why-'+path).hidden ? null : $('why-'+path).textContent;
       const wasDesktop = Boolean(ui.profile.desktop), route = ui.profile.runtime;
       ui.navigate('audio');
-      { // A build without any HRTF set (no generic one, none of the pilot's own): the switch is greyed out and the reason
-        // shown; Import stays the way in. (This host stands for a release, which has the generic set.)
-        const saved = ui.state;
-        ui.sync({...saved, profile: ui.profile, audioUsable: false, sofaImport: true});
-        check('Without any HRTF set 3D audio is greyed out, says why, and Import SOFA stays available',$('input-binauralAudio').disabled && !$('audioNeeds').hidden
-          && $('audioNeeds').textContent.includes('no generic HRTF set') && !$('hrtfImport').disabled);
-        ui.sync({...saved, profile: ui.profile, audioUsable: false, sofaImport: false});
-        check('Without a SOFA converter Import SOFA is greyed out with a reason',$('hrtfImport').disabled && $('hrtfImport').title.includes('cannot convert'));
-        ui.sync({...saved, profile: ui.profile});
-      }
       check('The Audio page is in the rail, named for its content, with an EXPERIMENTAL card and no consent gate',$('nav-audio') && !$('page-audio').hidden && $('pageTitle').textContent === 'Audio'
         && [...$('audioControls').querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL') && !$('audioControls').querySelector('dialog, [role=alertdialog]') && !$('input-binauralAudio').disabled);
       // (The head size itself was set to its range's ends by the number checks above; DcsVr.Tests checks the 57 cm default.)
