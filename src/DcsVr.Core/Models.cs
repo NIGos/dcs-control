@@ -107,10 +107,17 @@ public sealed record VrProfile
     /// background seen in one real frame only is taken from that frame alone, by DCS's class atlas of both frames, where
     /// the motion vectors did not hold, instead of the optical flow's blend that smears the edge into a halo. NVIDIA
     /// frame generation with DCS's motion vectors only. Measured offline (synthetic fixtures, sRGB error against the true
-    /// middle frame): behind a moving model by day 17.4 -> 5.8, ahead of it 12.0 -> 8.4, the whole image 1.44 -> 1.36; at
-    /// night smaller gains; HUD, smoke and particles unchanged; 0.06 ms more GPU a pair at 5424 px, no extra memory. Off
-    /// until flown (an A/B in the headset decides); profile file only.</summary>
-    public bool FrameGenOcclusionFill { get; init; }
+    /// middle frame, fork patch 0122): behind a moving model by day 17.4 -> 8.0, ahead of it 12.0 -> 8.8, the whole image
+    /// 1.44 -> 1.33; at night smaller gains; about 0.09 ms more GPU a pair at 5424 px, no extra memory. A HUD left in the
+    /// image (Sharp HUD off) moves with it where an aircraft passes behind it (a semi-transparent HUD up to 10% worse), so
+    /// it is written as mode 1: only where Sharp HUD took the symbols out; <see cref="FrameGenOcclusionFillOverHud"/> makes it
+    /// mode 2 (everywhere). Off until flown (an A/B in the headset decides). OFXR takes a change of the key in while DCS
+    /// runs (a rebuild of the frame generator); the app's live table gets it with its UI toggle, which belongs in the Image
+    /// quality "Fine-tune" fold (feat/fg-quality) and is not added here.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenOcclusionFill { get; init; }
+    /// <summary>With <see cref="FrameGenOcclusionFill"/>: the fill also where the HUD is left in the image (OFXR mode 2).
+    /// Profile file only, for the A/B.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenOcclusionFillOverHud { get; init; }
     /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
     /// the full refresh rate; frames pass through (1X, less latency) while it holds that, and 2X/3X Auto takes over while
     /// it falls behind. Every session and scene starts at 2X (DCS paced at half the refresh rate by OFXR, which the
