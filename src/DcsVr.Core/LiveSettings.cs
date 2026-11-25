@@ -17,6 +17,14 @@ public static class LiveSettings
     public const string FlowFile = "ofxr_bridge.ini";
     public const string NeuralFile = "CheekyFoveatedDLSS.ini";
     public static IReadOnlyList<string> Files { get; } = [EngineFile, PupilFile, QuadFile, FlowFile, NeuralFile];
+
+    /// <summary>The keys of a live file that differ from the installed one because the profile changed. [Model]
+    /// RecordersEmulatedLists also follows the module's log (<see cref="EngineOptimizations.EmulatedListsMatter(string?)"/>),
+    /// which DCS rewrites while it runs: with Multi-threading without driver support itself unchanged, the key is not a
+    /// change (the module reads it only when DCS starts), so it never holds back the live settings of that file.</summary>
+    internal static string[] ProfileChanges(string file, IEnumerable<string> changed, VrProfile draft, VrProfile applied) =>
+        [.. changed.Where(k => !(file == EngineFile && k.Equals("Model.RecordersEmulatedLists", StringComparison.OrdinalIgnoreCase)
+            && draft.EngineRecordersEmulatedLists == applied.EngineRecordersEmulatedLists))];
     /// <summary>The first app version whose bundled Quad Views, OFXR, Cheeky and engine module (R144) reload their files.</summary>
     public const string ReloadVersion = "0.6.2-preview";
     /// <summary>The first app version whose bundled Quad Views (0026) and OFXR (0095) also reload the 0.7 live settings

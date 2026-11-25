@@ -367,10 +367,10 @@ window.runWebSmoke = async function() {
         check('Card subtitles with more to say keep it behind More'+(bad.length ? ' ('+bad.join(', ')+')' : ''),!bad.length);
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
-      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated',
+      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-frameGenHudSymbology','setting-frameGenFoveated',
           'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its fifteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its fourteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -410,7 +410,7 @@ window.runWebSmoke = async function() {
         && why({...base,engineOptimizations:false}) === 'Turn on Engine Optimizations to change these.'
         && fs.every(f => f.condition(base) && !f.condition({...base,engineOptimizations:false}))); }
     { const lists = $('setting-engineRecordersEmulatedLists');
-      check('Multi-threading without driver support: on the Engine page, off by default, hidden on NVIDIA with command lists, not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === false && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
+      check('Multi-threading without driver support: on the Engine page, on by default, not EXPERIMENTAL, hidden on NVIDIA with command lists (also while on), not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === true && !lists.querySelector('.tag') && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
     { const prewarm = $('setting-engineShaderCachePrewarm'), threads = $('setting-engineShaderCompileWorkers');
       check('Shader preparation sits in the Engine page\'s Advanced fold: menu prep on, Auto threads by default, not live',prewarm && threads && prewarm.closest('details') && prewarm.closest('details') === threads.closest('details') && prewarm.closest('details') !== $('setting-engineDevMode').closest('details') && ui.profile.engineShaderCachePrewarm === true && ui.profile.engineShaderCompileWorkers === 0 && !(ui.state?.liveFields || []).some(p => p.startsWith('engineShader')));
       const box = document.createElement('div');

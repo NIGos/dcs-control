@@ -6084,7 +6084,7 @@ bool Install() {
   }
   if (!caps.commandLists)
     Log("gbuffer recorder: no driver command lists; RecordersEmulatedLists on (ini key or flag file): recording on the runtime's "
-        "emulated lists (constant buffers by UpdateSubresource, no offsets; checked on WARP, untested on real GPUs)");
+        "emulated lists (constant buffers by UpdateSubresource, no offsets; checked on WARP and a Radeon RX 7900 XTX)");
   dev->GetImmediateContext(&g_ctx);
   g_dev = dev;
   g_dev->AddRef();

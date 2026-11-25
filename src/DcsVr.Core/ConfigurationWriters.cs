@@ -236,10 +236,14 @@ public static class ConfigurationWriters
     /// <param name="shaderCacheDirectory">Where the module keeps its compiled shader variants ([Model] ShaderCacheDir):
     /// DCS Control's own state folder (<see cref="EngineShaderCache"/>), so Back to stock DCS does not delete them.
     /// Null, or a folder the module could not use: the key is left out and the module uses its own folder.</param>
-    public static string DcsQvCull(VrProfile p, string? shaderCacheDirectory = null)
+    /// <param name="emulatedListsMatter">[Model] RecordersEmulatedLists=1 is written (when the profile uses it) only where
+    /// it can matter, <see cref="EngineOptimizations.EmulatedListsMatter(string?)"/>: the module ignores it with driver
+    /// command lists, and on such a PC the file stays as earlier versions wrote it. Left out: a PC with driver command
+    /// lists (Launch and Live mode always pass it).</param>
+    public static string DcsQvCull(VrProfile p, string? shaderCacheDirectory = null, bool emulatedListsMatter = false)
     {
         var cache = p.EngineOptimizations ? EngineShaderCache.ForIni(shaderCacheDirectory) : null;
-        return p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p, cache)) : DcsQvCullTrimmed(p, cache);
+        return p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p, cache, emulatedListsMatter)) : DcsQvCullTrimmed(p, cache, emulatedListsMatter);
     }
 
     /// <summary>[Model] ShaderCachePrewarm and ShaderCompileWorkers, only when they differ from the module's defaults (1
@@ -269,7 +273,7 @@ public static class ConfigurationWriters
         return text.ReplaceLineEndings(newline);
     }
 
-    private static string DcsQvCullTrimmed(VrProfile p, string? shaderCache = null) => $"""
+    private static string DcsQvCullTrimmed(VrProfile p, string? shaderCache, bool emulatedListsMatter) => $"""
         ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
         ; DcsQvCull re-reads this file every second while DCS runs. Only the settings that follow the profile are
         ; written; every other key takes the module's built-in default.
@@ -317,7 +321,7 @@ public static class ConfigurationWriters
         ShadowRecorder={(p.EngineShadowRecorder ? 1 : 0)}
         ; Helper threads per shadow cascade: 1 on CPUs with 8 logical cores or fewer, so DCS keeps its own threads.
         ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}
-        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(p.UsesRecordersEmulatedLists ?"\n; Without driver command lists (AMD Radeon, for example): the recorders on the lists the D3D11 runtime emulates.\nRecordersEmulatedLists=1" : "")}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}{(p.EngineOptimizations ? ShaderCacheKeys(p) : "")}
+        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(p.UsesRecordersEmulatedLists && emulatedListsMatter ? "\n; Without driver command lists (AMD Radeon, for example): the recorders on the lists the D3D11 runtime emulates.\nRecordersEmulatedLists=1" : "")}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}{(p.EngineOptimizations ? ShaderCacheKeys(p) : "")}
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}

@@ -24,25 +24,22 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     /// settings on screen are the ones DCS will launch with.</summary>
     private void ShowAppliedProfile()
     {
+        // Defaults this version changed in profiles saved before (the draft and the presets), once per PC; under the draft
+        // lock, never while Go back has the earlier version's settings in place, and never in the way of opening the app.
+        IReadOnlyList<string> migrated = [];
+        lock (_draftLock)
+            if (!_stateFrozen)
+                try { migrated = ProfileMigrations.Run(service.StateRoot, AppLog.Info, _start.ReturnedPresets); }
+                catch (Exception e) when (e is not OutOfMemoryException) { AppLog.Error("Profile update at start", e); }
+        // The applied profile (with the DCS files it was written for, not whatever detection would find first), or the
+        // draft left on screen last time when it differs; Reset to applied is one click (StartProfile.Choose).
         var applied = service.ReadAppliedProfile();
-        if (applied is not null)
-        {
-            _profile = applied.Profile;
-            // The DCS files the applied profile was written for, not whatever detection would find first.
-            if (applied.Executable is { } executable) _dcs = executable;
-            if (applied.OptionsPath is { } options) _options = options;
-            _status = "Showing the applied profile. Launch DCS uses it as it is.";
-        }
-        // The draft left on screen last time wins over the applied profile when it differs (settings, DCS install or
-        // options.lua); Reset to applied is one click.
-        if (Drafts.Load(AppLog.Info) is { } draft && (applied is null || !ControlService.SameDraft(draft.Profile, applied.Profile)
-            || !ControlService.SamePath(draft.Dcs, applied.Executable) || !ControlService.SamePath(draft.Options, applied.OptionsPath)))
-        {
-            _profile = draft.Profile;
-            if (draft.Dcs is { } dcs) _dcs = dcs;
-            if (draft.Options is { } options) _options = options;
-            _status = applied is null ? "Your last draft is back. Launch DCS applies it." : "Your last draft is back; it differs from the applied profile. Undo changes brings it back.";
-        }
+        if (StartProfile.Choose(applied?.Profile, applied?.Executable, applied?.OptionsPath, Drafts.Load(AppLog.Info), migrated.Contains(ProfileMigrations.EmulatedListsOn)) is not { } start) return;
+        _profile = start.Profile;
+        if (start.Dcs is { } dcs) _dcs = dcs;
+        if (start.Options is { } options) _options = options;
+        _status = start.Status;
+        if (start.SaveDraft) lock (_draftLock) if (!_stateFrozen) Drafts.Save(_profile, _dcs, _options);
     }
     private DraftStore Drafts => new(service.StateRoot);
     private PresetStore Presets => new(service.StateRoot);
@@ -121,18 +118,20 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private bool _committed;
     /// <summary>Go back: one step, to the version this installation replaced. Created at start, where a going back that
     /// did not happen is undone and presets set aside return, before the draft is read.</summary>
-    private readonly Rollback _rollback = StartRollback(service, offline);
+    private readonly (Rollback Rollback, IReadOnlyList<string> ReturnedPresets) _start = StartRollback(service, offline);
+    private Rollback _rollback => _start.Rollback;
     /// <summary>Set (under the draft lock) once the earlier version's settings are in place: nothing saves over them.</summary>
     private bool _stateFrozen;
     /// <summary>The offline verification's stand-in for an installation: its smoke test writes what it "replaced" there.</summary>
     private static string OfflineInstallRoot(ControlService service) => Path.Combine(service.StateRoot, "rollback-fixture");
-    private static Rollback StartRollback(ControlService service, bool offline)
+    /// <summary>Also the presets that came back at this start (saved by this version: the profile update leaves them alone).</summary>
+    private static (Rollback, IReadOnlyList<string>) StartRollback(ControlService service, bool offline)
     {
         var rollback = new Rollback(service.StateRoot, offline ? OfflineInstallRoot(service) : Installed ? AppRoot : null);
         var found = rollback.Reconcile(new AppSettingsStore(service.StateRoot));
         if (found.Undone) AppLog.Info("Going back to the earlier version did not happen: the settings set aside for it are back.");
         if (found.ReturnedPresets.Count > 0) AppLog.Info("Presets set aside when going back are back: " + string.Join(", ", found.ReturnedPresets));
-        return rollback;
+        return (rollback, found.ReturnedPresets);
     }
     /// <summary>The version the offline verification goes back to: one patch before this one, or for an x.y.0 the earlier minor's .9 (0.7.0 -> 0.6.9:
     /// 0.6.0 would be older than the oldest version Go back can reach, 0.6.3); its

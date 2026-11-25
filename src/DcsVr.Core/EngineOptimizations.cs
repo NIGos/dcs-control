@@ -127,6 +127,13 @@ public static class EngineOptimizations
         // "the driver lacks command lists" line).
         if (lines.LastOrDefault(l => l.Contains("the driver lacks command lists", StringComparison.Ordinal) || l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal)) is { } missing)
             warnings.Add(NoCommandListsAdvice(missing));
+        // The recorders ran on the lists Windows emulates (Multi-threading without driver support, on by default): on a PC with an
+        // NVIDIA card something takes the driver's own lists from DCS (integrated graphics, MFAA, a hooked program), so say
+        // what gives the full gain. The GPU line names DCS's adapter; a recorder's line is the fallback.
+        else if ((lines.LastOrDefault(l => l.Contains("DriverCommandLists=0 (recorders on emulated lists)", StringComparison.Ordinal))
+                     ?? lines.LastOrDefault(l => l.Contains("recorder: no driver command lists", StringComparison.Ordinal))) is { } emulated
+                 && EmulatedListsAdvice(emulated) is { } advice)
+            warnings.Add(advice);
         // The newer optimizations check the DCS build first and stay off when it is not the one they were made for. Only
         // a build-match line (the code they patch does not look as on the analysed build) is a DCS version problem for
         // the Checks page; a safety check that latched, a contained exception or a failed allocation is said on the
@@ -187,20 +194,58 @@ public static class EngineOptimizations
     }
 
     /// <summary>The module's log says DCS's device has no driver command lists: its GPU line or a recorder's line with
-    /// DriverCommandLists=0, or the line of a module before 0.5.7.</summary>
+    /// DriverCommandLists=0, a recorder's line when it ran on emulated lists, or the line of a module before 0.5.7.</summary>
     public static bool HasNoDriverCommandLists(IEnumerable<string> lines) =>
-        lines.Any(l => l.Contains("DriverCommandLists=0", StringComparison.Ordinal) || l.Contains("the driver lacks command lists", StringComparison.Ordinal));
+        lines.Any(l => l.Contains("DriverCommandLists=0", StringComparison.Ordinal) || l.Contains("the driver lacks command lists", StringComparison.Ordinal)
+            || l.Contains("recorder: no driver command lists", StringComparison.Ordinal));
 
     /// <summary>The PC's graphics are AMD only (no NVIDIA adapter), so DCS runs on an AMD driver, which has no D3D11 command
     /// lists. An AMD integrated GPU next to an NVIDIA card does not count: DCS runs on the NVIDIA card.</summary>
     public static bool AmdOnly(IReadOnlyList<GpuAdapter> adapters) =>
         adapters.Any(a => a.Vendor == "AMD") && !adapters.Any(a => a.Vendor == "NVIDIA");
 
-    /// <summary>The Engine page shows "Multi-threading without driver support" only where it can matter:
-    /// the GPU is AMD, or the latest module log says DriverCommandLists=0, or it is already on (so it can be turned off).
-    /// Hidden on NVIDIA with command lists. The interface applies the same rule (app.js, engineRecordersEmulatedLists).</summary>
-    public static bool ShowsEmulatedListsOption(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists, bool on) =>
-        on || logNoDriverCommandLists || AmdOnly(adapters);
+    /// <summary>The Engine page shows "Multi-threading without driver support" only where it can matter: the GPU is AMD,
+    /// or the latest module log says DriverCommandLists=0. Hidden on NVIDIA with command lists, where the module ignores
+    /// it (on by default, so showing it while on would show it on every PC). The interface applies the same rule
+    /// (app.js, emulatedListsHidden).</summary>
+    public static bool ShowsEmulatedListsOption(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists) =>
+        logNoDriverCommandLists || AmdOnly(adapters);
+
+    /// <summary>Whether DcsQvCull.ini gets [Model] RecordersEmulatedLists=1 when the option is on: where the option shows
+    /// (<see cref="ShowsEmulatedListsOption"/>), or when the adapters could not be read. With driver command lists the
+    /// module ignores the key (deferred_rec.h RecorderMode picks the offset ring whenever DriverCommandLists=1), so a PC
+    /// with them keeps the file earlier versions wrote. An NVIDIA PC whose device lacks the lists (Threaded optimization
+    /// Off, MFAA On) gets it from the launch after the module first logs DriverCommandLists=0.</summary>
+    public static bool EmulatedListsMatter(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists) =>
+        adapters.Count == 0 || ShowsEmulatedListsOption(adapters, logNoDriverCommandLists);
+
+    /// <summary><see cref="EmulatedListsMatter(IReadOnlyList{GpuAdapter}, bool)"/> for this PC's adapters and the module's
+    /// latest log in <paramref name="module"/> (Scripts\DcsQvCull); null: no module folder known.</summary>
+    public static bool EmulatedListsMatter(string? module)
+    {
+        var adapters = GpuInfo.Adapters();
+        if (adapters.Count == 0 || AmdOnly(adapters)) return true;
+        return module is not null && LogSaysNoDriverCommandLists(ModuleLog(module));
+    }
+
+    private static readonly Lock LogCacheLock = new();
+    private static (string Path, DateTime Written, long Length, bool NoLists)? _logCache;
+    /// <summary><see cref="HasNoDriverCommandLists"/> for a module log, read again only when it changed (every Launch and
+    /// preview plans the ini).</summary>
+    private static bool LogSaysNoDriverCommandLists(string log)
+    {
+        try
+        {
+            var info = new FileInfo(log);
+            if (!info.Exists) return false;
+            lock (LogCacheLock)
+                if (_logCache is { } c && c.Path == info.FullName && c.Written == info.LastWriteTimeUtc && c.Length == info.Length) return c.NoLists;
+            var noLists = ReadShared(log) is { } lines && HasNoDriverCommandLists(lines);
+            lock (LogCacheLock) _logCache = (info.FullName, info.LastWriteTimeUtc, info.Length, noLists);
+            return noLists;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
+    }
 
     /// <summary>Why DCS's device has no D3D11 command lists, and what to do. NVIDIA's Threaded optimization is not named:
     /// Off did not remove them in a live test (RTX 5090, driver 32.0.16.2114, the module logged DriverCommandLists=1).</summary>
@@ -209,21 +254,39 @@ public static class EngineOptimizations
         const string start = "Multi-threaded shadows and G-buffer cannot run: DCS's graphics device has no D3D11 command lists. DCS draws them as usual and the other optimizations still run. ";
         if (line is not null && !line.Contains("DriverCommandLists=0", StringComparison.Ordinal) && line.Contains("DriverCommandLists=1", StringComparison.Ordinal))
             return "Multi-threaded shadows and G-buffer cannot run: DCS's graphics device lacks a capability they need (" + Capabilities(line) + "). DCS draws them as usual and the other optimizations still run. Please report it with a diagnostic package.";
+        return start + (NvidiaCause(line) ?? "This graphics driver does not offer them (common on AMD cards). Turn on Multi-threading without driver support, on this page, to run them anyway, with a smaller gain.");
+    }
+
+    /// <summary>The recorders run on the command lists Windows emulates (Multi-threading without driver support) on a PC
+    /// with an NVIDIA card, whose driver has its own lists: something takes them from DCS, and fixing it gives the full
+    /// gain. <paramref name="line"/>: the module's GPU line or a recorder's "no driver command lists" line. Null on a PC
+    /// without an NVIDIA card (AMD: emulated lists are as good as it gets).</summary>
+    public static string? EmulatedListsAdvice(string? line = null) =>
+        GpuInfo.Adapters().Any(a => a.Vendor == "NVIDIA")
+            ? "Multi-threaded shadows and G-buffer run on command lists Windows emulates, so the gain is smaller than it can be: DCS's graphics device has no D3D11 command lists of its own. " + NvidiaCause(line)
+            : null;
+
+    /// <summary>Why a PC with an NVIDIA card gives DCS no command lists, and what to do; null without an NVIDIA card (and
+    /// no other cause in <paramref name="line"/>).</summary>
+    private static string? NvidiaCause(string? line)
+    {
         if (line?.Contains("PREVENT_INTERNAL_THREADING_OPTIMIZATIONS", StringComparison.Ordinal) == true)
-            return start + "The device was created with threading optimizations turned off, which a program hooked into DCS usually does (an overlay, ReShade-like tools, some OpenXR layers). Try once without them.";
+            return "The device was created with threading optimizations turned off, which a program hooked into DCS usually does (an overlay, ReShade-like tools, some OpenXR layers). Try once without them.";
         // DCS on integrated graphics while the PC has an NVIDIA card: the line names DCS's adapter (vendor 0x1002 AMD, 0x8086 Intel).
         if (line is not null && (line.Contains("vendor 0x1002", StringComparison.OrdinalIgnoreCase) || line.Contains("vendor 0x8086", StringComparison.OrdinalIgnoreCase)) && GpuInfo.Adapters().Any(a => a.Vendor == "NVIDIA"))
-            return start + "DCS runs on " + Adapter(line) + ", not on the NVIDIA card. Make DCS use the NVIDIA card (Windows Settings → System → Display → Graphics → DCS: High performance), or disable the integrated graphics, then start DCS again.";
+            return "DCS runs on " + Adapter(line) + ", not on the NVIDIA card. Make DCS use the NVIDIA card (Windows Settings → System → Display → Graphics → DCS: High performance), or disable the integrated graphics, then start DCS again.";
         if (NvidiaSettings.MfaaForDcs() is { On: true } mfaa)
-            return start + $"The cause: NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. {mfaa.Fix}, then start DCS again.";
+            return $"The cause: NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. {mfaa.Fix}, then start DCS again.";
         if (GpuInfo.Adapters().Any(a => a.Vendor == "NVIDIA"))
-            return start + "NVIDIA cards have them, so check in NVIDIA Control Panel (Global settings and the DCS World program) that Antialiasing - MFAA is Off, that DCS runs on the NVIDIA card and not on integrated graphics, and that no other program wraps DCS's graphics (ReShade, Special K, overlays).";
-        return start + "This graphics driver does not offer them (common on AMD cards). Multi-threading without driver support, on this page, runs them anyway, with a smaller gain.";
+            return "NVIDIA cards have them, so check in NVIDIA Control Panel (Global settings and the DCS World program) that Antialiasing - MFAA is Off, that DCS runs on the NVIDIA card and not on integrated graphics, and that no other program wraps DCS's graphics (ReShade, Special K, overlays).";
+        return null;
     }
     private static string Capabilities(string line) =>
         string.Join(", ", System.Text.RegularExpressions.Regex.Matches(line, @"(DriverCommandLists|ConstantBufferOffsetting|ID3D11DeviceContext1)=0").Select(m => m.Groups[1].Value + " missing")) is { Length: > 0 } list ? list : "see DcsQvCull.log";
+    // A recorder's line: "... on <name> (vendor 0x...)"; the module's GPU line: "env: GPU <name> (DCS's device, vendor 0x...)".
     private static string Adapter(string line) =>
-        System.Text.RegularExpressions.Regex.Match(line, @" on (?<name>.+?) \(vendor ") is { Success: true } m ? m.Groups["name"].Value : "integrated graphics";
+        System.Text.RegularExpressions.Regex.Match(line, @" on (?<name>.+?) \(vendor ") is { Success: true } m ? m.Groups["name"].Value
+        : System.Text.RegularExpressions.Regex.Match(line, @"GPU (?<name>.+?) \([^)]*vendor ") is { Success: true } g ? g.Groups["name"].Value : "integrated graphics";
 
     private static (string? Path, DateTime? At) NewestReport(string module)
     {

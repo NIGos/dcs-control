@@ -242,10 +242,13 @@ public sealed class Rollback
         AtomicFile.WriteText(Path.Combine(folder, "info.json"), JsonSerializer.Serialize(new StateCopy(to.ToString(), now, SetAside: true), Lenient));
     }
 
-    /// <summary>The profile state an earlier build must be able to read: the draft and the files in presets\.</summary>
+    /// <summary>The profile state an earlier build must be able to read: the draft and the files in presets\, and the
+    /// record of the profile updates made to them (<see cref="ProfileMigrations"/>): it goes with the files it describes,
+    /// so the earlier version's own files, put back by going back, are updated again when a later version returns.</summary>
     private static IEnumerable<string> ProfileFiles(string root)
     {
         if (File.Exists(Path.Combine(root, "draft.json"))) yield return "draft.json";
+        if (File.Exists(Path.Combine(root, ProfileMigrations.FileName))) yield return ProfileMigrations.FileName;
         var presets = Path.Combine(root, "presets");
         if (!Directory.Exists(presets)) yield break;
         foreach (var file in Directory.EnumerateFiles(presets))
