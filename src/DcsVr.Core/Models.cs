@@ -19,6 +19,9 @@ public enum NvidiaFlowPreset { Fast, Medium, Slow }
 /// <summary>How readily frame generation only when needed passes DCS's frames through ungenerated
 /// (<see cref="VrProfile.FrameGenPassThrough"/>; OFXR <c>cadence_preference</c> 0, 1, 2, fork patch 0070).</summary>
 public enum PassThroughPreference { Steady, Balanced, PreferRefresh }
+/// <summary>OFXR dcs_motion_occlusion_fill's mode (<see cref="VrProfile.FrameGenOcclusionFill"/>; fork patches 0121, 0122):
+/// Off 0, WithSharpHud 1 (only on frames whose HUD Sharp HUD took out of the image), Always 2.</summary>
+public enum OcclusionFill { Off, WithSharpHud, Always }
 /// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.
 /// The app offers Off, E and F; K and M (offered until 0.7, slower than E: R122, E 0.138 ms against M 0.261 ms per view)
 /// stay so a saved one parses, and a profile that has one loads as E (JsonData).</summary>
@@ -110,14 +113,11 @@ public sealed record VrProfile
     /// middle frame, fork patch 0122): behind a moving model by day 17.4 -> 8.0, ahead of it 12.0 -> 8.8, the whole image
     /// 1.44 -> 1.33; at night smaller gains; about 0.09 ms more GPU a pair at 5424 px, no extra memory. A HUD left in the
     /// image (Sharp HUD off) moves with it where an aircraft passes behind it (a semi-transparent HUD up to 10% worse), so
-    /// it is written as mode 1: only where Sharp HUD took the symbols out; <see cref="FrameGenOcclusionFillOverHud"/> makes it
-    /// mode 2 (everywhere). Off until flown (an A/B in the headset decides). OFXR takes a change of the key in while DCS
-    /// runs (a rebuild of the frame generator); the app's live table gets it with its UI toggle, which belongs in the Image
-    /// quality "Fine-tune" fold (feat/fg-quality) and is not added here.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenOcclusionFill { get; init; }
-    /// <summary>With <see cref="FrameGenOcclusionFill"/>: the fill also where the HUD is left in the image (OFXR mode 2).
-    /// Profile file only, for the A/B.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenOcclusionFillOverHud { get; init; }
+    /// <see cref="OcclusionFill.WithSharpHud"/> (mode 1) fills only where Sharp HUD took the symbols out, and
+    /// <see cref="OcclusionFill.Always"/> (mode 2) everywhere. Off until flown (an A/B in the headset decides). OFXR takes a
+    /// change of the key in while DCS runs (a rebuild of the frame generator, a short hitch): live (LiveSettings). The
+    /// Image quality "Fine-tune" fold. Written only when on, so a profile with it off is what 0.7.0 reads.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public OcclusionFill FrameGenOcclusionFill { get; init; }
     /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
     /// the full refresh rate; frames pass through (1X, less latency) while it holds that, and 2X/3X Auto takes over while
     /// it falls behind. Every session and scene starts at 2X (DCS paced at half the refresh rate by OFXR, which the
@@ -931,6 +931,22 @@ public static class JsonData
         if (!hasFreeVram)
             return profile with { FreeVram = profile.CpuBoost, FreeVramApps = old.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), FreeVramForce = true, FreeVramReopen = false, BoostCloseApps = [] };
         return profile with { FreeVramApps = profile.FreeVramApps.Concat(old).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), BoostCloseApps = [] };
+    }
+
+    /// <summary>The profile settings written only when they differ from their default ([JsonIgnore(WhenWritingDefault)]:
+    /// profile.json leaves them out while off, so 0.7.0 still opens it), camelCase, each with its default as JSON.</summary>
+    private static readonly (string Name, System.Text.Json.Nodes.JsonNode? Default)[] WrittenWhenSet = [.. typeof(VrProfile).GetProperties()
+        .Where(p => p.GetCustomAttributes(typeof(JsonIgnoreAttribute), false).OfType<JsonIgnoreAttribute>().Any(a => a.Condition == JsonIgnoreCondition.WhenWritingDefault))
+        .Select(p => (JsonNamingPolicy.CamelCase.ConvertName(p.Name),
+            JsonSerializer.SerializeToNode(p.PropertyType.IsValueType ? Activator.CreateInstance(p.PropertyType) : null, p.PropertyType, Options)))];
+    /// <summary>A profile as a JSON object with every setting, those written only when set included at their defaults, so
+    /// two profiles compare and merge setting by setting (Live mode: a setting turned off is false, not missing).</summary>
+    public static System.Text.Json.Nodes.JsonObject ProfileNode(VrProfile profile)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(Serialize(profile))!.AsObject();
+        foreach (var (name, value) in WrittenWhenSet)
+            if (!node.ContainsKey(name)) node[name] = value?.DeepClone();
+        return node;
     }
 
     public static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options);

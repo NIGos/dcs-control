@@ -590,6 +590,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var current07 = LiveSettings.Current07(journal);
         var nvidiaFlow = applied.Profile.ForLaunch().FrameGen == FrameGeneration.Nvidia;
         var audio = LiveSettings.AudioInstalled(journal); var hrtfSets = LiveSettings.InstalledHrtfSets(journal);
+        var fgQuality = LiveSettings.FgQualityInstalled(journal);
         // 3D audio turned on in flight starts at once only when nothing else it needs is read at launch: in VR with
         // Follow the head the head pose (PupilShift.ini [HeadPose], read when DCS starts VR), and DCS's speaker layout
         // unless options.lua already has Stereo (none is Auto: Launch DCS writes Stereo into DCS's sound settings, which
@@ -634,7 +635,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
             if (!LiveSettings.Reloads(name, applied.Profile, journal)
-                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow, audio, hrtfSets, audioOnLive))) { blocked.Add(name); continue; }
+                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow, audio, hrtfSets, audioOnLive, fgQuality))) { blocked.Add(name); continue; }
             if (!selfWritten) { updates.Add(new(entry.Path, wanted.Content, entry.InstalledSha256)); continue; }
             // Only the changed keys, in the file as it is now (Cheeky's learned calibration and formatting stay).
             var values = changed.Where(after.ContainsKey).ToDictionary(k => k, k => after[k], StringComparer.OrdinalIgnoreCase);
@@ -670,7 +671,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var waiting = fromEffect.Where(p => !fresh.Contains(p)).ToArray();
         if (fresh.Count > 0 || updates.Count > 0)
         {
-            var draftNode = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
+            var draftNode = JsonData.ProfileNode(draft);
             foreach (var name in fresh) effective[name] = draftNode[name]?.DeepClone();
             SaveInEffect(applied.Profile, Originals.ReadCurrent() ?? journal, effective);
         }
@@ -704,7 +705,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// written with.</summary>
     private System.Text.Json.Nodes.JsonObject InEffect(AppliedProfile applied)
     {
-        var effective = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile))!.AsObject();
+        var effective = JsonData.ProfileNode(applied.Profile);
         LiveRecord? record;
         try { record = File.Exists(LiveRecordPath) ? JsonData.Deserialize<LiveRecord>(File.ReadAllText(LiveRecordPath)) : null; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { record = null; }
@@ -719,17 +720,17 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         }
         // A record that does not make a valid profile (a setting's type changed in an update) counts for nothing.
         try { JsonData.Deserialize<VrProfile>(effective.ToJsonString()); }
-        catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { return System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile))!.AsObject(); }
+        catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { return JsonData.ProfileNode(applied.Profile); }
         return effective;
     }
 
     /// <summary>Settings written live since the launch are still in effect (<see cref="InEffect"/> differs from profile.json).</summary>
     private bool LiveChangesInEffect(AppliedProfile applied) =>
-        !System.Text.Json.Nodes.JsonNode.DeepEquals(InEffect(applied), System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile)));
+        !System.Text.Json.Nodes.JsonNode.DeepEquals(InEffect(applied), JsonData.ProfileNode(applied.Profile));
 
     private void SaveInEffect(VrProfile applied, TransactionJournal journal, System.Text.Json.Nodes.JsonObject effective)
     {
-        var profile = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
+        var profile = JsonData.ProfileNode(applied);
         var values = LiveSettings.Fields.Select(f => f.Name).Where(n => effective.ContainsKey(n) && !System.Text.Json.Nodes.JsonNode.DeepEquals(effective[n], profile[n]))
             .ToDictionary(n => n, n => effective[n]?.ToJsonString() ?? "null", StringComparer.Ordinal);
         try { AtomicFile.WriteText(LiveRecordPath, JsonData.Serialize(new LiveRecord(journal.Id, values, LiveStamps(journal)))); }
@@ -770,8 +771,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// id, name and the values derived from others are left out, as in <see cref="SameDraft"/> and the interface.</summary>
     public static IReadOnlyList<string> ChangedSettings(VrProfile draft, VrProfile applied)
     {
-        var a = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
-        var b = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
+        var a = JsonData.ProfileNode(draft);
+        var b = JsonData.ProfileNode(applied);
         string[] derived = ["id", "name", "quadSaccadeLeadMs", "quadSaccadeHoldMs", "quadSaccadeMaxExtend", "depthBoostActiveMax", "neuralEdgeFeather", "boostHelperElevated"];
         return [.. a.Select(p => p.Key).Union(b.Select(p => p.Key))
             .Where(k => !derived.Contains(k) && !(k.StartsWith("uses", StringComparison.Ordinal) && k.Length > 4 && char.IsUpper(k[4])))
@@ -781,8 +782,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// <summary><paramref name="draft"/> with <paramref name="settings"/> set back to the applied profile's values.</summary>
     private static VrProfile Revert(VrProfile draft, VrProfile applied, IEnumerable<string> settings)
     {
-        var a = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
-        var b = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
+        var a = JsonData.ProfileNode(draft);
+        var b = JsonData.ProfileNode(applied);
         foreach (var name in settings) a[name] = b[name]?.DeepClone();
         return JsonData.Deserialize<VrProfile>(a.ToJsonString());
     }

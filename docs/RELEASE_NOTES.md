@@ -1,8 +1,10 @@
 # Unreleased
 
-**3D headphone audio (experimental).** A new **Audio** page, off by default: DCS's left/right panning of 3D sounds is replaced by real 3D sound for headphones, so engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head. Generic ears (Neumann KU100, SADIE II) out of the box, a head size control, and your own SOFA file if you have one; radio and intercom stay as DCS plays them. Works in VR and on a monitor; its key (Alt+Shift+F6) compares it with DCS's own sound in flight.
+**3D headphone audio (experimental).** A new **Audio** page, off by default: DCS's left/right panning is replaced by real 3D sound for headphones, so engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head. Generic ears (Neumann KU100, SADIE II) out of the box, a head size control, and your own SOFA file if you have one; radio and intercom stay as DCS plays them. Works in VR and on a monitor; Alt+Shift+F6 compares it with DCS's own sound in flight.
 
-**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: on a Radeon RX 7900 XTX it gave about 7 % more FPS with no errors (GitHub #27). Profiles from earlier versions get it turned on once. On NVIDIA cards, which have their own command lists, nothing changes; when DCS gets none there (MFAA on, DCS on integrated graphics, a program hooked into DCS), the recorders now run on emulated lists and the Engine Optimizations page says what gives the full gain.
+**Cleaner generated frames** (NVIDIA frame generation). Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (Off, With Sharp HUD or Always), which takes away most of the smear just behind and ahead of another aircraft.
+
+**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: about 7 % more FPS on a Radeon RX 7900 XTX (GitHub #27). Earlier profiles get it turned on once. NVIDIA cards are not affected; where DCS gets no command lists there (MFAA on, integrated graphics, a program hooked into DCS), the Engine Optimizations page says what gives the full gain.
 
 # 0.7.0 preview
 

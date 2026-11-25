@@ -63,7 +63,8 @@ generated frame is the same, byte for byte, as without the patches (the NVIDIA o
 against the build without them; the DCS motion fixtures check that an option that cannot act on a scene leaves it
 unchanged). OFXR follows a change of them live without rebuilding its synthesis (they are shader bits read per pair; the
 log's `op=live_settings result=1` has bit 16 in `c` and the keys' bits in bits 32-39 of `a` and `b`); the app writes them
-for the next launch, and into a profile only when on (0.7.0 refuses keys it does not know).
+live with NVIDIA frame generation when the installed OFXR reads them (their key names are in the DLL), otherwise for the
+next launch, and into a profile only when on (0.7.0 refuses keys it does not know).
 
 | Key (app setting) | What it does |
 |---|---|
@@ -71,6 +72,7 @@ for the next launch, and into a profile only when on (0.7.0 refuses keys it does
 | `dcs_motion_hud_guard` (Keep the HUD steady over the sky) | On an sRGB swapchain (read in linear light), DCS's motion vectors judge a sky pixel's two samples, and 0057's guard for content drawn after the G-buffer, on encoded values, as on Quad Views' focus layer. In linear light a HUD stroke or a dark aircraft over the night sky passed as sky and was smeared with its vector. Surfaces keep the linear-light check. |
 | `nvidia_edge_choice` (Sharper moving edges) | Where the four flow vectors around a pixel spread over 1.5 px and the two frames differ at the pixel, the vector whose two ends agree best of the four and their mix. |
 | `dcs_motion_mask_band` (Cleaner world beside the cockpit) | DCS's motion vectors also inside the cockpit mask's blocks where DCS's class map says world at the pixel and at both of the vector's ends, with the strict colour check on encoded values. |
+| `dcs_motion_occlusion_fill` (Fill around moving aircraft; patches 0121, 0122) | A mode: 0 off, 1 (With Sharp HUD) only on frames whose HUD Sharp HUD took out of the image, 2 (Always) every frame. Where DCS's motion vectors did not hold at a pixel next to a moving aircraft (or the world over the sky), the background seen in one real frame only is taken from that frame alone, by DCS's class map of both frames, instead of the flow's blend. Not where sky occlusion already took the pixel (its weight 1), not inside the cockpit mask; the motion vectors' own count (the backoff's) is taken before it. A change is a rebuild of the synthesis (a short hitch; `c` bit 32, the mode in bits 40-41 of `a` and `b`). Offline, by day: behind a moving model 17.4 -> 8.0, the whole image 1.44 -> 1.33; about 0.09 ms of GPU a pair at 5424 px. A HUD left in the image moves where an aircraft passes behind it (Always: up to 9% worse there), so With Sharp HUD is the safe mode. |
 
 Offline evidence (error against the true middle frame, mean absolute error in 8-bit sRGB codes; the DCS motion fixtures
 at 640x480 on the RTX card, `XRFG_TEST_DCS_MOTION=1`, `XRFG_TEST_FG_QUALITY=<bits>` for one option):
