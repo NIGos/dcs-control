@@ -254,17 +254,21 @@ void MonoGain() {
               audv::SpeedFactor(0.4f, v300) == 0.4f && std::fabs(audv::SpeedFactor(0.4f, v100) - 0.7f) < 1e-6f,
           "audio mono gain: the speed factor (1 at rest or when unset, s at 200 m/s and over, linear between)");
   }
-  const float tag[4] = {0.3f, 0.0f, 0.3f, 0.0f}, stock[4] = {0.3f, 0.0f, 0.0f, 0.2f}, zero[4] = {};
-  Check(audv::IsTag(tag) && !audv::IsTag(stock) && !audv::IsTag(zero),
-        "audio tag: the mono tag is told from DCS's stereo gains (and from silence) by its bytes");
-  // The stereo tag: (m, 0), (0, m) plus the mark in channel 2. DCS's own gains for a frontal source are the same first
-  // four bytes; without the mark (or with a stale one next to other gains) they are not a tag.
-  const float st[6] = {0.3f, 0, 0, 0.3f, 0.3f, audv::kStereoMark}, front[6] = {0.3f, 0, 0, 0.3f, 0, 0},
-              stale[6] = {0.25f, 0, 0, 0.2f, 0.3f, audv::kStereoMark}, monoMarked[6] = {0.3f, 0, 0.3f, 0, 0, 0};
-  Check(audv::IsStereoTag(st) && !audv::IsTag(st) && !audv::IsStereoTag(front) && !audv::IsStereoTag(stale) &&
-            !audv::IsStereoTag(monoMarked) && audv::IsAnyTag(st) && audv::IsAnyTag(monoMarked) && !audv::IsAnyTag(front),
-        "audio tag: the stereo tag is told from DCS's frontal stereo gains (the mark in channel 2), from a stale mark "
-        "and from the mono tag");
+  // The tag: (m, 0), (0, m) plus the mark in channel 2. DCS's own gains for a frontal source are the same first four
+  // bytes; without the mark, with a stale one next to other gains, or with silence they are not a tag.
+  float st[6], floor[6];
+  audv::MakeTag(0.3f, st);
+  audv::MakeTag(audv::kTagFloor, floor);
+  const float front[6] = {0.3f, 0, 0, 0.3f, 0, 0}, stale[6] = {0.25f, 0, 0, 0.2f, 0.3f * audv::kMarkScale, audv::kStereoMark},
+              oldMono[6] = {0.3f, 0, 0.3f, 0, 0, 0}, zero[6] = {};
+  Check(audv::IsStereoTag(st) && audv::IsStereoTag(floor) && !audv::IsStereoTag(front) && !audv::IsStereoTag(stale) &&
+            !audv::IsStereoTag(oldMono) && !audv::IsStereoTag(zero),
+        "audio tag: the tag is told from DCS's frontal stereo gains (the mark in channel 2), from a stale mark and from "
+        "silence by its bytes");
+  // Both mark values are tiny normal floats (FTZ / DAZ keep them; a multichannel output would play them ~240 dB down).
+  Check(std::fpclassify(floor[4]) == FP_NORMAL && std::fpclassify(audv::kStereoMark) == FP_NORMAL &&
+            std::fabs(st[4]) < 1e-10f && std::fabs(audv::kStereoMark) < 1e-20f,
+        "audio tag: the mark in channel 2 is two tiny normal floats (m 2^-40 and -2^-100), normal down to the tag floor");
 }
 
 // ---- 4. ownership policy (simulation side alone, no image) -----------------------------------------------------------
@@ -319,7 +323,7 @@ struct SimRig {
   bool Tagged(int i) {
     float g[6];
     memcpy(g, w.voices[i] + 0x48, 24);
-    return audv::IsAnyTag(g);
+    return audv::IsStereoTag(g);
   }
   bool StereoTagged(int i) {
     float g[6];
@@ -391,6 +395,7 @@ void Ownership() {
     const int radio = r.Add(7, 1, 10, 0, 0);
     const int stereo = r.Add(0, 1, 10, 0, 0, 2);
     const int quad = r.Add(0, 1, 10, 0, 0, 4);
+    const int noWave = r.Add(0, 1, 10, 0, 0, 0);  // a stream voice before its first chunk (wave channels 0)
     const int excluded = r.Add(3, 1, 10, 0, 0);
     const int nearV = r.Add(0, 1, 0.03, 0, 0);
     const int other = r.Add(0, 1, 10, 0, 0);
@@ -401,7 +406,7 @@ void Ownership() {
     r.Frame(1011);
     Check(r.Owned(ok) && r.Owned(stereo) && r.StereoTagged(stereo) && !r.Owned(twoD) && !r.Owned(radio) &&
               !r.Owned(quad) && !r.Owned(excluded) && !r.Owned(nearV) && !r.Owned(other) && !r.Tagged(radio) &&
-              !r.Tagged(twoD) && !r.Tagged(quad),
+              !r.Tagged(twoD) && !r.Tagged(quad) && !r.Owned(noWave) && !r.Tagged(noWave),
           "audio ownership: mono and stereo waves are owned (stereo with the stereo tag); 2D sounds, 2D contexts (radio, "
           "intercom), waves of more than two channels, excluded contexts, sources under 5 cm and other renderers are never "
           "owned or tagged");
@@ -410,9 +415,9 @@ void Ownership() {
     const auto refused = [&](int why) { return r.cnt.refused[why].load(); };
     Check(refused(audr::kRefuseNot3D) == 6 && refused(audr::kRefuseContext) == 2 && refused(audr::kRefuseChannels) == 2 &&
               refused(audr::kRefuseDistance) == 2 && refused(audr::kRefuseOutput) == 2 && refused(audr::kRefuseOff) == 0 &&
-              refused(audr::kRefuseOffline) == 0,
+              refused(audr::kRefuseOffline) == 0 && refused(audr::kRefuseNoWave) == 2,
           "audio ownership: refusals are counted by reason (2D sound or 2D context on any output, excluded context, more "
-          "than two channels, distance, a 3D sound on another renderer)");
+          "than two channels, a stream with no wave yet, distance, a 3D sound on another renderer)");
     r.env.engineState = 2;
     r.Frame(1022);
     r.Frame(1033);
@@ -464,19 +469,20 @@ void Ownership() {
     memcpy(g, r.w.voices[st] + 0x48, 24);
     // m of the stereo voice: DCS's gain for that sound with the source in front (the same rule as for a mono wave).
     const double base = 0.8, m = 1.5 * 0.4 * base + 0.2 * base;
-    const bool tagBytes = std::fabs(g[0] - m) < 1e-6 && g[0] == g[3] && g[0] == g[4] && g[1] == 0 && g[2] == 0 &&
+    const bool tagBytes = std::fabs(g[0] - m) < 1e-6 && g[0] == g[3] && g[4] == g[0] * audv::kMarkScale && g[1] == 0 && g[2] == 0 &&
                           g[5] == audv::kStereoMark && ms.mTag == g[0];
     const bool flags = metas && !(mm.flags & audv::meta_flags::kStereo) && (ms.flags & audv::meta_flags::kStereo) &&
                        !(ms.flags & audv::meta_flags::kWide) && (mw.flags & audv::meta_flags::kStereo) &&
-                       (mw.flags & audv::meta_flags::kWide) && !r.Marked(mono);
+                       (mw.flags & audv::meta_flags::kWide) && r.Marked(mono);
     const bool counts = r.cnt.ownedNow.load() == 3 && r.cnt.ownedStereoNow.load() == 2 && r.cnt.ownedWideNow.load() == 1;
-    Check(r.StereoTagged(st) && r.StereoTagged(wide) && !r.StereoTagged(mono) && r.Tagged(mono) && tagBytes && flags && counts,
-          "audio ownership: a stereo wave gets the stereo tag (m, 0), (0, m), mark (m, -1) with m = DCS's frontal gain, "
-          "published as stereo (wide with auto_width); the owned set's counts (3 sounds: 2 stereo, 1 wide)");
-    // A stream turning mono under an owned stereo voice: the mono tag, the mark cleared.
+    Check(r.StereoTagged(st) && r.StereoTagged(wide) && r.StereoTagged(mono) && tagBytes && flags && counts,
+          "audio ownership: every owned voice gets the tag (m, 0), (0, m), mark (m 2^-40, -2^-100) with m = DCS's frontal "
+          "gain, mono and stereo alike; stereo waves published as stereo (wide with auto_width); the owned set's counts "
+          "(3 sounds: 2 stereo, 1 wide)");
+    // A stream turning mono under an owned stereo voice: the same tag, only the count changes.
     W<uint32_t>(r.w.voices[st], 0xec4, 1);
     r.Frame(1022);
-    const bool turnedMono = r.Tagged(st) && !r.StereoTagged(st) && !r.Marked(st);
+    const bool turnedMono = r.StereoTagged(st) && r.Marked(st);
     W<uint32_t>(r.w.voices[st], 0xec4, 2);
     r.Frame(1033);
     const bool back = r.StereoTagged(st);
@@ -485,7 +491,7 @@ void Ownership() {
     r.Frame(1044);
     r.Frame(1055);
     Check(turnedMono && back && !r.Owned(st) && !r.Tagged(st) && !r.Marked(st) && !r.Marked(wide) && r.cnt.ownedStereoNow.load() == 0,
-          "audio ownership: a stream switching between mono and stereo switches the tag; a released stereo voice keeps "
+          "audio ownership: a stream switching between mono and stereo keeps its tag; a released voice keeps "
           "DCS's gains with no mark left in channel 2");
   }
 }
@@ -1541,25 +1547,59 @@ void StereoSteady() {
           "DCS's frontal gain, at its own level (factor 1), owned from its creation (no fade), nothing else added");
     RigDown(r);
   }
-  {  // decorrelated channels in front: the HRTF part raised to the stereo's loudness (about +3 dB)
+  {  // channels correlated in part, in front: a point source, the HRTF part raised to the stereo's loudness, no side
     Rig r;
-    StereoOne(r, kNoise, 5, 0);
+    StereoOne(r, kPartial, 5, 0);
     double pm = 0, pst = 0;
+    bool coreOnly = true;
     for (int k = 0; k < 20; ++k) {
       SimFrame(r);
       Block(r, a.data(), b.data(), 480);
       for (int i = 0; i < 480; ++i) pm += double(audiofake::g_lastMono[i]) * audiofake::g_lastMono[i];
-      for (int i = 0; i < 960; ++i) pst += double(b[i]) * b[i];
+      for (int i = 0; i < 960; ++i) pst += double(b[i]) * b[i], coreOnly = coreOnly && a[i] == audiofake::g_lastAdded[i];
     }
     const double g = audiofake::g_lastGain;
     // Stock power at the front: both channels. A front-normalised HRTF (the real core: 0 dB ahead) gives the mid to
     // each ear, 2 g^2 x the mid's power (the stand-in's equal-power pan would give half; e2e checks the real core).
     const double ratioDb = 10 * std::log10(2 * g * g * pm / pst);
-    printf("     stereo steady (decorrelated): loudness factor %.4f (sqrt 2 = 1.4142), HRTF part vs DCS's stereo %.2f dB\n",
-           g, ratioDb);
-    Check(std::fabs(g - 1.41421356) < 0.05 && std::fabs(ratioDb) < 0.5,
-          "audio stereo steady state: decorrelated channels keep their loudness (the mid's HRTF part raised by about "
-          "sqrt 2, within 0.5 dB of DCS's stereo power)");
+    printf("     stereo steady (partly correlated): loudness factor %.4f (expected about 1.13), HRTF part vs DCS's stereo "
+           "%.2f dB, core only %s\n", g, ratioDb, coreOnly ? "yes" : "no");
+    Check(g > 1.08 && g < 1.2 && std::fabs(ratioDb) < 0.5 && coreOnly,
+          "audio stereo steady state: partly correlated channels stay a point source (no side) and keep their loudness "
+          "(the mid's HRTF part raised by sqrt((P_M + P_S) / P_M), within 0.5 dB of DCS's stereo power)");
+    RigDown(r);
+  }
+  {  // decorrelated channels (an ambience bed): after 200 ms the side keeps DCS's stereo around the binaural mid
+    Rig r;
+    StereoOne(r, kNoise, 3, 4);  // 40 blocks: 400 ms
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    float gL, gR;
+    audv::PanLaw(0.8, 0, 0.6 * 0.5 + 0.8 * -0.8660254037844386, 0.6 * 0.5 + 0.8 * 0.8660254037844386, &gL, &gR);
+    double worst = 0, peak = 0;
+    for (int i = 0; i < 480; ++i) {
+      const double s = 0.5 * (b[2 * i] / gL - b[2 * i + 1] / gR);
+      worst = std::max({worst, std::fabs(a[2 * i] - audiofake::g_lastAdded[2 * i] - s * gL),
+                        std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] + s * gR)});
+      peak = std::max(peak, std::fabs(s * gL));
+    }
+    printf("     stereo steady (decorrelated bed): loudness factor %.4f, side vs DCS's worst %.2e of %.3f\n",
+           audiofake::g_lastGain, worst, peak);
+    Check(audiofake::g_lastGain == 1.0f && peak > 0.01 && worst <= 1e-5 * peak + 1e-7,
+          "audio stereo steady state: decorrelated channels (wind, rain) are a diffuse bed: DCS's own side kept around "
+          "the binaural mid, no loudness factor");
+    RigDown(r);
+  }
+  {  // a stereo wave under 1.5 m (cockpit): wide, DCS's side kept
+    Rig r;
+    StereoOne(r, kPartial, 0.6, 0.8);
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    double side = 0;
+    for (int i = 0; i < 960; ++i) side = std::max(side, static_cast<double>(std::fabs(a[i] - audiofake::g_lastAdded[i])));
+    printf("     stereo steady (1 m away): loudness factor %.4f, side added up to %.3f\n", audiofake::g_lastGain, side);
+    Check(audiofake::g_lastGain == 1.0f && side > 0.01,
+          "audio stereo steady state: a stereo wave under 1.5 m keeps DCS's side (no loudness factor)");
     RigDown(r);
   }
   {  // wide (auto_width, inside its inner radius): the core's mid plus DCS's own side
@@ -1679,6 +1719,207 @@ void StereoTorn() {
         "audio stereo torn snapshot: DCS's two gains snapshotted between the panner's store and the tag keep the voice "
         "binaural (each channel recovered from its own ramp; the output stays the steady one within 1e-5)");
   RigDown(r);
+}
+
+// Taking a voice over and giving it back (kill switch) on hard-panned dual mono: the loudness estimate comes from the
+// channels recovered from DCS's known ramps, so the factor stays 1 and no block swells above the steady levels.
+void StereoTakeOver() {
+  Rig r;
+  RigUp(r, kIniOn);
+  AddBoth(r, 0, true, 2, kDual, 0.5f, 440, 0.8f);
+  PosBoth(r, 0, 0, 0, 10);  // hard right: DCS's gL and gR far apart
+  audio::g_userOff = true;
+  CreateVoice(r, 0);
+  Bind(r);
+  std::vector<float> a(2 * 480), b(2 * 480);
+  auto rms = [](const std::vector<float>& v) {
+    double e = 0;
+    for (float x : v) e += double(x) * x;
+    return std::sqrt(e / v.size());
+  };
+  double stockRms = 0, binRms = 0, worstRms = 0, worstGain = 0;
+  uint64_t renders = audiofake::g_renders.load();
+  for (int k = 0; k < 160; ++k) {
+    if (k == 20 || k == 80 || k == 120) audio::g_userOff = false;
+    if (k == 60 || k == 100 || k == 140) audio::g_userOff = true;
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    const double x = rms(a);
+    if (k == 15) stockRms = x;
+    if (k == 50) binRms = x;
+    worstRms = std::max(worstRms, x);
+    if (audiofake::g_renders.load() != renders) {
+      renders = audiofake::g_renders.load();
+      worstGain = std::max(worstGain, static_cast<double>(audiofake::g_lastGain));
+    }
+  }
+  printf("     stereo take-over (hard-panned dual mono): block RMS stock %.4f, binaural %.4f, largest %.4f; largest "
+         "loudness factor %.6f\n", stockRms, binRms, worstRms, worstGain);
+  Check(stockRms > 0 && binRms > 0 && worstRms <= 1.06 * std::max(stockRms, binRms) && worstGain <= 1.0f + 1e-6 &&
+            audio::g_cnt.fadeIns.load() >= 3 && audio::g_cnt.fadeOuts.load() >= 3,
+        "audio stereo take-over: on hard-panned dual mono every take-over and give-back keeps the loudness factor at 1 "
+        "and no block above the steady levels (+0.5 dB)");
+  RigDown(r);
+}
+
+// Half-written tags: the snapshot copies the gains in 16-byte pieces (0x40..0x50 holds ch0, 0x50..0x60 ch1 and ch2)
+// while the sim writes 24 bytes; any mix of DCS's gains and the tag is recovered from its own ramps.
+void StereoHalfTorn() {
+  for (int mode = 0; mode < 2; ++mode) {
+    Rig r;
+    RigUp(r, kIniOn);
+    AddBoth(r, 0, true, 2, kDcSplit, 1.0f, 0, 1.0f);
+    PosBoth(r, 0, 0, 0, 10);
+    Bind(r);
+    CreateVoice(r, 0);
+    std::vector<float> a(2 * 480), b(2 * 480), steady(2 * 480);
+    for (int i = 0; i < 20; ++i) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    Block(r, steady.data(), b.data(), 480);
+    uint8_t* v = r.w.voices[0];
+    uint8_t tag[24];
+    memcpy(tag, v + 0x48, 24);
+    if (mode == 0) memcpy(v + 0x50, r.ref.voices[0] + 0x50, 8);  // ch0 the tag, ch1 DCS's (ch2 the mark)
+    else memcpy(v + 0x48, r.ref.voices[0] + 0x48, 8);              // ch0 DCS's, ch1 and ch2 the tag
+    double worst = 0;
+    Block(r, a.data(), b.data(), 480);
+    for (int i = 0; i < 960; ++i) worst = std::max(worst, static_cast<double>(std::fabs(a[i] - steady[i])));
+    memcpy(v + 0x48, tag, 24);
+    Block(r, a.data(), b.data(), 480);
+    for (int i = 0; i < 960; ++i) worst = std::max(worst, static_cast<double>(std::fabs(a[i] - steady[i])));
+    printf("     half-written tag (%s): largest deviation from the steady output %.2e\n",
+           mode ? "ch0 DCS's, ch1 the tag" : "ch0 the tag, ch1 DCS's", worst);
+    Check(worst < 1e-5 && audio::g_cnt.fadeOuts.load() == 0,
+          mode ? "audio half-written tag: DCS's left gain next to the tag's right one: the voice stays binaural, steady within 1e-5"
+               : "audio half-written tag: the tag's left gain next to DCS's right one: the voice stays binaural, steady within 1e-5");
+    RigDown(r);
+  }
+}
+
+// A stream switching its channel count in the middle of a render (ED re-reads voice+0xec4 per kernel run): the tag is
+// the same for both, the output stays the steady one.
+void StereoStreamSwitch() {
+  Rig r;
+  RigUp(r, kIniOn);
+  AddBoth(r, 0, true, 2, kDc, 0.5f, 0, 1.0f);  // the same signal on both channels: mono and stereo kernels agree
+  PosBoth(r, 0, 3, 0, 4);
+  Bind(r);
+  CreateVoice(r, 0);
+  std::vector<float> a(2 * 480), b(2 * 480), steady(2 * 480);
+  for (int i = 0; i < 20; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+  Block(r, steady.data(), b.data(), 480);
+  double worst = 0;
+  for (uint32_t ch : {1u, 2u, 1u, 2u}) {
+    W<uint32_t>(r.w.voices[0], 0xec4, ch);  // no sim frame in between: the tag is the stereo one throughout
+    Block(r, a.data(), b.data(), 480);
+    for (int i = 0; i < 960; ++i) worst = std::max(worst, static_cast<double>(std::fabs(a[i] - steady[i])));
+  }
+  printf("     stream switching mono / stereo mid-render: largest deviation from the steady output %.2e\n", worst);
+  Check(worst <= 1e-6 && audio::g_cnt.fadeOuts.load() == 0,
+        "audio stream switch: a stream turning mono or stereo between two sim frames keeps the voice binaural and the "
+        "output steady (one tag for both)");
+  RigDown(r);
+}
+
+// The mark left in channel 2 across an uninstall: DCS's mix bit-identical without us, and a new install owns the voice
+// again from scratch.
+void StereoReinstall() {
+  Rig r;
+  RigUp(r, kIniOn);
+  AddBoth(r, 0, true, 2, kSine, 0.4f, 330, 0.9f);
+  PosBoth(r, 0, 0, 0, 5);  // a frontal-symmetric pair of gains is not needed: any position
+  Bind(r);
+  CreateVoice(r, 0);
+  std::vector<float> a(2 * 480), b(2 * 480);
+  for (int i = 0; i < 10; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+  const bool ownedBefore = audio::g_cnt.ownedNow.load() == 1;
+  audio::Stop();  // sites restored; the voice's pending gains still hold the tag and the mark
+  const bool markLeft = R<float>(r.w.voices[0], 0x48 + 20) == audv::kStereoMark;
+  for (int i = 0; i < 3; ++i) {
+    SimFrame(r);  // DCS's own panner now: ch0 / ch1 stock again, ch2 untouched
+    Block(r, a.data(), b.data(), 480);
+  }
+  bool identical = true;
+  for (int i = 0; i < 5; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    identical = identical && memcmp(a.data(), b.data(), sizeof(float) * 960) == 0;
+  }
+  // Installed again (the module's own start sequence).
+  ResetModule();
+  audio::Start();
+  Tick();
+  Bind(r);
+  for (int i = 0; i < 10; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+  printf("     reinstall: mark left %s, DCS's mix without us %s, owned again %u, orphan tags %llu\n", markLeft ? "yes" : "no",
+         identical ? "bit-identical" : "differs", audio::g_cnt.ownedNow.load(),
+         static_cast<unsigned long long>(audio::g_cnt.orphanTagged.load()));
+  Check(ownedBefore && markLeft && identical && audio::g_installed.load() && audio::g_cnt.ownedNow.load() == 1 &&
+            audio::g_cnt.hrtfCalls.load() > 0,
+        "audio reinstall: a mark left in channel 2 after an uninstall leaves DCS's mix bit-identical, and a new install "
+        "owns the voice again");
+  RigDown(r);
+}
+
+// DCS's output turning multichannel in place before its panner runs again: channel 2 plays the tag's mark, about
+// 240 dB under the voice.
+void StereoLayoutChange() {
+  Rig r;
+  RigUp(r, kIniOn);
+  AddBoth(r, 0, true, 2, kNoise, 0.5f, 0, 1.0f, 3);
+  PosBoth(r, 0, 3, 0, 4);
+  Bind(r);
+  CreateVoice(r, 0);
+  std::vector<float> a(2 * 480), b(2 * 480);
+  for (int i = 0; i < 10; ++i) {
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+  }
+  W<uint32_t>(r.w.Renderer(), 0x2274, 3);  // speaker 2: zero record (as a fresh layout's unused slot)
+  std::vector<float> o3(3 * 480, 0.0f);
+  reinterpret_cast<DrvP5>(r.im.base + kDrvP5)(r.w.wasapi, o3.data(), 480);
+  double ch01 = 0, ch2 = 0;
+  for (int i = 0; i < 480; ++i) {
+    ch01 = std::max({ch01, static_cast<double>(std::fabs(o3[3 * i])), static_cast<double>(std::fabs(o3[3 * i + 1]))});
+    ch2 = std::max(ch2, static_cast<double>(std::fabs(o3[3 * i + 2])));
+  }
+  printf("     in-place layout change to 3 channels: channel 2 peak %.2e against %.3f on the pair (%.0f dB)\n", ch2, ch01,
+         Db(ch2 / std::max(ch01, 1e-30)));
+  Check(ch01 > 0.01 && ch2 <= 1e-10 * ch01 && audio::g_cnt.passBlocks.load() >= 1,
+        "audio layout change: a multichannel output before DCS pans again plays the tag's mark on channel 2 at least "
+        "200 dB under the voice (the block passes through)");
+  W<uint32_t>(r.w.Renderer(), 0x2274, 2);
+  RigDown(r);
+}
+
+// The loudness estimate on non-finite input: untouched, and rebuilt from the next finite block if its state broke.
+void LoudnessNonFinite() {
+  std::vector<float> lr(2 * 480);
+  for (int i = 0; i < 480; ++i) lr[2 * i] = std::sin(i * 0.1f), lr[2 * i + 1] = std::cos(i * 0.37f);
+  audr::Loudness l;
+  l.Update(lr.data(), 480, 48000);
+  const float c0 = l.comp;
+  std::vector<float> bad = lr;
+  bad[100] = std::numeric_limits<float>::quiet_NaN();
+  bad[201] = std::numeric_limits<float>::infinity();
+  l.Update(bad.data(), 480, 48000);
+  const bool untouched = l.comp == c0 && std::isfinite(l.powM) && std::isfinite(l.powS);
+  l.powM = std::numeric_limits<double>::quiet_NaN();  // a broken state (never expected)
+  l.Update(lr.data(), 480, 48000);
+  const bool rebuilt = std::isfinite(l.powM) && std::isfinite(l.powS) && std::fabs(l.comp - c0) < 1e-6f;
+  Check(c0 > 1.0f && untouched && rebuilt,
+        "audio loudness: a non-finite block leaves the estimate untouched; a broken state is rebuilt from the next block");
 }
 
 // The core skipped for some blocks (HRTF share 0 while still tagged, e.g. off for the session decided on the render
@@ -1852,6 +2093,12 @@ inline void Run() {
   StereoSteady();
   StereoFades();
   StereoTorn();
+  StereoTakeOver();
+  StereoHalfTorn();
+  StereoStreamSwitch();
+  StereoReinstall();
+  StereoLayoutChange();
+  LoudnessNonFinite();
   CoreSkipThenResume();
   LongBlocks();
   Handover();

@@ -371,9 +371,11 @@ void Stereo() {
   binaural::HrtfSet* set = binaural::LoadHrtf(g_set.data(), g_set.size() * 4, kRate, err, sizeof(err));
   const double radius = binaural_config::PilotItdRadiusM(set ? binaural::DescribeHrtf(set).datasetHeadRadiusM : 0.0f, kCircumferenceCm);
   if (set) binaural::ReleaseHrtf(set);
-  // 1. A stereo wave with decorrelated channels, a point source: ahead, at the right, at the left.
+  // 1. A stereo wave with channels correlated in part (a sine plus independent noise), a point source: ahead, at the
+  // right, at the left.
   const float ahead[3] = {5, 0, 0}, right[3] = {0, 0, 5}, left[3] = {0, 0, -5};
-  const Take ta = Hold(2, kNoise, ahead, 20, 100), tr = Hold(2, kNoise, right, 20, 100), tl = Hold(2, kNoise, left, 20, 100);
+  const Take ta = Hold(2, kPartial, ahead, 20, 100, 0, 31, 500), tr = Hold(2, kPartial, right, 20, 100, 0, 31, 500),
+             tl = Hold(2, kPartial, left, 20, 100, 0, 31, 500);
   const Cue ca = Measure(ta.hooked.data(), ta.hooked.size() / 2), cr = Measure(tr.hooked.data(), tr.hooked.size() / 2),
             cl = Measure(tl.hooked.data(), tl.hooked.size() / 2);
   const double side = Woodworth(90, radius);
@@ -383,10 +385,13 @@ void Stereo() {
          static_cast<unsigned long long>(tr.stereoCalls));
   Check(tr.stereoCalls >= 100 && std::fabs(ca.itd) <= 15e-6 && std::fabs(ca.ild) <= 0.5 && std::fabs(cr.itd - side) <= 30e-6 &&
             std::fabs(cl.itd + side) <= 30e-6 && cr.ild >= 3.0 && cl.ild <= -3.0,
-        "audio e2e stereo: a stereo wave (decorrelated channels) is rendered by the core as a point source: no "
+        "audio e2e stereo: a stereo wave (channels correlated in part) is rendered by the core as a point source: no "
         "interaural difference ahead, Woodworth's ITD at the sides within 30 us, the far ear at least 3 dB quieter");
-  // 2. Loudness ahead against DCS's own stereo output, for decorrelated and dual-mono channels and a mono wave.
+  // 2. Loudness ahead against DCS's own stereo output: partly correlated, dual mono, a decorrelated bed (its side kept)
+  // and a mono wave.
   const Take td = Hold(2, kDual, ahead, 20, 100, 0, 31, 500), tm = Hold(1, kNoise, ahead, 20, 100), tmd = Hold(1, kSine, ahead, 20, 100, 0, 31, 500);
+  const Take tbed = Hold(2, kNoise, ahead, 40, 100);
+  const double dbBed = 10 * std::log10(Energy(tbed.hooked) / Energy(tbed.stock));
   const double dbStereo = 10 * std::log10(Energy(ta.hooked) / Energy(ta.stock));
   const double dbDual = 10 * std::log10(Energy(td.hooked) / Energy(td.stock));
   const double dbMono = 10 * std::log10(Energy(tm.hooked) / Energy(tm.stock));
@@ -395,12 +400,12 @@ void Stereo() {
     worstDual = std::max(worstDual, static_cast<double>(std::fabs(td.hooked[i] - tmd.hooked[i])));
     peakDual = std::max(peakDual, static_cast<double>(std::fabs(tmd.hooked[i])));
   }
-  printf("     loudness ahead vs DCS's own output: stereo (decorrelated) %+.2f dB, stereo (dual mono) %+.2f dB, mono %+.2f "
-         "dB; dual-mono stereo vs the same mono wave: worst %.2e of %.3f\n",
-         dbStereo, dbDual, dbMono, worstDual, peakDual);
-  Check(std::fabs(dbStereo) <= 1.0 && std::fabs(dbDual) <= 1.0,
-        "audio e2e stereo: ahead, a stereo wave is as loud as DCS's own stereo output within 1 dB (decorrelated and "
-        "dual-mono channels)");
+  printf("     loudness ahead vs DCS's own output: stereo (partly correlated) %+.2f dB, stereo (dual mono) %+.2f dB, "
+         "stereo (decorrelated bed) %+.2f dB, mono %+.2f dB; dual-mono stereo vs the same mono wave: worst %.2e of %.3f\n",
+         dbStereo, dbDual, dbBed, dbMono, worstDual, peakDual);
+  Check(std::fabs(dbStereo) <= 1.0 && std::fabs(dbDual) <= 1.0 && std::fabs(dbBed) <= 1.0,
+        "audio e2e stereo: ahead, a stereo wave is as loud as DCS's own stereo output within 1 dB (partly correlated, "
+        "dual-mono and decorrelated channels)");
   Check(peakDual > 0.05 && worstDual <= 1e-5 * peakDual + 1e-7,
         "audio e2e stereo: a dual-mono stereo wave (most of DCS's stereo files) renders exactly as the same mono wave");
   // 3. The kill switch flipping every 50 blocks: no click (second difference) beyond the steady state's own.
