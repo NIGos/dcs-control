@@ -18,6 +18,11 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 | --- | --- | --- |
 | ![Engine Optimizations](docs/screenshots/engine-optimizations.png) | ![Quad Views](docs/screenshots/quad-views-pimax-play.png) | ![Back to stock DCS](docs/screenshots/recovery-original-files.png) |
 
+<p align="center">
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
+  <sub><b>User Manual (PDF, 44 pages)</b>: Quick Start, every page of the app, the Engine Optimizations explained</sub>
+</p>
+
 ## What's new in 0.7
 
 **New in 0.7.1:** **3D headphone audio** (experimental, off by default: real 3D sound for headphones, in VR and on a monitor), **cleaner generated frames** (experimental Fine-tune settings for NVIDIA frame generation, all off by default), Multi-threading without driver support on by default with AMD graphics (GitHub #27), and the Ultraleap crash fix (GitHub #35). Full list: [release notes](docs/RELEASE_NOTES.md).
