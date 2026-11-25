@@ -1,10 +1,10 @@
 Live round 2 fix (DCS Control, 2026-11-25): turning a frame-generation quality key on no longer stalls the frame thread.
 - 0123 made each _extras twin pipeline on its first use: the first pair after a quality key (or the fill) was turned on
   held the frame thread 369-824 ms (synthesis_pair slow step at +0.4..+1.6 s in live round 2).
-- With DCS's motion vectors on the NVIDIA backend (dcs_motion_enabled) and every key off at creation, the first pair that
-  needs a twin (a quality key or the fill turned on from all off) starts a background build of every registered twin
-  (start_extras_build: one below-normal thread, its own references to the device, root signatures and descriptions);
-  nothing is built before. A pair that needs a twin
+- With DCS's motion vectors on the NVIDIA backend (dcs_motion_enabled) and every key off at creation, turning a quality key
+  or the fill on from all off (set_fg_quality / set_occlusion_fill, or else the first pair that needs a twin) starts a
+  background build of every registered twin (start_extras_build_once: one below-normal thread, its own references to the
+  device, root signatures and descriptions); nothing is built before. A pair that needs a twin
   not made yet composes with the plain pipeline and asks for that twin next (urgent), so a key takes effect a pair or
   two later and never waits on the frame thread. finish_extras_build joins the thread once it has ended (per pair: a
   null check and an atomic load). A rebuild leaves a running build to stop after its current pipeline; the destructor
@@ -16,7 +16,8 @@ Live round 2 fix (DCS Control, 2026-11-25): turning a frame-generation quality k
   (driver memory for at most 40 pixel-shader pipelines, estimated a few MB, not measured; no render targets or buffers).
 - D3D12FrameSynthesizer::FgSettings: extras_building, extras_build_us, extras_binds.
 - tests/fg_extras_async.inc (XRFG_TEST_FG_EXTRAS_ASYNC, label alone, NVIDIA hardware): a quality key turned on at the
-  first pair (no build before it, none in the keys-off run); every submission timed on the calling thread against the same run with every key off (at most 5 ms
+  first pair (no build before it, none in the keys-off run); fg_engine_data.inc's live-fill check waits for the build
+  before the pair it compares byte for byte; every submission timed on the calling thread against the same run with every key off (at most 5 ms
   more), and the twins bound within the run.
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
@@ -38,7 +39,7 @@ index b870561..d325ee9 100644
          # required), labelled bench: `ctest -L bench` runs them, a build
          # leaves them out (-LE bench). Skipped without NVIDIA hardware.
 diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
-index 8e20160..77b307d 100644
+index 8e20160..26ebafc 100644
 --- a/include/xrfg/d3d12_frame_synthesizer.hpp
 +++ b/include/xrfg/d3d12_frame_synthesizer.hpp
 @@ -987,6 +987,13 @@ public:
@@ -46,7 +47,7 @@ index 8e20160..77b307d 100644
          std::uint32_t fill{};
          bool fill_active{};
 +        // DCS Control (0125): the _extras twins. building= their background
-+        // build (DCS motion, every key off at creation) is not taken over yet;
++        // build (started when a key is first turned on) is still running;
 +        // build_us= how long the last one taken over took; binds= the
 +        // compositions recorded with a twin so far.
 +        bool extras_building{};
@@ -56,10 +57,10 @@ index 8e20160..77b307d 100644
      [[nodiscard]] FgSettings fg_settings() const noexcept;
      // Foveated layers: the session's ledger of queued Waits (see
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
-index 663eced..8115da3 100644
+index 663eced..f465f33 100644
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
-@@ -2078,11 +2078,114 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2078,11 +2078,121 @@ struct D3D12FrameSynthesizer::Impl {
          }
          return false;
      }
@@ -97,6 +98,13 @@ index 663eced..8115da3 100644
 +            if (twin.pipeline == nullptr && !twin.failed) return true;
 +        }
 +        return false;
++    }
++    // DCS Control (0125): the background build of the twins, once for these
++    // twins, with DCS's motion vectors and a twin still to make.
++    void start_extras_build_once() noexcept {
++        if (extras_build_started || extras_build != nullptr || !dcs_motion_enabled() || !extras_twin_missing()) return;
++        extras_build_started = true;
++        start_extras_build();
 +    }
 +    void retire_extras_build() noexcept {
 +        if (extras_build != nullptr) extras_build->stop.store(true, std::memory_order_relaxed);
@@ -176,7 +184,7 @@ index 663eced..8115da3 100644
                  FAILED(device->CreateGraphicsPipelineState(&twin.description, IID_PPV_ARGS(twin.pipeline.GetAddressOf())))) {
                  twin.failed = true; // the keys then do nothing for this composition
              }
-@@ -2090,9 +2193,34 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2090,9 +2200,33 @@ struct D3D12FrameSynthesizer::Impl {
          }
          return pipeline;
      }
@@ -199,20 +207,19 @@ index 663eced..8115da3 100644
 -        return pair_extras() ? extras_twin(pipeline) : pipeline;
 +        finish_extras_build(); // DCS Control (0125)
 +        if (!pair_extras()) return pipeline;
-+        // DCS Control (0125): the first pair that needs a twin starts the
-+        // background build (a thread start, no pipeline made here); until a
-+        // twin is there the pair composes with the plain pipeline.
-+        if (!extras_build_started && extras_build == nullptr && dcs_motion_enabled() && extras_twin_missing()) {
-+            extras_build_started = true;
-+            start_extras_build();
-+        }
++        // DCS Control (0125): the background build normally starts when the
++        // key is turned on (set_fg_quality / set_occlusion_fill); a pair that
++        // needs a twin before that starts it here (a thread start, no
++        // pipeline made here). Until a twin is there the pair composes with
++        // the plain pipeline.
++        start_extras_build_once();
 +        ID3D12PipelineState* const twin = extras_twin(pipeline);
 +        if (twin != pipeline) ++extras_binds;
 +        return twin;
      }
      // Every twin made now (the options have a key on at creation).
      void make_extras_twins() noexcept {
-@@ -2531,6 +2659,12 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2531,6 +2665,12 @@ struct D3D12FrameSynthesizer::Impl {
          if (cursor_capture_thread.joinable()) {
              cursor_capture_thread.join();
          }
@@ -225,7 +232,7 @@ index 663eced..8115da3 100644
          if (hud_capture_thread.joinable()) { // DCS Control (0053)
              hud_capture_thread.join();
          }
-@@ -7820,13 +7954,18 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -7820,13 +7960,18 @@ struct D3D12FrameSynthesizer::Impl {
              step_started = now;
          };
  
@@ -244,11 +251,30 @@ index 663eced..8115da3 100644
          if (quality_bits() != 0U || (nvidia_options.dcs_motion_occlusion_fill != 0U && dcs_motion_enabled())) {
              make_extras_twins();
          }
-@@ -11285,6 +11424,9 @@ D3D12FrameSynthesizer::FgSettings D3D12FrameSynthesizer::fg_settings() const noe
+@@ -11256,6 +11401,8 @@ void D3D12FrameSynthesizer::set_fg_quality(std::uint32_t fg_quality) noexcept {
+         std::scoped_lock lock(mutex_);
+         if (impl_ != nullptr) {
+             impl_->nvidia_options.fg_quality = fg_quality;
++            // DCS Control (0125): a key turned on starts the _extras build in the background.
++            if (impl_->quality_bits() != 0U) impl_->start_extras_build_once();
+         }
+     } catch (...) {
+     }
+@@ -11270,6 +11417,8 @@ void D3D12FrameSynthesizer::set_occlusion_fill(std::uint32_t mode) noexcept {
+         std::scoped_lock lock(mutex_);
+         if (impl_ != nullptr) {
+             impl_->nvidia_options.dcs_motion_occlusion_fill = std::min(mode, 2U);
++            // DCS Control (0125): the fill turned on starts the _extras build in the background.
++            if (impl_->nvidia_options.dcs_motion_occlusion_fill != 0U) impl_->start_extras_build_once();
+         }
+     } catch (...) {
+     }
+@@ -11285,6 +11434,10 @@ D3D12FrameSynthesizer::FgSettings D3D12FrameSynthesizer::fg_settings() const noe
              settings.fill = impl_->nvidia_options.dcs_motion_occlusion_fill;
              settings.fill_active =
                  impl_->dcs_motion_enabled() && impl_->dcs_motion_previous_pipeline != nullptr;
-+            settings.extras_building = impl_->extras_build != nullptr; // DCS Control (0125)
++            settings.extras_building = impl_->extras_build != nullptr && // DCS Control (0125)
++                !impl_->extras_build->done.load(std::memory_order_acquire);
 +            settings.extras_build_us = impl_->extras_build_microseconds;
 +            settings.extras_binds = impl_->extras_binds;
          }
@@ -290,6 +316,23 @@ index 836e248..8636c3d 100644
          // DCS Control (0123): the composition with DCS's mask and MVs in 2X and 3X (tests/fg_triple_bench.inc).
          if (GetEnvironmentVariableA("XRFG_TEST_FG_TRIPLE_BENCH", nullptr, 0)) {
              D3D12WarpFixture bench_fixture(true);
+diff --git a/tests/fg_engine_data.inc b/tests/fg_engine_data.inc
+index d02e2d9..98d924b 100644
+--- a/tests/fg_engine_data.inc
++++ b/tests/fg_engine_data.inc
+@@ -503,6 +503,12 @@ StereoPattern fe_synthesize(D3D12WarpFixture& fixture, const StereoPattern& a, c
+         const auto settings = synth.fg_settings();
+         require(settings.fill == options.dcs_motion_occlusion_fill && settings.fill_active == options.dcs_motion,
+             "engine data: the fill's mode set live");
++        // DCS Control (0125): turning it on started the _extras build in the background; the pair compared byte for
++        // byte is made once it is done (in a session, the pairs meanwhile compose without the fill).
++        for (int waited = 0; synth.fg_settings().extras_building && waited < 3000; ++waited) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++        require(!synth.fg_settings().extras_building, "engine data: the _extras build ends");
+     }
+     require_hresult(history->capture(1, &cb), "engine data B");
+     require_hresult(history->commit(cb), "engine data commit B");
 diff --git a/tests/fg_extras_async.inc b/tests/fg_extras_async.inc
 new file mode 100644
 index 0000000..df351fd
