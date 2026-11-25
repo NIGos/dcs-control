@@ -407,6 +407,7 @@ public static class ConfigurationWriters
         dcs_motion_sky_occlusion={NvidiaOption(p, p.FrameGenSkyOcclusion)}
         nvidia_edge_choice={NvidiaOption(p, p.FrameGenEdgeChoice)}
         dcs_motion_mask_band={NvidiaOption(p, p.FrameGenMaskBand)}
+        dcs_motion_hud_guard={NvidiaOption(p, p.FrameGenHudGuard)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}

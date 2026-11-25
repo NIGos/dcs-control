@@ -822,10 +822,11 @@ function buildFields() {
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // Generated-frame quality options (OFXR 0104), NVIDIA only, all off until flown: one fold, a toggle each, hidden
   // with FidelityFX as the Optical flow fold is.
-  { const nvidia = p => p.frameGen === 'Nvidia', fidelityFg = p => p.frameGen === 'FidelityFx', ones = ['frameGenSkyOcclusion','frameGenEdgeChoice','frameGenMaskBand'];
+  { const nvidia = p => p.frameGen === 'Nvidia', fidelityFg = p => p.frameGen === 'FidelityFx', ones = ['frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand'];
     more = disclosure(c,'Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default.',p => { const n = nvidia(p) ? ones.filter(k => p[k]).length : 0; return n ? n+' on' : 'All off'; }); more.dataset.hide = 'flow';
     toggles = toggleList(more);
     field(toggles,'frameGenSkyOcclusion','Clean edges against the sky',['No faint copy trailing an aircraft over the sky, most visible at night.','Where an aircraft crossed the sky between two frames, one frame is used instead of a blend of both. The HUD and smoke are left as they are.'],'toggle',null,nvidia,'',fidelityFg);
+    field(toggles,'frameGenHudGuard','Keep the HUD steady over the sky',['No smeared HUD or dark aircraft over the night sky.','Over the sky, colours are compared as you see them, so a dark stroke is not taken for the sky.'],'toggle',null,nvidia,'',fidelityFg);
     field(toggles,'frameGenEdgeChoice','Sharper moving edges','Picks the motion that fits best where two motions meet.','toggle',null,nvidia,'',fidelityFg);
     field(toggles,'frameGenMaskBand','Cleaner world beside the cockpit','Uses DCS\'s own motion right up to the cockpit frame.','toggle',null,nvidia,'',fidelityFg); }
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.

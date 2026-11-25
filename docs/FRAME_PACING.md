@@ -57,7 +57,7 @@ In the first flight with 0010 (2026-10-06) only 87 of 8286 pairs were redrawn: 6
 
 ## Generated-frame quality options
 
-OFXR patches 0104 (the options) and 0105 (their tests): three `[ofxr]` keys, one per option, NVIDIA Optical Flow only, all
+OFXR patches 0104 (the options) and 0105 (their tests): four `[ofxr]` keys, one per option, NVIDIA Optical Flow only, all
 0 by default (the Frame generation page, Image quality, **Fine-tune**; hidden with FidelityFX). With every key at 0 each
 generated frame is the same, byte for byte, as without the patches (the NVIDIA occlusion fixtures' 112 output hashes
 against the build without them; the DCS motion fixtures check that an option that cannot act on a scene leaves it
@@ -68,6 +68,7 @@ for the next launch, and into a profile only when on (0.7.0 refuses keys it does
 | Key (app setting) | What it does |
 |---|---|
 | `dcs_motion_sky_occlusion` (Clean edges against the sky) | On DCS's motion vectors, a sky pixel whose two samples differ by more than a quarter of the brighter one (linear light), where the two frames do not agree at the pixel itself and a G-buffer surface is found around it: the surface's own composition where its vector puts it here, else the frame whose end DCS's class map calls sky. The sky's own colour check compares encoded values, as on Quad Views' focus layer. Content DCS draws after its G-buffer (HUD, labels, smoke, contrails) is never forced. |
+| `dcs_motion_hud_guard` (Keep the HUD steady over the sky) | On an sRGB swapchain (read in linear light), DCS's motion vectors judge a sky pixel's two samples, and 0057's guard for content drawn after the G-buffer, on encoded values, as on Quad Views' focus layer. In linear light a HUD stroke or a dark aircraft over the night sky passed as sky and was smeared with its vector. Surfaces keep the linear-light check. |
 | `nvidia_edge_choice` (Sharper moving edges) | Where the four flow vectors around a pixel spread over 1.5 px and the two frames differ at the pixel, the vector whose two ends agree best of the four and their mix. |
 | `dcs_motion_mask_band` (Cleaner world beside the cockpit) | DCS's motion vectors also inside the cockpit mask's blocks where DCS's class map says world at the pixel and at both of the vector's ends, with the strict colour check on encoded values. |
 
@@ -80,11 +81,15 @@ at 640x480 on the RTX card, `XRFG_TEST_DCS_MOTION=1`, `XRFG_TEST_FG_QUALITY=<bit
   class map's edge).
 - HUD over a dark rolling sky: unchanged on a UNORM view (5.38), 14.8 -> 11.2 on an sRGB view. A contrail at an aircraft
   over that sky: the contrail 3.7-3.8 -> 3.6-3.9, the aircraft 0.20 -> 0.01.
+- `dcs_motion_hud_guard`: the HUD over a dark rolling sky on an sRGB view 14.8 -> 0.76 (the flow alone gives 0.97; the
+  test asserts it no worse than the flow), over a bright sky 24.50 -> 24.57; the night trailing copy on an sRGB view
+  8.3-11.1 -> 7.3-9.6, a contrail 3.67 -> 3.37; on a UNORM view nothing changes (the same values); thin wires, smoke and
+  every surface unchanged. With `dcs_motion_sky_occlusion` too: the HUD 0.76, the trail 0.02-0.06.
 - `nvidia_edge_choice`: the NVIDIA occlusion fixtures' moving edges (Medium, one-way) 10.5 -> 9.6 (object), 9.2 -> 7.9
   (both moving), 11.0 -> 10.1 (thin bar); the DCS fixtures' flow at the occlusion's edges 2.41 -> 2.12; the HUD unchanged.
 - `dcs_motion_mask_band`: the world inside the mask's blocks 6.7 -> 5.2, the world beyond 0.50 -> 0.33, the cockpit
   unchanged (0).
-- All three on: no bright fixture worse (thin wires, smoke, HUD, sky, terrain unchanged); the MVs' fallback to the flow
+- All four on: no bright fixture worse (thin wires, smoke, HUD, sky, terrain unchanged); the MVs' fallback to the flow
   0-5.6 % of the pixels.
 
 Measured and removed (no gain, or worse elsewhere): the colour checks on encoded values everywhere (thin wires on an sRGB
@@ -94,7 +99,8 @@ HUD), the periphery's vectors in the focus fade (0.906 -> 0.911), the flow engin
 hints over 33 frames of continuous motion: 0.5039 -> 0.5039, flow time unchanged within noise).
 
 GPU (5424x5356 per eye, two eyes, 240 pairs, sRGB view, `XRFG_TEST_DCS_MOTION_BENCH=1 XRFG_TEST_FG_QUALITY_BENCH=<bits>`):
-the composition 1.10 ms, +5 us with all three (identical pipelines: +-2 us); the pack unchanged. No new resource: no video
+the composition 1.10-1.28 ms (GPU clocks), +1 us with dcs_motion_hud_guard, +5-7 us with all four (identical pipelines:
++-2 us); the pack unchanged. No new resource: no video
 memory.
 ## Offline evidence and limits
 

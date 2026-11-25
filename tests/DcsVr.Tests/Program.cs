@@ -203,7 +203,7 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     // OFXR 0104: the generated-frame quality options, each its own key, off by default, 1 only with NVIDIA frame generation.
     (string Key, Func<VrProfile, VrProfile> On)[] quality = [
         ("dcs_motion_sky_occlusion", p => p with { FrameGenSkyOcclusion = true }), ("nvidia_edge_choice", p => p with { FrameGenEdgeChoice = true }),
-        ("dcs_motion_mask_band", p => p with { FrameGenMaskBand = true })];
+        ("dcs_motion_mask_band", p => p with { FrameGenMaskBand = true }), ("dcs_motion_hud_guard", p => p with { FrameGenHudGuard = true })];
     var nvidia = new VrProfile { FrameGen = FrameGeneration.Nvidia };
     foreach (var (key, turnOn) in quality)
     {
@@ -212,9 +212,9 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     }
     // Off, they are not in the profile file (0.7.0 refuses keys it does not know); on, they are.
     var qualitySaved = JsonData.Serialize(nvidia);
-    Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand"), qualitySaved);
-    var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true }));
-    Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true }, "the quality options round-trip when on");
+    Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
+    var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
+    Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
 });
 Test("Explicit manifest keeps extension metadata", () =>
 {

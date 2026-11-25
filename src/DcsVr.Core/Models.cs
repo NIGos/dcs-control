@@ -164,6 +164,9 @@ public sealed record VrProfile
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenEdgeChoice { get; init; }
     /// <summary>OFXR dcs_motion_mask_band: DCS's motion vectors also for the world just beside the cockpit frame.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenMaskBand { get; init; }
+    /// <summary>OFXR dcs_motion_hud_guard: over the sky, DCS's motion vectors judge colours as you see them, so a HUD or a dark
+    /// object over the night sky is not taken for sky and smeared with it.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenHudGuard { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored
