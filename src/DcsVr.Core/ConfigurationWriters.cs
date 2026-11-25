@@ -403,6 +403,9 @@ public static class ConfigurationWriters
 
         """;
 
+    /// <summary>1 for an OFXR quality option that is on with NVIDIA frame generation, else 0.</summary>
+    private static int NvidiaOption(VrProfile p, bool on) => on && p.FrameGen == FrameGeneration.Nvidia ? 1 : 0;
+
     /// <summary>OFXR's ini. <paramref name="cursorTemplates"/> is the folder holding DCS's Visualizer.dll (DCS.exe's own),
     /// where the smooth cursor finds the cursor images if the running game has not loaded them.</summary>
     public static string Ofxr(VrProfile p, string? cursorTemplates = null) => $"""
@@ -443,6 +446,11 @@ public static class ConfigurationWriters
         cockpit_depth=1
         ; DCS's own motion vectors for terrain, aircraft, water and sky, checked against the colours (NVIDIA path only).
         dcs_motion={(p.FrameGen == FrameGeneration.Nvidia ? 1 : 0)}
+        ; Generated-frame quality options (patch 0104, NVIDIA path only; off by default until flown).
+        dcs_motion_sky_occlusion={NvidiaOption(p, p.FrameGenSkyOcclusion)}
+        nvidia_edge_choice={NvidiaOption(p, p.FrameGenEdgeChoice)}
+        dcs_motion_mask_band={NvidiaOption(p, p.FrameGenMaskBand)}
+        dcs_motion_hud_guard={NvidiaOption(p, p.FrameGenHudGuard)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}

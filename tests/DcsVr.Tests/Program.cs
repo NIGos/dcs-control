@@ -204,6 +204,21 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenPipelinedDeepHold = true, FrameGenAsyncArm = true }).Contains("\npipelined_deep_hold=1\nasync_arm=1\n"));
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\nparallel_eye_synthesis=0") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenParallelEyes = true }).Contains("\nparallel_eye_synthesis=1")
         && ConfigurationWriters.Ofxr(new() { FrameGenParallelEyes = true }).Contains("\nparallel_eye_synthesis=0") && !new VrProfile().FrameGenParallelEyes, "Both eyes at once: off by default, 1 only with frame generation");
+    // OFXR 0104: the generated-frame quality options, each its own key, off by default, 1 only with NVIDIA frame generation.
+    (string Key, Func<VrProfile, VrProfile> On)[] quality = [
+        ("dcs_motion_sky_occlusion", p => p with { FrameGenSkyOcclusion = true }), ("nvidia_edge_choice", p => p with { FrameGenEdgeChoice = true }),
+        ("dcs_motion_mask_band", p => p with { FrameGenMaskBand = true }), ("dcs_motion_hud_guard", p => p with { FrameGenHudGuard = true })];
+    var nvidia = new VrProfile { FrameGen = FrameGeneration.Nvidia };
+    foreach (var (key, turnOn) in quality)
+    {
+        Require(ConfigurationWriters.Ofxr(nvidia).Contains("\n" + key + "=0\n") && ConfigurationWriters.Ofxr(turnOn(nvidia)).Contains("\n" + key + "=1\n")
+            && ConfigurationWriters.Ofxr(turnOn(nvidia with { FrameGen = FrameGeneration.FidelityFx })).Contains("\n" + key + "=0\n"), key + ": off by default, 1 only with NVIDIA frame generation");
+    }
+    // Off, they are not in the profile file (0.7.0 refuses keys it does not know); on, they are.
+    var qualitySaved = JsonData.Serialize(nvidia);
+    Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
+    var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
+    Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
 });
 Test("Explicit manifest keeps extension metadata", () =>
 {

@@ -348,6 +348,9 @@ Ofxr	ofxr	cursor_follow_mouse
 Ofxr	ofxr	cursor_templates
 Ofxr	ofxr	d3d11_bridge
 Ofxr	ofxr	dcs_motion
+Ofxr	ofxr	dcs_motion_hud_guard
+Ofxr	ofxr	dcs_motion_mask_band
+Ofxr	ofxr	dcs_motion_sky_occlusion
 Ofxr	ofxr	deep_pipeline
 Ofxr	ofxr	diag_vram
 Ofxr	ofxr	enabled
@@ -358,6 +361,7 @@ Ofxr	ofxr	hud_symbology
 Ofxr	ofxr	lazy_runtime_reclaim_ms
 Ofxr	ofxr	motion_vectors
 Ofxr	ofxr	nvidia_bidirectional
+Ofxr	ofxr	nvidia_edge_choice
 Ofxr	ofxr	nvidia_input_scale
 Ofxr	ofxr	nvidia_occlusion_aware
 Ofxr	ofxr	nvidia_preset
