@@ -103,14 +103,52 @@ public static class ConfigurationWriters
         QuadViewsFixedFocus=1
         """ : "";
 
-    /// <summary>[PupilShift] OpenXrEyeGaze=0 when the layer runs only for the Periphery DLSS preset: it then needs no gaze,
-    /// so DCS's instance gets no eye gaze extension or action from it.</summary>
-    private static string LayerGazeOffLine(VrProfile p) => p.UsesPeripheryDlssPreset && !p.UsesPupilShift && !p.UsesDepthBoost && !p.UsesGazePublish ? """
+    /// <summary>[PupilShift] OpenXrEyeGaze=0 when the layer runs only for the Periphery DLSS preset or 3D audio's head
+    /// pose: it then needs no gaze, so DCS's instance gets no eye gaze extension or action from it.</summary>
+    private static string LayerGazeOffLine(VrProfile p) => (p.UsesPeripheryDlssPreset || p.UsesHeadPosePublish) && !p.UsesPupilShift && !p.UsesDepthBoost && !p.UsesGazePublish ? $"""
 
 
-        ; The layer runs only for the Periphery DLSS preset: no eye gaze.
+        ; The layer runs only for {(p.UsesPeripheryDlssPreset && p.UsesHeadPosePublish ? "the Periphery DLSS preset and 3D audio's head pose" : p.UsesPeripheryDlssPreset ? "the Periphery DLSS preset" : "3D audio's head pose")}: no eye gaze.
         OpenXrEyeGaze=0
         """ : "";
+
+    /// <summary>PupilShift.ini [HeadPose] Publish=1 with 3D headphone audio's late head tracking
+    /// (<see cref="VrProfile.UsesHeadPosePublish"/>): the layer publishes the head pose (Local\DcsVrHeadPose_v1) for the
+    /// engine module. Written only then: off, the file stays as it was (the layer's default is 0).</summary>
+    private static string HeadPoseLines(VrProfile p) => p.UsesHeadPosePublish ? """
+
+
+        ; 3D headphone audio: the head pose for the engine module, so sounds follow the head between DCS frames.
+        [HeadPose]
+        Publish=1
+        """ : "";
+
+    /// <summary>DcsQvCull.ini [Audio] (docs/BINAURAL_AUDIO.md, native/binaural/include/binaural_config.h) while 3D
+    /// headphone audio is on: every key, each clamped to the module's range. Off, the section is not written and the file
+    /// stays as it was (the module's default is Binaural=0). <paramref name="hrtf"/> replaces the profile's set when the
+    /// plan found it missing from the library (the generic one is used then).</summary>
+    private static string AudioSection(VrProfile p, string? hrtf) => p.UsesBinauralAudio ? $"""
+
+
+        ; 3D headphone audio (docs/BINAURAL_AUDIO.md): DCS's left/right panning of mono 3D sounds replaced by HRTF
+        ; rendering. Every key applies in flight. toggle_audio.flag next to DcsQvCull.dll switches it off and on.
+        [Audio]
+        Binaural=1
+        Hrtf={AudioHrtf(p, hrtf)}
+        HeadCircumferenceCm={Number(Math.Clamp(double.IsFinite(p.HeadCircumferenceCm) ? p.HeadCircumferenceCm : Binaural.HeadCircumferenceDefault, Binaural.HeadCircumferenceMin, Binaural.HeadCircumferenceMax))}
+        LateHeadTracking={(p.BinauralLateHeadTracking ? 1 : 0)}
+        NearField={(p.BinauralNearField ? 1 : 0)}
+        MaxObjects={Int(Math.Clamp(p.BinauralMaxObjects, Binaural.MaxObjectsMin, Binaural.MaxObjectsMax))}
+        LevelTrimDb={Number(Math.Clamp(double.IsFinite(p.BinauralLevelTrimDb) ? p.BinauralLevelTrimDb : 0, Binaural.LevelTrimMin, Binaural.LevelTrimMax))}
+        CpuBudgetPercent={Int(Math.Clamp(p.BinauralCpuBudgetPercent, Binaural.CpuBudgetMin, Binaural.CpuBudgetMax))}{(Binaural.ExcludeContextsValue(p.BinauralExcludeContexts) is { } excluded ? "\nExcludeContexts=" + excluded : "")}
+        LogVoices={(p.BinauralLogVoices ? 1 : 0)}
+        """ : "";
+    /// <summary>The Hrtf value: the plan's replacement, else the profile's set when it is a valid name, else "default".</summary>
+    private static string AudioHrtf(VrProfile p, string? hrtf) => hrtf ?? (Binaural.IsValidHrtfName(p.BinauralHrtf) ? p.BinauralHrtf : Binaural.DefaultHrtf);
+    /// <summary>[Hotkeys] AudioToggle while 3D audio is on: written into the one [Hotkeys] section (GetPrivateProfile*
+    /// reads only the first section of a name).</summary>
+    private static string AudioKeyLine(VrProfile p) => p.UsesBinauralAudio
+        ? "\n; 3D headphone audio off and on in flight (DCS's own panning while off).\nAudioToggle=" + NeuralHotkeys.Environment(p.AudioToggleKey, NeuralHotkeys.AudioDefault) : "";
 
     /// <summary>DcsQvCull.ini [DLSS] (engine module R122) with the Periphery DLSS preset: the periphery's preset, the
     /// focus's (FocusDlssPreset's letter, else M: with the driver's preset hidden the focus needs one of its own) and
@@ -240,10 +278,11 @@ public static class ConfigurationWriters
     /// it can matter, <see cref="EngineOptimizations.EmulatedListsMatter(string?)"/>: the module ignores it with driver
     /// command lists, and on such a PC the file stays as earlier versions wrote it. Left out: a PC with driver command
     /// lists (Launch and Live mode always pass it).</param>
-    public static string DcsQvCull(VrProfile p, string? shaderCacheDirectory = null, bool emulatedListsMatter = false)
+    /// <param name="hrtf">[Audio] Hrtf when the plan replaces the profile's set (missing from the library); null: the profile's.</param>
+    public static string DcsQvCull(VrProfile p, string? shaderCacheDirectory = null, bool emulatedListsMatter = false, string? hrtf = null)
     {
         var cache = p.EngineOptimizations ? EngineShaderCache.ForIni(shaderCacheDirectory) : null;
-        return p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p, cache, emulatedListsMatter)) : DcsQvCullTrimmed(p, cache, emulatedListsMatter);
+        return p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p, cache, emulatedListsMatter, hrtf)) : DcsQvCullTrimmed(p, cache, emulatedListsMatter, hrtf);
     }
 
     /// <summary>[Model] ShaderCachePrewarm and ShaderCompileWorkers, only when they differ from the module's defaults (1
@@ -273,7 +312,7 @@ public static class ConfigurationWriters
         return text.ReplaceLineEndings(newline);
     }
 
-    private static string DcsQvCullTrimmed(VrProfile p, string? shaderCache, bool emulatedListsMatter) => $"""
+    private static string DcsQvCullTrimmed(VrProfile p, string? shaderCache, bool emulatedListsMatter, string? hrtf) => $"""
         ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
         ; DcsQvCull re-reads this file every second while DCS runs. Only the settings that follow the profile are
         ; written; every other key takes the module's built-in default.
@@ -295,7 +334,7 @@ public static class ConfigurationWriters
 
         [Hotkeys]
         ; Switches the optimizations above off and back on in flight ("virtual-key:modifiers", Ctrl 1, Alt 2, Shift 4; 0:0 off).
-        Toggle={NeuralHotkeys.Environment(p.EngineToggleKey, NeuralHotkeys.EngineDefault)}
+        Toggle={NeuralHotkeys.Environment(p.EngineToggleKey, NeuralHotkeys.EngineDefault)}{AudioKeyLine(p)}
 
         [Scene]
         PartitionBoost={(p.EnginePartitionBoost ? 1 : 0)}
@@ -355,7 +394,7 @@ public static class ConfigurationWriters
         ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
         ; is rendered boosted; the HUD stays at DCS's camera.
         CockpitTrueIpd={(p.UsesDepthBoost ? 1 : 0)}
-        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}{DlssSection(p)}{(p.DiagnosticReloadFrameTimes ? "\n\n[Log]\nReloadFrameTimes=1" : "")}
+        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}{DlssSection(p)}{(p.DiagnosticReloadFrameTimes ? "\n\n[Log]\nReloadFrameTimes=1" : "")}{AudioSection(p, hrtf)}
 
         [Dev]
         ; Developer mode: a payload built elsewhere, hot-reloaded, and an ini that replaces this one. Empty: off.
@@ -477,7 +516,7 @@ public static class ConfigurationWriters
         PredictMaxStepMm=12
         PredictDisparityDeg=0.4
         PredictLeadFrames=0.5
-        PredictPollHz=500{DlssPresetLines(p)}
+        PredictPollHz=500{DlssPresetLines(p)}{HeadPoseLines(p)}
 
         """;
 

@@ -20,7 +20,7 @@ public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = n
 /// <summary>A summary of the last DCS session, read from logs after DCS exits. Parts without a source are null.</summary>
 public sealed record FlightSummary(DateTimeOffset Start, DateTimeOffset End, bool Closed, int? DcsPid, HeadsetFrames? Headset, FramegenShare? Framegen,
     FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch, EyeTrackingState? EyeTracking = null, FrameCap? Cap = null,
-    EngineFlight? Engine = null)
+    EngineFlight? Engine = null, AudioStatus? Audio = null)
 {
     public TimeSpan Duration => End - Start;
 }
@@ -121,8 +121,14 @@ public static partial class LastFlight
             ReadPrefetch(PrefetchLog(log), start, end),
             ReadEyeTracking(sources.QuadViewsLog, start, end),
             moduleLines is null ? null : ParseFrameCap(moduleLines),
-            moduleLines is null ? null : ParseEngine(moduleLines));
+            moduleLines is null ? null : ParseEngine(moduleLines),
+            moduleLines is null ? null : ParseAudio(moduleLines));
     }
+
+    /// <summary>3D headphone audio in the session (<see cref="Binaural.ParseStatus"/>): on (sounds, cost), off with the
+    /// module's reason, or switched off; null when the module logged nothing about audio (it was off in the profile).</summary>
+    public static AudioStatus? ParseAudio(IEnumerable<string> lines) =>
+        Binaural.ParseStatus(lines, installed: true, dcsRunning: false) is { State: not "waiting" } audio ? audio : null;
 
     // ---- Quad Views --------------------------------------------------------------------------------------------------
 
@@ -547,7 +553,7 @@ public static partial class LastFlight
     private static bool IsModuleLine(string l) => l.Contains(" perf: fps=", StringComparison.Ordinal) || l.Contains("governor: capped at", StringComparison.Ordinal)
         || l.Contains("loader started", StringComparison.Ordinal) || l.Contains(" features: ", StringComparison.Ordinal)
         || l.Contains(" hotkey: engine optimizations ", StringComparison.Ordinal) || l.Contains(" warmup: ", StringComparison.Ordinal)
-        || l.Contains("DriverCommandLists=0", StringComparison.Ordinal);
+        || l.Contains("DriverCommandLists=0", StringComparison.Ordinal) || l.Contains(" audio: ", StringComparison.Ordinal);
 
     /// <summary>"perf: fps=35.4 … verdict=capped 36.0 fps = 72/2 (…)" every 10 s, and "governor: capped at 36.0 fps
     /// (72 Hz / 2)"; only the lines after the last loader start count (one DCS session). Null without reports.</summary>

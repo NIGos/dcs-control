@@ -28,9 +28,11 @@ public sealed class DeploymentPlanner(ComponentLocations components)
     /// deployed bytes must match it.</param>
     /// <param name="shaderCacheDirectory">The engine module's shader cache folder (<see cref="EngineShaderCache"/>), written
     /// to DcsQvCull.ini; null leaves the cache in the module's own folder.</param>
+    /// <param name="hrtfSets">The pilot's own HRTF sets (<see cref="HrtfLibrary.ForDeployment"/>), copied next to the
+    /// engine module while 3D headphone audio is on; a profile whose set is not among them uses the generic one.</param>
     /// <remarks>Existing files are never a conflict: Apply backs up an original the first time it writes a path and
     /// overwrites afterwards (see <see cref="OriginalsStore"/>).</remarks>
-    public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null, byte[]? chainedDxgi = null, string? shaderCacheDirectory = null)
+    public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null, byte[]? chainedDxgi = null, string? shaderCacheDirectory = null, IReadOnlyList<HrtfDeployment>? hrtfSets = null)
     {
         // Optimizations only: none of the VR settings the profile keeps for later is deployed.
         profile = profile.ForLaunch();
@@ -167,6 +169,10 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             Require("graphics.fullScreen", false);
             if (current.Get("graphics", "aspect") is not null) Require("graphics.aspect", SmallWindowAspect);
         }
+        // 3D headphone audio renders two channels: DCS's speaker layout is set to Stereo while it is on (Auto would follow
+        // a Windows surround or spatial setup). Owned like every key here: Back to stock DCS, or 3D audio off, puts the
+        // pilot's layout back. DCS's sound driver (Windows spatial sound) is never written.
+        if (profile.UsesBinauralAudio && current.Get("sound") is not null) Require("sound.main_layout", Binaural.StereoLayout);
         // Existing autoexec commands remain untouched, but edits invalidate the saved launch contract.
         var autoexec = Path.Combine(Path.GetDirectoryName(optionsPath)!, "autoexec.cfg");
         if (File.Exists(autoexec)) dependencies[autoexec] = Hashing.FileSha256(autoexec);
@@ -217,16 +223,29 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // generation's cockpit exports alone it is optional: without the component, frame generation runs without them.
         if (profile.UsesEngineModule && (profile.EngineModuleRequired || components.EngineDirectory is not null))
         {
-            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : profile.UsesVisualRealism ? "Visual realism's engine module is unavailable." : "Far depth's engine module is unavailable.");
+            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : profile.UsesVisualRealism ? "Visual realism's engine module is unavailable." : profile.UsesBinauralAudio && !profile.UsesFarDepth ? "3D headphone audio's engine module is unavailable." : "Far depth's engine module is unavailable.");
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore. Its shader cache is
                 // no longer among it: that lives in the app's state folder (EngineShaderCache) and survives a restore;
                 // cache\*.qvc here covers what an earlier version, or a module without the key, left in this folder.
                 // A .csv goes only as a pattern (RuntimeFiles.Allowed): DcsQvCull_water*.csv for the water skip's verify file.
-                runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCull.*.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log", "warmup.json", "warmup.json.tmp", "motion_*.csv", "rotation_*.csv", "timeline_*.csv", "events_*.csv", "fbc_*.csv", "run_profile.flag", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", "recorders_emulated_lists.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp"), "gbrec_states*.jsonl", Path.Combine("tone_probe", "*.f32"), "DcsQvCull_water*.csv", "water_timing_*.csv", "early_census_*.csv", "three_views_timing_*.csv", "three_views.log" }.Select(name => Path.Combine(module, name))]);
+                runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCull.*.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log", "warmup.json", "warmup.json.tmp", "motion_*.csv", "rotation_*.csv", "timeline_*.csv", "events_*.csv", "fbc_*.csv", "run_profile.flag", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", "recorders_emulated_lists.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp"), "gbrec_states*.jsonl", Path.Combine("tone_probe", "*.f32"), "DcsQvCull_water*.csv", "water_timing_*.csv", "early_census_*.csv", "three_views_timing_*.csv", "three_views.log",
+                    // 3D headphone audio: its kill switch (deleted by the module when taken) and the per-sound CSV of LogVoices.
+                    Binaural.KillFlag, "audio_*.csv" }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
-            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory, EngineOptimizations.EmulatedListsMatter(module)), "DCS engine optimization settings");
+            // 3D headphone audio: the pilot's own HRTF sets next to the module (the generic one is inside it). Every set, so
+            // another can be picked in flight; a profile whose set is gone from the library uses the generic one.
+            string? hrtf = null;
+            if (profile.UsesBinauralAudio)
+            {
+                foreach (var set in hrtfSets ?? [])
+                    if (Binaural.IsValidHrtfName(set.Name) && !set.Name.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase))
+                        Add(Path.Combine(module, Binaural.HrtfFolder, set.Name + Binaural.HrtfExtension), set.Content, "3D headphone audio: one of your HRTF sets");  // the name is in the path only (records, previews)
+                if (!profile.BinauralHrtf.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && !(hrtfSets ?? []).Any(s => s.Name.Equals(profile.BinauralHrtf, StringComparison.OrdinalIgnoreCase)))
+                    hrtf = Binaural.DefaultHrtf;
+            }
+            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory, EngineOptimizations.EmulatedListsMatter(module), hrtf), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
             Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
         }
@@ -323,8 +342,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         }
         // Pupil shift sits first, next to DCS: it changes only what DCS renders and puts the runtime's own poses and
         // FOVs back on the submitted views, so every layer below sees the frame as if it were not there. The same layer
-        // carries Depth boost and publishes the gaze for Visual realism, so it is deployed for any of them.
-        if (profile.UsesPerceptionLayer)
+        // carries Depth boost and publishes the gaze for Visual realism, so it is deployed for any of them. For 3D audio's
+        // head pose alone it is optional: without the component 3D audio follows DCS's own head direction.
+        if (profile.UsesPerceptionLayer && (profile.PerceptionLayerRequired || components.PupilShiftDll is { } optional && File.Exists(optional)))
         {
             var source = components.PupilShiftDll is { } built && File.Exists(built) ? built : throw new InvalidDataException("The pupil shift layer is unavailable.");
             var folder = PathPolicy.UnderRoot(profileRoot, "pupilshift");

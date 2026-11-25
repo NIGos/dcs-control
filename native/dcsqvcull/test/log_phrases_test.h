@@ -98,6 +98,17 @@ void Run() {
        "\"hotkey: engine optimizations back ON (ini engine key changed: %s)\""},
       {"hotkey: engine optimizations stay OFF", "\"hotkey: engine optimizations stay OFF (the ini reload changed no engine key)\""},
       {"reload frametimes: at <t> baseline p50/p99/max=", "\"reload frametimes: at %s baseline p50/p99/max="},
+      // Binaural audio (docs/BINAURAL_AUDIO.md section 9 D): the Audio page's status and the Checks line.
+      {"audio: off (<reason>)", "\"audio: off (%s)\""},
+      {"audio: running, <n> sounds, p99 <ms> ms per block", "\"audio: running, %u sounds, p99 %.2f ms per block"},
+      {"audio: on (<rate> Hz stereo, HRTF <name>", "\"audio: on (%.0f Hz stereo, HRTF %ls: %u directions"},
+      {"audio: ...; head pose on|off|unused", "\"%llu), overruns %llu; head pose %s\""},
+      {"audio: HRTF <name> (crossfading)", "\"audio: HRTF %ls (crossfading)\""},
+      {"audio: kill switch (<by>): binaural OFF|ON", "\"audio: kill switch (%s): binaural %s\""},
+      {"audio: kill switch ...: binaural OFF (...) / ON", "off ? \"OFF (DCS's own panning)\" : \"ON\""},
+      {"audio: CPU budget: at most <n> sounds now (... over budget)",
+       "\"audio: CPU budget: at most %u sounds now (%.1f%% of the last second's blocks over budget)\""},
+      {"audio: <id> not found (<why>), inside audio: off (...)", "\"%s not found (%s)\""},
   };
   int missing = 0;
   for (const Phrase& p : phrases)

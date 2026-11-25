@@ -1060,3 +1060,13 @@ nav::-webkit-scrollbar{width:0;height:0}
 /* A DCS that looks stuck: said next to the offer to end it */
 .dash-stuck{font-size:13px;color:var(--warn);max-width:240px;text-align:right}
 .dash-side .button.dash-end{border-color:#6b5a2a;color:var(--text)}
+/* 3D headphone audio: the head size presets under the slider, the chosen one marked; the HRTF name form when a name is taken */
+.head-presets{margin-top:8px;flex-wrap:wrap}
+.head-presets .button[aria-pressed="true"]{border-color:var(--accent-dark);color:var(--accent-hi);background:var(--accent-dim)}
+#hrtfActions{margin-top:8px;flex-wrap:wrap}
+#hrtfNameForm{flex-wrap:wrap;align-items:center;margin:8px 0 0}
+#hrtfNameForm label{flex-basis:100%}
+#hrtfReport{margin-top:8px}
+#hrtfReport ul{margin:4px 0 0 18px;padding:0}
+.setting>.head-presets,.setting>#hrtfActions,.setting>#hrtfNameForm,.setting>#hrtfReport{grid-column:1 / -1}
+.head-presets .button{min-height:30px;padding:0 12px}

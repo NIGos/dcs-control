@@ -32,8 +32,14 @@
 // Writes <out>/<scenario>.csv (time, truth, estimate, scale) and <out>/<scenario>.svg, and prints a summary.
 // Usage: pupil_shift_harness <layer dll> <output folder> [fake Quad Views dll]. Exit code 0 when every check passed.
 #include <windows.h>
+#include <unknwn.h>
+#define XR_USE_PLATFORM_WIN32
 #include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
+
+#include <atomic>
+#include <thread>
 
 #include <algorithm>
 #include <array>
@@ -56,6 +62,7 @@
 
 #include "perception_shm.h"
 #include "dcsvr_pupil_fov.h"
+#include "head_pose_reader.h"  // the audio module's reader of Local\DcsVrHeadPose_v1 (native/binaural/include)
 #include "pupil_math.hpp"  // vector helpers only; the expectations below are computed independently of the layer
 #include "predictive_depth.hpp"  // the main sequence, for the synthetic saccades
 #include "pvr_gaze.hpp"    // the PVR ABI (the fake client's table)
@@ -207,6 +214,7 @@ struct Fake {
     unsigned end_frames{}, checked_views{}, foreign_views{};
     // OpenXR eye gaze (XR_EXT_eye_gaze_interaction) and the action system, as the runtime sees them.
     bool xr_offered{};                        // the runtime lists the extension
+    bool xr_refused{};                        // ... but refuses it at instance creation (XR_ERROR_EXTENSION_NOT_PRESENT)
     bool qv_fixed{};                          // the fake Quad Views has a fixed focus (no gaze) and requests the extension
     bool enumerate_fails{};                   // the runtime's extension list cannot be read (the layer's probe: unknown)
     bool xr_never_valid{};                    // nobody wearing the headset: the gaze is never valid
@@ -236,6 +244,15 @@ struct Fake {
     // the locate time, the head at the display time); the PVR samples come from the harness's stream (fake_pvr.cpp).
     float display_lead_s{};
     bool pvr_stream{};
+    // The head pose feed (binaural audio): the runtime's VIEW reference space with velocity, and
+    // XR_KHR_win32_convert_performance_counter_time. pose: the head of a display time (OpenXR, base space) and its
+    // velocities; with it set, xrLocateViews returns two canted stereo views around that head (no script).
+    void (*pose)(XrTime, dcsvr_headpose::Quat&, dcsvr_headpose::Vec3&, dcsvr_headpose::Vec3&, dcsvr_headpose::Vec3&){};
+    bool time_offered{};                      // the runtime lists the time conversion extension
+    bool view_fails{};                        // the VIEW space never locates (flags 0)
+    XrSpace view_space{XR_NULL_HANDLE};
+    unsigned view_spaces_created{}, view_spaces_destroyed{}, view_locates{}, view_wrong{};
+    std::int64_t qpc_base{}, qpc_frequency{1};
 } fake;
 const XrSpace kBaseSpace = reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(0x77));
 const XrSession kSession = reinterpret_cast<XrSession>(static_cast<std::uintptr_t>(1));
@@ -254,8 +271,29 @@ XrFovf focus_fov(Vec3 local_dir) {
     return {std::atan(tx - kFocusHalf), std::atan(tx + kFocusHalf), std::atan(ty + kFocusHalf), std::atan(ty - kFocusHalf)};
 }
 
+// The head pose scenarios: two primary views canted 3 degrees outwards around fake.pose's head, 65.5 mm apart.
+Quat to_f(const dcsvr_headpose::Quat& q) { return {static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z), static_cast<float>(q.w)}; }
+Vec3 to_f(const dcsvr_headpose::Vec3& v) { return {static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z)}; }
+XrResult head_views(const XrViewLocateInfo* info, XrViewState* state, uint32_t capacity, uint32_t* count, XrView* views) {
+    *count = 2;
+    if (capacity < 2) return XR_ERROR_SIZE_INSUFFICIENT;
+    dcsvr_headpose::Quat q; dcsvr_headpose::Vec3 p, w, v;
+    fake.pose(info->displayTime, q, p, w, v);
+    const Quat qh = to_f(q);
+    const Vec3 ph = to_f(p), right = rotate(qh, {1, 0, 0});
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_VIEW};
+        views[eye].pose = {xr(multiply(qh, yaw_quat(rad(eye == 0 ? kCantDeg : -kCantDeg)))), xr(ph + right * (eye == 0 ? -kRuntimeIpd / 2 : kRuntimeIpd / 2))};
+        views[eye].fov = {-0.9f, 0.9f, 0.85f, -0.85f};
+    }
+    state->viewStateFlags = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT |
+        XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
+    return XR_SUCCESS;
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_locate_views(XrSession, const XrViewLocateInfo* info, XrViewState* state, uint32_t capacity,
     uint32_t* count, XrView* views) {
+    if (fake.pose) return head_views(info, state, capacity, count, views);
     *count = 4;
     if (capacity < 4) return XR_ERROR_SIZE_INSUFFICIENT;
     const float t = seconds_of(info->displayTime);
@@ -435,8 +473,10 @@ Quat look_along(Vec3 d) {
 XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_extensions(const char* layer, uint32_t capacity, uint32_t* count, XrExtensionProperties* properties) {
     if (layer) return XR_ERROR_API_LAYER_NOT_PRESENT;
     if (fake.enumerate_fails) return XR_ERROR_RUNTIME_FAILURE;
-    const char* names[] = {"XR_KHR_D3D11_enable", "XR_VARJO_quad_views", XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME};
-    const uint32_t n = fake.xr_offered ? 3 : 2;
+    std::vector<const char*> names{"XR_KHR_D3D11_enable", "XR_VARJO_quad_views"};
+    if (fake.xr_offered) names.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    if (fake.time_offered) names.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+    const uint32_t n = static_cast<uint32_t>(names.size());
     *count = n;
     if (capacity == 0) return XR_SUCCESS;
     if (capacity < n) return XR_ERROR_SIZE_INSUFFICIENT;
@@ -481,7 +521,53 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_action_space(XrSession, const XrActio
     fake.gaze_space = *space;
     return XR_SUCCESS;
 }
+bool time_enabled() {
+    return std::count(fake.enabled.begin(), fake.enabled.end(), std::string(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME)) > 0;
+}
+XRAPI_ATTR XrResult XRAPI_CALL fake_create_reference_space(XrSession, const XrReferenceSpaceCreateInfo* info, XrSpace* space) {
+    if (info->referenceSpaceType != XR_REFERENCE_SPACE_TYPE_VIEW) { *space = new_handle<XrSpace>(); return XR_SUCCESS; }
+    CHECK(fake.view_space == XR_NULL_HANDLE, "one VIEW space at a time", 0, 0, -1);
+    *space = fake.view_space = new_handle<XrSpace>();
+    ++fake.view_spaces_created;
+    return XR_SUCCESS;
+}
+XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_space(XrSpace space) {
+    if (space == fake.view_space && space != XR_NULL_HANDLE) { fake.view_space = XR_NULL_HANDLE; ++fake.view_spaces_destroyed; }
+    return XR_SUCCESS;
+}
+// The runtime's clock: XrTime t0 is QPC qpc_base.
+std::int64_t qpc_of(XrTime t) { return fake.qpc_base + std::llround(static_cast<double>(t - t0) * 1e-9 * static_cast<double>(fake.qpc_frequency)); }
+XrTime xrtime_of(std::int64_t qpc) { return t0 + std::llround(static_cast<double>(qpc - fake.qpc_base) * 1e9 / static_cast<double>(fake.qpc_frequency)); }
+XRAPI_ATTR XrResult XRAPI_CALL fake_convert_time(XrInstance, XrTime time, LARGE_INTEGER* counter) {
+    CHECK(time_enabled(), "the time conversion is called only with its extension enabled", 0, 0, -1);
+    if (!time_enabled()) return XR_ERROR_FUNCTION_UNSUPPORTED;
+    counter->QuadPart = qpc_of(time);
+    return XR_SUCCESS;
+}
+// The VIEW space in the base space at a display time: fake.pose's head, its velocities when asked for.
+XrResult locate_view(XrSpace base, XrTime time, XrSpaceLocation* location) {
+    ++fake.view_locates;
+    location->locationFlags = 0;
+    if (base != kBaseSpace) { ++fake.view_wrong; return XR_ERROR_HANDLE_INVALID; }
+    XrSpaceVelocity* velocity{};
+    for (auto* next = static_cast<XrBaseOutStructure*>(location->next); next; next = next->next)
+        if (next->type == XR_TYPE_SPACE_VELOCITY) velocity = reinterpret_cast<XrSpaceVelocity*>(next);
+    if (velocity) velocity->velocityFlags = 0;
+    if (fake.view_fails || !fake.pose) return XR_SUCCESS;
+    dcsvr_headpose::Quat q; dcsvr_headpose::Vec3 p, w, v;
+    fake.pose(time, q, p, w, v);
+    location->pose = {xr(to_f(q)), xr(to_f(p))};
+    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+        XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    if (velocity) {
+        velocity->angularVelocity = xr(to_f(w));
+        velocity->linearVelocity = xr(to_f(v));
+        velocity->velocityFlags = XR_SPACE_VELOCITY_ANGULAR_VALID_BIT | XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+    }
+    return XR_SUCCESS;
+}
 XRAPI_ATTR XrResult XRAPI_CALL fake_locate_space(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* location) {
+    if (space == fake.view_space && space != XR_NULL_HANDLE) return locate_view(base, time, location);
     ++fake.locate_space_calls;
     if (space != fake.gaze_space || space == XR_NULL_HANDLE) return XR_ERROR_HANDLE_INVALID;
     location->locationFlags = 0;
@@ -552,6 +638,9 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(XrInstance, const cha
         {"xrCreateSession", reinterpret_cast<PFN_xrVoidFunction>(fake_create_session)},
         {"xrDestroySession", reinterpret_cast<PFN_xrVoidFunction>(fake_destroy_session)},
         {"xrDestroyInstance", reinterpret_cast<PFN_xrVoidFunction>(fake_destroy_instance)},
+        {"xrCreateReferenceSpace", reinterpret_cast<PFN_xrVoidFunction>(fake_create_reference_space)},
+        {"xrDestroySpace", reinterpret_cast<PFN_xrVoidFunction>(fake_destroy_space)},
+        {"xrConvertTimeToWin32PerformanceCounterKHR", reinterpret_cast<PFN_xrVoidFunction>(fake_convert_time)},
     };
     for (const auto& [n, f] : table)
         if (std::strcmp(name, n) == 0) { *function = f; return XR_SUCCESS; }
@@ -563,7 +652,9 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_instance(const XrInstanceCreateInfo* 
     // The bundled Quad Views sits between the layer and the runtime and requests the extension itself when offered.
     if (fake.qv_fixed && fake.xr_offered && !std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
         enabled.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
-    if (!fake.xr_offered && std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
+    if ((!fake.xr_offered || fake.xr_refused) && std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
+        return XR_ERROR_EXTENSION_NOT_PRESENT;
+    if (!fake.time_offered && std::count(enabled.begin(), enabled.end(), std::string(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME)))
         return XR_ERROR_EXTENSION_NOT_PRESENT;
     fake.enabled = enabled;
     *instance = reinterpret_cast<XrInstance>(static_cast<std::uintptr_t>(0x1234));
@@ -2142,6 +2233,468 @@ std::vector<Segment> sweep_script() {
     return s;
 }
 
+// ---- Head pose for binaural audio (Local\DcsVrHeadPose_v1) --------------------------------------------------------------
+// The layer with [HeadPose] Publish, under the fake runtime's VIEW space (fake.pose): what it publishes per display time,
+// the eye-view fallback, Live switching, a reader through native/binaural/include/head_pose_reader.h (the audio
+// module's path) in real time against a scripted 90 deg/s yaw, a 10 s writer/reader stress, and the added cost.
+namespace hp = dcsvr_headpose;
+using PoseFn = void (*)(XrTime, hp::Quat&, hp::Vec3&, hp::Vec3&, hp::Vec3&);
+hp::Quat hp_yaw(double r) { return {0, std::sin(r / 2), 0, std::cos(r / 2)}; }
+hp::Quat hp_pitch(double r) { return {std::sin(r / 2), 0, 0, std::cos(r / 2)}; }
+double hp_seconds(XrTime t) { return static_cast<double>(t - t0) * 1e-9; }
+// A slow head: yaw +-0.5 rad, sway; exact velocities.
+void pose_slow(XrTime t, hp::Quat& q, hp::Vec3& p, hp::Vec3& w, hp::Vec3& v) {
+    const double s = hp_seconds(t);
+    q = hp_yaw(0.5 * std::sin(0.7 * s));
+    w = {0, 0.35 * std::cos(0.7 * s), 0};
+    p = {0.05 * std::sin(s), 1.2, 0.02 * std::cos(s)};
+    v = {0.05 * std::cos(s), 0, -0.02 * std::sin(s)};
+}
+constexpr double kYawRate = 90.0 * 3.14159265358979323846 / 180.0;  // 90 deg/s
+void pose_yaw90(XrTime t, hp::Quat& q, hp::Vec3& p, hp::Vec3& w, hp::Vec3& v) {
+    q = hp_yaw(kYawRate * hp_seconds(t));
+    w = {0, kYawRate, 0};
+    p = {0, 1.2, 0};
+    v = {0, 0, 0};
+}
+// The stress truth: every field changes clearly with each 1 ms display time, so a mixed copy matches no entry.
+void pose_stress(XrTime t, hp::Quat& q, hp::Vec3& p, hp::Vec3& w, hp::Vec3& v) {
+    const double k = std::floor(hp_seconds(t) * 1000.0 + 0.5);
+    q = hp::Normalize(hp::Mul(hp_yaw(0.013 * k), hp_pitch(0.007 * k)));
+    p = {std::fmod(k * 0.001, 3.0), 1.0 + std::fmod(k * 0.002, 2.0), -std::fmod(k * 0.003, 5.0)};
+    w = {std::fmod(k * 0.01, 4.0), -std::fmod(k * 0.02, 4.0), 0.5};
+    v = {std::fmod(k * 0.004, 1.0), 0.25, -std::fmod(k * 0.005, 1.0)};
+}
+
+std::int64_t hp_qpc() { LARGE_INTEGER c{}; QueryPerformanceCounter(&c); return c.QuadPart; }
+
+struct HpRun {
+    Layer layer;
+    fs::path folder;
+    std::wstring suffix;
+};
+bool hp_eye_gaze = false;  // OpenXrEyeGaze=1 in the next hp_start's ini
+std::string hp_ini(int publish) {
+    std::string s = std::string("[PupilShift]\r\nEnabled=0\r\nOpenXrEyeGaze=") + (hp_eye_gaze ? "1" : "0") +
+                    "\r\n[DepthBoost]\r\nEnabled=0\r\n";
+    if (publish >= 0) s += "[HeadPose]\r\nPublish=" + std::to_string(publish) + "\r\n";
+    return s;
+}
+// fake must be set up first (fake = Fake{}; pose, time_offered, view_fails).
+bool hp_start(const fs::path& dll, const fs::path& out, const std::string& name, int publish, HpRun& r) {
+    scenario_name = name;
+    LARGE_INTEGER f{}; QueryPerformanceFrequency(&f);
+    fake.qpc_frequency = f.QuadPart;
+    fake.qpc_base = hp_qpc();
+    r.suffix = L"_harness_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::wstring(name.begin(), name.end());
+    SetEnvironmentVariableW(L"DCSVR_PERCEPTION_SHM_SUFFIX", r.suffix.c_str());
+    r.folder = out / name;
+    fs::create_directories(r.folder);
+    const fs::path copy = r.folder / "XR_APILAYER_DCSVR_pupil_shift.dll";
+    fs::copy_file(dll, copy, fs::copy_options::overwrite_existing);
+    { std::ofstream ini(r.folder / "PupilShift.ini", std::ios::binary); ini << hp_ini(publish); }
+    if (!load_layer(copy, r.layer)) { fail("head pose: layer loads"); return false; }
+    return true;
+}
+void hp_rewrite_ini(const HpRun& r, int publish) { std::ofstream ini(r.folder / "PupilShift.ini", std::ios::binary | std::ios::trunc); ini << hp_ini(publish); }
+std::string hp_finish(HpRun& r) {
+    CHECK(r.layer.destroy_session(kSession) == XR_SUCCESS, "head pose: xrDestroySession", 0, 0, -1);
+    CHECK(r.layer.destroy_instance(r.layer.instance) == XR_SUCCESS, "head pose: xrDestroyInstance", 0, 0, -1);
+    FreeLibrary(r.layer.module);
+    std::ifstream log(r.folder / "PupilShift.log");
+    return std::string((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+}
+XrResult hp_locate(const HpRun& r, XrTime t, std::array<XrView, 4>& views, std::uint32_t& n) {
+    XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+    info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    info.displayTime = t;
+    info.space = kBaseSpace;
+    XrViewState state{XR_TYPE_VIEW_STATE};
+    for (auto& v : views) v = {XR_TYPE_VIEW};
+    return r.layer.locate(kSession, &info, &state, 4, &n, views.data());
+}
+// The block as a reader in the DCS process sees it, opened only if it exists (never created here).
+struct HpView {
+    HANDLE mapping{};
+    const hp::Block* block{};
+    bool open(const std::wstring& suffix) {
+        const std::wstring name = std::wstring(hp::block_name) + suffix;
+        mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
+        if (!mapping) return false;
+        block = static_cast<const hp::Block*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(hp::Block)));
+        return block != nullptr;
+    }
+    ~HpView() { if (block) UnmapViewOfFile(block); if (mapping) CloseHandle(mapping); }
+};
+bool contains(const std::string& text, const char* s) { return text.find(s) != std::string::npos; }
+std::uint64_t base_value() { return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(kBaseSpace)); }
+double quat_angle(const hp::Quat& a, const hp::Quat& b) {
+    const hp::Quat r = hp::Mul(hp::Conj(hp::Normalize(a)), hp::Normalize(b));
+    return 2.0 * std::atan2(std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z), std::fabs(r.w));
+}
+// The entry against fake.pose's truth for its display time (orientation within float rounding, the rest exact).
+bool hp_matches(const hp::Entry& e, PoseFn pose, bool with_qpc) {
+    hp::Quat q; hp::Vec3 p, w, v;
+    pose(e.displayTime, q, p, w, v);
+    const Quat qf = to_f(q);
+    const Vec3 pf = to_f(p), wf = to_f(w), vf = to_f(v);
+    const float eq[4]{qf.x, qf.y, qf.z, qf.w};
+    bool ok = e.baseSpace == base_value() && (e.qpcDisplay == (with_qpc ? qpc_of(e.displayTime) : 0));
+    for (int i = 0; i < 4; ++i) ok = ok && std::fabs(e.orientation[i] - eq[i]) < 1e-6f;
+    const float ep[3]{pf.x, pf.y, pf.z}, ew[3]{wf.x, wf.y, wf.z}, ev[3]{vf.x, vf.y, vf.z};
+    for (int i = 0; i < 3; ++i) ok = ok && e.position[i] == ep[i] && e.angularVelocity[i] == ew[i] && e.linearVelocity[i] == ev[i];
+    const double n = std::sqrt(static_cast<double>(e.orientation[0]) * e.orientation[0] + static_cast<double>(e.orientation[1]) * e.orientation[1] +
+                               static_cast<double>(e.orientation[2]) * e.orientation[2] + static_cast<double>(e.orientation[3]) * e.orientation[3]);
+    return ok && std::fabs(n - 1.0) < 1e-5;
+}
+constexpr std::uint32_t kAllFlags = 63;  // valid and tracked, both velocities; not from_views
+
+void head_pose_scenarios(const fs::path& dll, const fs::path& out) {
+    const XrTime frame_ns = 11'111'111;
+    const std::uint32_t pid = GetCurrentProcessId();
+    std::array<XrView, 4> views{};
+    std::uint32_t n{};
+
+    // Off (no [HeadPose] key, the default): no mapping, no VIEW space, no runtime call, no extension added.
+    {
+        fake = Fake{};
+        fake.pose = pose_slow;
+        fake.time_offered = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_off", -1, r)) {
+            for (int i = 1; i <= 200; ++i) hp_locate(r, t0 + i * frame_ns, views, n);
+            HpView v;
+            CHECK(!v.open(r.suffix), "off: no shared memory exists", 0, 0, -1);
+            CHECK(fake.view_spaces_created == 0 && fake.view_locates == 0, "off: no VIEW space, no locate", fake.view_spaces_created, fake.view_locates, -1);
+            CHECK(!time_enabled(), "off: the time extension is not added", 0, 0, -1);
+            const std::string log = hp_finish(r);
+            CHECK(contains(log, "head pose: off (PupilShift.ini [HeadPose] Publish=0)") && !contains(log, "head pose: publishing"), "off: log line", 0, 0, -1);
+        }
+    }
+
+    // A runtime that lists the eye gaze but refuses it at instance creation, with the time extension offered and
+    // asked for: the refusal does not say which extension it was; only the eye gaze is dropped, the head pose keeps its
+    // display time in QPC.
+    {
+        fake = Fake{};
+        fake.pose = pose_slow;
+        fake.time_offered = true;
+        fake.xr_offered = true;
+        fake.xr_refused = true;
+        hp_eye_gaze = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_gaze_refused", 1, r)) {
+            CHECK(time_enabled() && !gaze_enabled(), "gaze refused: the instance keeps the time extension, without the eye gaze",
+                time_enabled(), gaze_enabled(), -1);
+            for (int i = 1; i <= 3; ++i) hp_locate(r, t0 + i * frame_ns, views, n);
+            const std::string log = hp_finish(r);
+            CHECK(contains(log, "head pose: publishing (display time in QPC: yes, extension added by the layer)"),
+                "gaze refused: the head pose publishes with the display time in QPC", 0, 0, -1);
+        }
+        hp_eye_gaze = false;
+    }
+
+    // On: one entry per new display time (a repeated or older time adds none), the VIEW space's pose and velocities,
+    // the display time in QPC through the extension the layer added; the views DCS gets are the runtime's.
+    for (int qpc_case = 0; qpc_case < 2; ++qpc_case) {
+        fake = Fake{};
+        fake.pose = pose_slow;
+        fake.time_offered = qpc_case == 0;
+        HpRun r;
+        if (!hp_start(dll, out, qpc_case == 0 ? "head_pose_on" : "head_pose_no_qpc", 1, r)) continue;
+        HpView v;
+        std::uint64_t expected = 0;
+        unsigned mismatches = 0, count_errors = 0, view_changes = 0, qpc_errors = 0;
+        XrTime newest = 0;
+        for (int i = 1; i <= 300; ++i) {
+            XrTime t = t0 + i * frame_ns;
+            int repeats = 1;
+            if (i % 3 == 0) repeats = 2;        // DCS locates the same display time again
+            if (i % 50 == 0) t -= 3 * frame_ns;  // an older display time after a newer one
+            for (int k = 0; k < repeats; ++k) {
+                const std::int64_t before = hp_qpc();
+                CHECK(XR_SUCCEEDED(hp_locate(r, t, views, n)) && n == 2, "on: xrLocateViews", 0, 0, -1);
+                const std::int64_t after = hp_qpc();
+                if (!v.block && !v.open(r.suffix)) { fail("on: the layer created the shared memory"); break; }
+                const bool fresh = t > newest;
+                if (fresh) { ++expected; newest = t; }
+                if (v.block->writeCount != expected) ++count_errors;
+                hp::Entry e{};
+                if (fresh) {
+                    if (!hp::ReadLatest(v.block, e) || e.displayTime != t || !hp_matches(e, pose_slow, qpc_case == 0) || e.flags != kAllFlags ||
+                        e.frame != expected)
+                        ++mismatches;
+                    if (e.qpcLocate < before || e.qpcLocate > after) ++qpc_errors;
+                }
+                // Publishing reads the views only: DCS gets exactly the runtime's.
+                std::array<XrView, 4> truth{};
+                XrViewState st{XR_TYPE_VIEW_STATE};
+                XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+                li.displayTime = t;
+                std::uint32_t tn{};
+                head_views(&li, &st, 4, &tn, truth.data());
+                for (int eye = 0; eye < 2; ++eye)
+                    if (!bitwise_equal(views[eye].pose, truth[eye].pose) || !bitwise_equal(views[eye].fov, truth[eye].fov)) ++view_changes;
+            }
+        }
+        CHECK(count_errors == 0, "on: exactly one entry per new display time", count_errors, 0, -1);
+        CHECK(mismatches == 0, "on: each entry is the VIEW pose, velocities and flags of its display time", mismatches, 0, -1);
+        CHECK(qpc_errors == 0, "on: qpcLocate is taken during the call", qpc_errors, 0, -1);
+        CHECK(view_changes == 0, "on: the views DCS gets are the runtime's, bit for bit", view_changes, 0, -1);
+        if (v.block) {
+            CHECK(v.block->magic == hp::kMagic && v.block->version == hp::kVersion && v.block->writerPid == pid && v.block->qpcFrequency == fake.qpc_frequency,
+                "on: block header", v.block->writerPid, pid, -1);
+            CHECK(v.block->writerFlags == (qpc_case == 0 ? hp::writer_flags::qpc_display : 0u), "on: writer flags say whether qpcDisplay is known",
+                v.block->writerFlags, qpc_case == 0, -1);
+            // The audio module's path: the newest pose predicted 20 ms ahead.
+            hp::ReaderLimits limits;
+            limits.expectedPid = pid;
+            hp::PredictedPose p;
+            CHECK(hp::ReadPredicted(v.block, hp_qpc(), hp_qpc() + fake.qpc_frequency / 50, limits, p) == hp::PoseStatus::kOk && p.rotated && p.translated,
+                "on: the reader predicts from the newest entry", 0, 0, -1);
+            hp::Entry used{};
+            CHECK(hp::ReadUsed(v.block, newest - frame_ns, limits, used) == hp::PoseStatus::kOk && used.displayTime == newest - frame_ns, "on: the reader finds a used display time", 0, 0, -1);
+        }
+        const auto time_count = std::count(fake.enabled.begin(), fake.enabled.end(), std::string(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME));
+        CHECK(time_count == (qpc_case == 0 ? 1 : 0), "on: the time extension added once when offered, else not", static_cast<double>(time_count), qpc_case == 0, -1);
+        CHECK(fake.view_spaces_created == 1 && fake.view_wrong == 0, "on: one VIEW space, located in DCS's base space", fake.view_spaces_created, fake.view_wrong, -1);
+        CHECK(fake.locate_space_calls == 0, "on: no other space located (no eye gaze here)", fake.locate_space_calls, 0, -1);
+        const std::string log = hp_finish(r);
+        CHECK(fake.view_spaces_destroyed == 1 && fake.view_space == XR_NULL_HANDLE, "on: the VIEW space is destroyed with the session", fake.view_spaces_destroyed, 1, -1);
+        CHECK(contains(log, "head pose: VIEW space created") && contains(log, "head pose: shared memory"), "on: log VIEW space and shared memory", 0, 0, -1);
+        CHECK(contains(log, qpc_case == 0 ? "head pose: publishing (display time in QPC: yes, extension added by the layer)"
+                                          : "head pose: publishing (display time in QPC: no, the runtime does not offer the extension)"), "on: log publishing", 0, 0, -1);
+        CHECK(!contains(log, "refused") && !contains(log, "FAILED"), "on: nothing refused or failed in the log", 0, 0, -1);
+    }
+
+    // The VIEW space never locates: the head from the eye views (from_views), velocity derived from the previous entry.
+    {
+        fake = Fake{};
+        fake.pose = pose_slow;
+        fake.time_offered = true;
+        fake.view_fails = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_from_views", 1, r)) {
+            HpView v;
+            unsigned bad = 0, bad_velocity = 0;
+            double worst_deg = 0, worst_mm = 0;
+            for (int i = 1; i <= 120; ++i) {
+                const XrTime t = t0 + i * frame_ns;
+                hp_locate(r, t, views, n);
+                if (!v.block && !v.open(r.suffix)) { fail("from views: shared memory"); break; }
+                hp::Entry e{};
+                if (!hp::ReadLatest(v.block, e) || e.displayTime != t) { ++bad; continue; }
+                hp::Quat q; hp::Vec3 p, w, lv;
+                pose_slow(t, q, p, w, lv);
+                namespace ef = hp::entry_flags;
+                const std::uint32_t want = ef::orientation_valid | ef::position_valid | ef::orientation_tracked | ef::position_tracked | ef::from_views |
+                    (i > 1 ? ef::angular_velocity_valid | ef::linear_velocity_valid : 0u);
+                if (e.flags != want || e.qpcDisplay != qpc_of(t)) ++bad;
+                worst_deg = std::max(worst_deg, quat_angle(hp::OrientationOf(e), q) * 57.29578);
+                worst_mm = std::max(worst_mm, 1000.0 * std::sqrt((e.position[0] - p.x) * (e.position[0] - p.x) + (e.position[1] - p.y) * (e.position[1] - p.y) +
+                    (e.position[2] - p.z) * (e.position[2] - p.z)));
+                if (i > 1 && (std::fabs(e.angularVelocity[1] - w.y) > 0.01 || std::fabs(e.linearVelocity[0] - lv.x) > 0.005)) ++bad_velocity;
+            }
+            std::printf("head_pose_from_views: worst orientation error %.6f deg, position %.4f mm\n", worst_deg, worst_mm);
+            CHECK(bad == 0, "from views: one entry per display time, from_views and the view state's flags", bad, 0, -1);
+            CHECK(worst_deg < 1e-3 && worst_mm < 1e-3, "from views: the head between the canted eye views", worst_deg, worst_mm, -1);
+            CHECK(bad_velocity == 0, "from views: velocities derived from the previous entry", bad_velocity, 0, -1);
+            const std::string log = hp_finish(r);
+            CHECK(contains(log, "head pose: VIEW space not located") && contains(log, "head pose: from the eye views"), "from views: log", 0, 0, -1);
+        }
+    }
+
+    // Live: Publish=0 at instance creation, 1 from frame 100, 0 again from frame 400. The layer reads the ini every 90th
+    // xrLocateViews, publishing before it: entries for frames 180..449, then none. No time extension (0 at creation).
+    {
+        fake = Fake{};
+        fake.pose = pose_slow;
+        fake.time_offered = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_live", 0, r)) {
+            HpView v;
+            bool early = false;
+            int first = -1, last = -1;
+            std::uint64_t seen = 0;
+            for (int i = 0; i < 600; ++i) {
+                if (i == 100) hp_rewrite_ini(r, 1);
+                if (i == 400) hp_rewrite_ini(r, 0);
+                hp_locate(r, t0 + (i + 1) * frame_ns, views, n);
+                if (!v.block) {
+                    if (v.open(r.suffix) && i < 179) early = true;
+                    if (!v.block) continue;
+                }
+                if (v.block->writeCount != seen) {
+                    seen = v.block->writeCount;
+                    if (first < 0) first = i;
+                    last = i;
+                }
+            }
+            std::printf("head_pose_live: published at frames %d..%d (%llu entries)\n", first, last, static_cast<unsigned long long>(seen));
+            CHECK(!early && first == 180 && last == 449 && seen == 270, "live: publishing follows the ini (frames 180..449)", first, last, -1);
+            if (v.block) CHECK(v.block->ring[(seen - 1) % hp::kRing].qpcDisplay == 0, "live: no display time in QPC (Publish was 0 at creation)", 0, 0, -1);
+            CHECK(!time_enabled(), "live: no time extension added", 0, 0, -1);
+            const std::string log = hp_finish(r);
+            CHECK(contains(log, "head pose: off (PupilShift.ini [HeadPose] Publish=0)") &&
+                contains(log, "head pose: publishing (PupilShift.ini [HeadPose] Publish=1, Live)") &&
+                contains(log, "head pose: off (PupilShift.ini [HeadPose] Publish=0, Live)") &&
+                contains(log, "display time in QPC: no, Publish was 0 at instance creation"), "live: log lines", 0, 0, -1);
+        }
+    }
+
+    // Real time: a 90 deg/s yaw located at 90 Hz, 25 ms before each display time; a reader at 100 Hz predicts the head for
+    // now + 20 ms. Then DCS stops for 500 ms: the reader must call it stale, never extrapolate past the horizon.
+    {
+        fake = Fake{};
+        fake.pose = pose_yaw90;
+        fake.time_offered = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_yaw_realtime", 1, r)) {
+            struct Read { std::int64_t qpc; hp::PoseStatus status; double err_deg, age_s; };
+            std::vector<Read> reads;
+            reads.reserve(2000);
+            std::atomic<bool> stop{false};
+            const std::int64_t f = fake.qpc_frequency;
+            const std::wstring suffix = r.suffix;
+            std::thread reader([&] {
+                HpView v;
+                hp::ReaderLimits limits;
+                limits.expectedPid = pid;
+                while (!stop.load()) {
+                    if (!v.block) v.open(suffix);
+                    const std::int64_t now = hp_qpc(), target = now + f / 50;
+                    hp::PredictedPose p;
+                    const hp::PoseStatus s = v.block ? hp::ReadPredicted(v.block, now, target, limits, p) : hp::PoseStatus::kNoBlock;
+                    double err = -1;
+                    if (s == hp::PoseStatus::kOk) err = quat_angle(p.orientation, hp_yaw(kYawRate * hp_seconds(xrtime_of(target)))) * 57.29578;
+                    reads.push_back({now, s, err, p.ageS});
+                    Sleep(10);
+                }
+            });
+            const auto run_for = [&](double seconds) {
+                const std::int64_t end = hp_qpc() + static_cast<std::int64_t>(seconds * f);
+                std::int64_t next = hp_qpc();
+                while (hp_qpc() < end) {
+                    hp_locate(r, xrtime_of(hp_qpc()) + 25'000'000, views, n);
+                    next += f / 90;
+                    while (hp_qpc() < next) Sleep(hp_qpc() + f / 500 < next ? 1 : 0);
+                }
+            };
+            run_for(3.0);
+            const std::int64_t pause_start = hp_qpc();
+            Sleep(500);
+            const std::int64_t pause_end = hp_qpc();
+            run_for(0.3);
+            stop = true;
+            reader.join();
+            unsigned ok = 0, timely = 0, late = 0, over = 0, paused = 0, paused_ok = 0;
+            double worst = 0;
+            for (const Read& x : reads) {
+                const bool in_pause = x.qpc > pause_start + f * 16 / 100 && x.qpc < pause_end;
+                if (in_pause) { ++paused; if (x.status != hp::PoseStatus::kStale) ++paused_ok; continue; }
+                if (x.status != hp::PoseStatus::kOk) continue;
+                ++ok;
+                if (x.age_s > 0.040) { ++late; continue; }  // the harness's own frame came late (the scheduler), not the layer
+                ++timely;
+                worst = std::max(worst, x.err_deg);
+                if (x.err_deg > 0.5) ++over;
+            }
+            std::printf("head_pose_yaw_realtime: %zu reads, %u ok (%u with a frame <= 40 ms old: worst error %.4f deg; %u late frames), %u in the pause, %u not stale\n",
+                reads.size(), ok, timely, worst, late, paused, paused_ok);
+            CHECK(timely >= 150 && over == 0, "realtime: predicted head within 0.5 deg of the scripted yaw (now + 20 ms)", worst, 0.5, -1);
+            CHECK(late * 10 <= ok, "realtime: at most 10% of reads behind a late harness frame", late, ok, -1);
+            CHECK(paused >= 10 && paused_ok == 0, "realtime: DCS paused: every read stale after 160 ms", paused, paused_ok, -1);
+            const std::string log = hp_finish(r);
+            CHECK(contains(log, "head pose: publishing (display time in QPC: yes"), "realtime: log", 0, 0, -1);
+        }
+    }
+
+    // Stress: 10 s of xrLocateViews as fast as the layer takes them (a new display time every 1 ms of XrTime) against
+    // three readers; every accepted read is checked whole (truth of its display time, unit orientation).
+    {
+        fake = Fake{};
+        fake.pose = pose_stress;
+        fake.time_offered = true;
+        HpRun r;
+        if (hp_start(dll, out, "head_pose_stress", 1, r)) {
+            std::atomic<bool> stop{false};
+            std::atomic<std::uint64_t> accepted{0}, used{0}, torn{0}, order{0};
+            const std::wstring suffix = r.suffix;
+            hp_locate(r, t0 + 1'000'000, views, n);  // creates the block
+            std::vector<std::thread> readers;
+            for (int k = 0; k < 3; ++k)
+                readers.emplace_back([&, k] {
+                    HpView v;
+                    if (!v.open(suffix)) { torn.fetch_add(1000000); return; }
+                    hp::ReaderLimits limits;
+                    limits.expectedPid = pid;
+                    std::uint64_t last_index = 0;
+                    std::int64_t last_time = 0;
+                    unsigned x = 7u + k;
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        hp::Entry e{};
+                        if (hp::ReadNewest(v.block, limits, e) != hp::PoseStatus::kOk) continue;
+                        accepted.fetch_add(1, std::memory_order_relaxed);
+                        if (!hp_matches(e, pose_stress, true) || e.flags != kAllFlags) torn.fetch_add(1);
+                        if (e.index < last_index || (e.index > last_index && e.displayTime <= last_time)) order.fetch_add(1);
+                        last_index = e.index;
+                        last_time = e.displayTime;
+                        x = x * 1664525u + 1013904223u;
+                        const XrTime want = e.displayTime - static_cast<XrTime>((x >> 16) % 12) * 1'000'000;
+                        hp::Entry u{};
+                        if (hp::ReadUsed(v.block, want, limits, u) == hp::PoseStatus::kOk) {
+                            used.fetch_add(1, std::memory_order_relaxed);
+                            if (u.displayTime != want || !hp_matches(u, pose_stress, true)) torn.fetch_add(1);
+                        }
+                    }
+                });
+            const std::int64_t f = fake.qpc_frequency, end = hp_qpc() + 10 * f;
+            std::uint64_t frames = 1;
+            while (hp_qpc() < end) hp_locate(r, t0 + static_cast<XrTime>(++frames) * 1'000'000, views, n);
+            stop = true;
+            for (auto& t : readers) t.join();
+            std::printf("head_pose_stress: %llu display times in 10 s, %llu newest reads, %llu reads by display time, %llu torn, %llu out of order\n",
+                static_cast<unsigned long long>(frames), static_cast<unsigned long long>(accepted.load()), static_cast<unsigned long long>(used.load()),
+                static_cast<unsigned long long>(torn.load()), static_cast<unsigned long long>(order.load()));
+            CHECK(frames > 10000 && accepted.load() > 10000 && used.load() > 1000, "stress: enough traffic", static_cast<double>(frames), static_cast<double>(accepted.load()), -1);
+            CHECK(torn.load() == 0, "stress: no torn read accepted in 10 s", static_cast<double>(torn.load()), 0, -1);
+            CHECK(order.load() == 0, "stress: entries only go forward", static_cast<double>(order.load()), 0, -1);
+            hp_finish(r);
+        }
+    }
+
+    // Cost: the time of xrLocateViews through the layer with Publish=1 against Publish=0 (the same fake runtime), in
+    // alternating rounds; the added p99 must stay below 20 us.
+    {
+        std::vector<double> on, off;
+        for (int round = 0; round < 4; ++round) {
+            const bool publish = round % 2 == 1;
+            fake = Fake{};
+            fake.pose = pose_slow;
+            fake.time_offered = true;
+            HpRun r;
+            if (!hp_start(dll, out, publish ? "head_pose_cost_on" : "head_pose_cost_off", publish ? 1 : 0, r)) continue;
+            const double us = 1e6 / static_cast<double>(fake.qpc_frequency);
+            for (int i = 1; i <= 3000; ++i) {
+                const std::int64_t a = hp_qpc();
+                hp_locate(r, t0 + i * frame_ns, views, n);
+                const double dt = static_cast<double>(hp_qpc() - a) * us;
+                if (i > 100) (publish ? on : off).push_back(dt);  // after the first frames (space and block creation)
+            }
+            hp_finish(r);
+        }
+        scenario_name = "head_pose_cost";
+        if (!on.empty() && !off.empty()) {
+            const auto pct = [](std::vector<double> v, double q) { std::sort(v.begin(), v.end()); return v[static_cast<std::size_t>(q * (v.size() - 1))]; };
+            const double on50 = pct(on, 0.5), off50 = pct(off, 0.5), on99 = pct(on, 0.99), off99 = pct(off, 0.99);
+            std::printf("head_pose_cost: xrLocateViews median %.2f us off, %.2f us on; p99 %.2f us off, %.2f us on (added p99 %.2f us)\n", off50, on50, off99, on99, on99 - off99);
+            CHECK(on99 - off99 < 20.0, "cost: added time per xrLocateViews < 20 us (p99)", on99 - off99, 20, -1);
+        } else {
+            fail("cost: both rounds ran");
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2152,6 +2705,16 @@ int main(int argc, char** argv) {
     if (argc >= 5 && !load_fake_pvr(fs::absolute(argv[4]))) { std::printf("cannot load the fake PVR client %s\n", argv[4]); return 2; }
     if (argc < 5) std::printf("no fake PVR client given: the Pimax PVR scenarios are skipped\n");
     fs::create_directories(out);
+    // The head pose feed for binaural audio (Local\DcsVrHeadPose_v1). PUPIL_HARNESS_HEAD_POSE_ONLY=1: only these
+    // (development).
+    char head_env[8]{};
+    const bool only_head_pose = GetEnvironmentVariableA("PUPIL_HARNESS_HEAD_POSE_ONLY", head_env, sizeof head_env) > 0 && head_env[0] == '1';
+    head_pose_scenarios(dll, out);
+    if (only_head_pose) {
+        if (!failure_kinds.empty()) for (const auto& [kind, count] : failure_kinds) std::printf("%6d %s\n", count, kind.c_str());
+        std::printf("%d failure(s)\n", failures);
+        return failures == 0 ? 0 : 1;
+    }
     std::vector<Summary> results;
     // PUPIL_HARNESS_PREDICTIVE_ONLY=1: only the predictive transition's scenarios (development).
     char only_env[8]{};

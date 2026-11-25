@@ -2,4 +2,7 @@
   <PropertyGroup><TargetFramework>net10.0-windows</TargetFramework></PropertyGroup>
   <ItemGroup><InternalsVisibleTo Include="DcsVr.Tests" /></ItemGroup>
   <ItemGroup><EmbeddedResource Include="KnownComponents.txt" LogicalName="DcsVr.Core.KnownComponents.txt" /></ItemGroup>
+  <!-- PureHDF (MIT, docs/THIRD_PARTY.md): reads SOFA (HDF5) files for the HRTF import (Hrtf/SofaReader.cs). Pinned to one
+       exact version; its licence texts are in ThirdParty/PureHDF and ship in licenses/ (scripts/build-release.ps1). -->
+  <ItemGroup><PackageReference Include="PureHDF" Version="[2.2.0]" /></ItemGroup>
 </Project>

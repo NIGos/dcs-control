@@ -24,6 +24,7 @@
   [Frame generation](#frame-generation),
   [Perception](#perception),
   [Visual realism](#visual-realism),
+  [Audio](#audio),
   [DCS & headset](#dcs--headset),
   [Keys & headset panel](#keys--headset-panel),
   [Checks](#checks),
@@ -477,6 +478,19 @@ How the image looks in the headset, on its own page. Everything is **off by defa
 - **Eye-focus blur** (EXPERIMENTAL, about 0.18 ms) — things nearer or farther than where you look go slightly soft, like a real eye, and turn sharp the moment your eyes move. It needs eye tracking: eye-tracked Quad Views, or on Pimax also a fixed focus area or no Quad Views (new in 0.7, not flown yet). The pupil shift layer passes your gaze to the engine module, also without Pupil shift or Depth boost; without eye tracking the switch is greyed out and Checks says why, and on the Quest 3 VD route it is hidden. It runs only in flight, not in DCS's main menu. Some people find it uncomfortable. With frame generation the blur's release can show as a brief soft cross-fade in a generated frame.
 - **G vision** (about 0.04 ms, only while G is high) — grey-out, tunnel vision and blackout under G, centered on where you look (straight ahead without eye tracking), and red-out below about −2 G when G vision does all of it (*Full*, or *Auto* with DCS's G effect off). It works with DCS's own G-EFFECT option without doubling it (*Mode* under Advanced). With frame generation the tunnel's edge can smear slightly during fast turns. In multiplayer the server must allow the aircraft data export it reads.
 
+### Audio
+
+**3D headphone audio** (EXPERIMENTAL, off by default). DCS pans its sounds only left and right: front and back sound the same and there is no height. With this on, the mono 3D sounds of the world and the cockpit get real 3D sound for headphones: engines, wingmen, rotors, missiles and switches come from front, back, above or close beside you, and stay in place when you turn your head. Radio and intercom stay as DCS plays them, and distance, doppler and the canopy stay DCS's own. It works in VR and on a monitor (with head tracking), with or without Engine Optimizations: Launch DCS installs the engine module for it, in its Perception-only mode when the optimizations are off. It uses a little CPU on DCS's sound thread and no GPU. Use headphones.
+
+- **3D headphone audio** — the switch. Its key on the Keys & headset panel page (default **Alt+Shift+F6**) switches it off and on in flight, so you can compare with DCS's own sound; so does **Switch off or on now** in the Status card.
+- **Head size** — the distance around your head, in cm: put a tape measure (or a piece of string) around your head just above the eyebrows and ears. **Small · 54 cm**, **Medium · 57 cm** (the average, and the default) and **Large · 60 cm** set it in one click. It sets how far apart your ears sound, so left and right are placed right for you. With your own SOFA set, leave it at 57 cm: your set already has your own head's timing.
+- **Ears (HRTF)** — how your head and ears change a sound from each direction. **Generic (KU100)** is selected out of the box and suits most people: a measured dummy head (Neumann KU100, from the SADIE II database of the University of York). If you have your own measurement as a **SOFA** file (from an ear scan or a lab measurement), **Import SOFA…** converts it once and selects it. The app shows what it found (directions, sample rate, how much of the sphere is covered, how far apart in time a sound reaches the two ears) and warns about anything unusual; a file it cannot use is refused and nothing changes. If you already have a set with that name, it asks for another. **Remove** deletes the selected set. The SOFA file itself is never copied or sent anywhere: only the converted set, kept in DCS Control's own folder, goes to DCS when you launch.
+- **Follow the head between frames** (on) — sounds stay in place when you turn your head fast: the headset's head position is read at audio rate, between DCS frames, from the pupil shift layer, which Launch DCS installs for it. VR only.
+- **Advanced** (folded): **Close sounds per ear** (on; switches and voices in the cockpit sound close, each ear on its own), **Most 3D sounds** (48; the loudest sounds at once in 3D, the rest keep DCS's panning), **3D sound level** (0 dB; 3D sounds louder or softer against the rest) and **CPU budget** (25%; how much of each sound block it may use before it renders fewer sounds in 3D).
+- **Diagnostics** (folded): **Sound log** (off) writes every 3D sound to a file next to the engine module's log, for a report.
+
+**Status in DCS** shows what the engine module's log says: *Running* with the number of sounds in 3D and the CPU time per sound block, *Switched off* (with its key), or *Off* with the reason. On anything it does not expect (a DCS update that changed the sound engine, a speaker layout that is not stereo) it stays off and DCS's own sound plays: Checks and the Overview's Last flight say so. While 3D audio is on, Launch DCS sets DCS's **Speaker layout** to **Stereo** (Back to stock DCS, or turning 3D audio off, puts yours back). Windows spatial sound for DCS (Windows Sonic, Dolby Atmos through `sound.driver_name = "spatial"`) is the other way to get 3D sound: use one or the other. Every setting here applies live while DCS runs; turning it on in VR (with Follow the head) or while DCS's speaker layout is not Stereo yet, or picking a set imported after the launch, waits for the next launch. Without any HRTF set (a DCS Control build without the generic one, and none of your own) the switch is greyed out and says why.
+
 ### DCS & headset
 
 At the top: **Read settings from this PC** and **Guided setup** (see [First run](#first-run)).
@@ -501,6 +515,7 @@ Two cards: **In-flight keys** and **Headset panel (OSD)**.
 | **Alt+Shift+F8** | Far depth off/on, to compare (one low beep off, two high beeps on) |
 | **Alt+Shift+F10** | Depth boost off/on (low beep off, high beep on) |
 | *(off)* | Color mode: Off, Fix, Enhanced in turn (1, 2 or 3 beeps); Alt+Shift+F9 is free |
+| **Alt+Shift+F6** | 3D headphone audio off/on, to compare with DCS's own sound (also on a monitor) |
 | **Ctrl+Alt+F11** | Start or stop the Engine Optimizations test suite (fixed) |
 
 To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. **Default** (shown when a key differs from its default) puts the default back. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
@@ -573,6 +588,7 @@ What applies live:
 - **Headset panel:** its position, the FPS counter and the VRAM counter (whenever the headset panel or frame generation runs).
 - **Frame generation:** optical flow resolution and bidirectional flow, only when DCS was started with NVIDIA frame generation (bidirectional flow waits with foveated frame generation). Optical flow quality waits for the next launch: changing it makes frame generation start its optical flow again, which froze DCS for several seconds.
 - **DLSS 5:** the tuning settings (intensity, style, local tone and structure, skin, UI correction, automatic mask, color, transfer strength, paper white scale, Match brightness).
+- **3D headphone audio:** every setting on the Audio page and its key, with an engine module that has 3D audio. Turning it on in VR waits for the next launch (the head pose comes with it), and so does a set imported after the launch.
 
 A change to DLSS 5 intensity, style, local tone or structure, skin, UI correction or automatic mask, or to optical flow resolution or bidirectional flow, gives a short hitch in the headset (about half a second). This is normal.
 
@@ -659,7 +675,7 @@ The headset panel shows "Engine Opt.: warming up 60%" (how far it is; the Engine
 
 ### Multiplayer and Integrity Check
 
-**At your own risk.** DCS Control is only tested in single player. With DLSS 5 or Foveated SR the app adds files to DCS's `bin` folder (`dxgi.dll`, Cheeky's files) and, with Engine Optimizations on, a hook and a module in `Saved Games\DCS\Scripts`. The same hook and module are also installed, with none of the optimizations running, for frame generation in VR, Depth boost, Far depth and the Visual realism effects. Integrity Check has not been tested. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
+**At your own risk.** DCS Control is only tested in single player. With DLSS 5 or Foveated SR the app adds files to DCS's `bin` folder (`dxgi.dll`, Cheeky's files) and, with Engine Optimizations on, a hook and a module in `Saved Games\DCS\Scripts`. The same hook and module are also installed, with none of the optimizations running, for frame generation in VR, Depth boost, Far depth, the Visual realism effects and 3D headphone audio (which also patches DCS's sound engine in memory while DCS runs, in multiplayer too). Integrity Check has not been tested. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
 
 ### DCS Control isn't in my list of OpenXR layers
 

@@ -8,6 +8,8 @@ add_link_options(/Brepro)
 if(NOT OPENXR_INCLUDE)
     set(OPENXR_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../../external/cheeky/third_party/openxr/include)
 endif()
+# The binaural audio interface headers (head_pose_shm.h, head_pose_reader.h): the layer publishes the head pose.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../binaural/include)
 # OpenXR API layer, loaded by the OpenXR loader from the profile's explicit layer manifest.
 add_library(pupil_shift SHARED pupil_shift_layer.cpp)
 set_target_properties(pupil_shift PROPERTIES OUTPUT_NAME XR_APILAYER_DCSVR_pupil_shift)
@@ -35,6 +37,9 @@ set_target_properties(drs_filter_probe PROPERTIES OUTPUT_NAME nvngx_dlss_r122b_p
 add_dependencies(drs_filter_test drs_filter_probe)
 enable_testing()
 add_test(NAME pupil_shift COMMAND pupil_shift_tests)
+# The head pose feed for binaural audio: the layer's writer and the audio module's reader (head_pose_tests.cpp).
+add_executable(head_pose_tests head_pose_tests.cpp)
+add_test(NAME head_pose COMMAND head_pose_tests)
 add_test(NAME pupil_shift_harness COMMAND pupil_shift_harness $<TARGET_FILE:pupil_shift> ${CMAKE_CURRENT_BINARY_DIR}/harness_out
     $<TARGET_FILE:fake_quadviews> $<TARGET_FILE:fake_pvr>)
 add_test(NAME drs_filter COMMAND drs_filter_test WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})

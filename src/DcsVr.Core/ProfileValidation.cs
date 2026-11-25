@@ -357,6 +357,46 @@ public static class ProfileValidation
                 || (profile.UsesFarDepth && NeuralHotkeys.Same(color, profile.FarDepthToggleKey ?? NeuralHotkeys.FarDepthDefault)))
                 Error("hotkey-conflict", "The color mode key needs a key of its own: another in-flight switch uses it.");
         }
+        // 3D headphone audio: the values the module takes (binaural_config.h), its key, and DCS's sound output.
+        if (profile.UsesBinauralAudio)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (!Binaural.IsValidHrtfName(profile.BinauralHrtf))
+                Error("audio-hrtf", "Choose an HRTF set for 3D headphone audio on the Audio page.");
+            if (!(profile.HeadCircumferenceCm is >= Binaural.HeadCircumferenceMin and <= Binaural.HeadCircumferenceMax))
+                Error("audio-head-size", string.Format(inv, "Head size must be between {0} and {1} cm.", Binaural.HeadCircumferenceMin, Binaural.HeadCircumferenceMax));
+            if (profile.BinauralMaxObjects is < Binaural.MaxObjectsMin or > Binaural.MaxObjectsMax)
+                Error("audio-max-sounds", string.Format(inv, "Most 3D sounds must be between {0} and {1}.", Binaural.MaxObjectsMin, Binaural.MaxObjectsMax));
+            if (!(profile.BinauralLevelTrimDb is >= Binaural.LevelTrimMin and <= Binaural.LevelTrimMax))
+                Error("audio-level", string.Format(inv, "3D sound level must be between {0} and +{1} dB.", Binaural.LevelTrimMin, Binaural.LevelTrimMax));
+            if (profile.BinauralCpuBudgetPercent is < Binaural.CpuBudgetMin or > Binaural.CpuBudgetMax)
+                Error("audio-cpu", string.Format(inv, "CPU budget must be between {0} and {1}%.", Binaural.CpuBudgetMin, Binaural.CpuBudgetMax));
+            if (!Binaural.TryParseExcludeContexts(profile.BinauralExcludeContexts, out _))
+                Error("audio-contexts", "binauralExcludeContexts takes sound context numbers 0 to 7, separated by commas.");
+            Key(profile.AudioToggleKey, NeuralHotkeys.AudioDefault, profile.UsesAudioToggleKey, "audio-hotkey", "3D audio switch");
+            if (profile.UsesAudioToggleKey && NeuralHotkeys.TryParse(profile.AudioToggleKey ?? NeuralHotkeys.AudioDefault, out var audioKey))
+            {
+                var audio = profile.AudioToggleKey ?? NeuralHotkeys.AudioDefault;
+                if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(audioKey))
+                    Error("audio-hotkey", $"{NeuralHotkeys.Label(audioKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
+                if ((profile.NeuralRendering && NeuralHotkeys.Same(audio, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                    || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(audio, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                    || (profile.EngineOptimizations && NeuralHotkeys.Same(audio, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
+                    || (profile.UsesPupilShift && NeuralHotkeys.Same(audio, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
+                    || (profile.UsesDepthBoost && NeuralHotkeys.Same(audio, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault))
+                    || (profile.UsesFarDepth && NeuralHotkeys.Same(audio, profile.FarDepthToggleKey ?? NeuralHotkeys.FarDepthDefault))
+                    || (profile.UsesColorModeKey && NeuralHotkeys.Same(audio, profile.ColorModeKey)))
+                    Error("hotkey-conflict", "The 3D audio switch needs a key of its own: another in-flight switch uses it.");
+            }
+            if (inventory is not null)
+            {
+                // The module renders two channels: Launch DCS sets DCS's speaker layout to Stereo while 3D audio is on.
+                if (inventory.DcsSettings.TryGetValue("sound.main_layout", out var layout) && !Binaural.LayoutValue(layout).Equals(Binaural.StereoLayout, StringComparison.OrdinalIgnoreCase))
+                    issues.Add(new("audio-layout", IssueSeverity.Info, $"DCS's speaker layout is {Binaural.LayoutName(layout)}. Launch DCS sets it to Stereo while 3D headphone audio is on; Back to stock DCS puts {Binaural.LayoutName(layout)} back."));
+                if (inventory.DcsSettings.TryGetValue("sound.driver_name", out var driver) && Binaural.SpatialDriver(driver))
+                    issues.Add(new("audio-spatial", IssueSeverity.Warning, "DCS uses Windows spatial sound (sound.driver_name = \"spatial\" in options.lua). 3D headphone audio stays off with it: use one or the other."));
+            }
+        }
         // NVIDIA-only processing on a PC without an NVIDIA RTX card would install files that cannot run.
         if (!profile.Desktop && !GpuInfo.Unknown && !GpuInfo.HasNvidiaRtx)
         {

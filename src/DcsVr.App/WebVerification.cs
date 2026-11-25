@@ -46,7 +46,10 @@ internal static class WebVerification
             Local(start.AddSeconds(20), "HH:mm:ss.fff") + " features: 16 of 18 configured on;" + all.Replace("BigPages=on", "BigPages=idle(waiting)").Replace("ShadowRec=on", "ShadowRec=idle(starting)"),
             Local(start.AddSeconds(30), "HH:mm:ss.fff") + " warmup: shader variants compiling (40 keys queued, 4 in progress); shadow instancing, batching, the texture skip and the recorders are only partly active until done",
             Local(start.AddSeconds(125), "HH:mm:ss.fff") + " warmup: done after 95 s (cache: 30 hits, 14 compiled in this batch; 30 hits, 14 compiled since start)",
-            .. Enumerable.Range(0, 40).Select(i => Local(start.AddSeconds(130 + i * 60), "HH:mm:ss.fff") + " features: 18 of 18 configured on;" + all)]);
+            .. Enumerable.Range(0, 40).Select(i => Local(start.AddSeconds(130 + i * 60), "HH:mm:ss.fff") + " features: 18 of 18 configured on;" + all),
+            // 3D headphone audio running with the generic set, rendering 32 sounds at 0.21 ms per block (docs/BINAURAL_AUDIO.md, "Log lines the app reads").
+            Local(start.AddSeconds(21), "HH:mm:ss.fff") + " audio: on (48000 Hz stereo, HRTF default: 2562 directions, head radius 9.1 cm, near field on, at most 48 sounds)",
+            Local(start.AddSeconds(2400), "HH:mm:ss.fff") + " audio: running, 32 sounds, p99 0.21 ms per block (budget 25% of a block, about 2.50 ms at 10 ms), limit 48; fades in/out 40/8, fallbacks 0, refused 0, torn 0, pan solves 912 (median 900, mismatch 0), overruns 0; head pose on"]);
         File.SetLastWriteTimeUtc(moduleLog, end.AddSeconds(-30).UtcDateTime);
         var cheeky = Directory.CreateDirectory(Path.Combine(bin, "CheekyFoveatedDLSS")).FullName;
         var standalone = Path.Combine(cheeky, "CheekyFoveatedDLSS-Standalone.log"); var host = Path.Combine(cheeky, "CheekyFoveatedDLSS-Host.log");
@@ -367,6 +370,7 @@ internal static class WebVerification
         var runtime = At("runtime.json", @"Pimax\Runtime\PiOpenXR_64.json"); File.WriteAllText(runtime,JsonData.Serialize(new { runtime = new { library_path = runtimeDll } }));
         var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime, SteamVrRuntime = runtime, PimaxVersion = "1.0.1.103", Tracking = TrackingKind.Lighthouse, Observations = ["Offline fixture. No DCS process or headset session."] };
         var service = new ControlService(AppContext.BaseDirectory,Path.Combine(fixture,demoRoot is null ? "state" : @"AppData\Local\DcsControl"));
+        service.AssumeGenericHrtf = true;  // stands for a release build, which always has the generic HRTF set
         // The bridge logs what it does (Live: lines, errors) to AppLog: into the fixture, never the user's real app.log
         // (regress-07: web smoke runs wrote Live: lines there).
         AppLog.Path = Path.Combine(service.StateRoot, "app.log");
@@ -412,7 +416,11 @@ internal static class WebVerification
         Directory.CreateDirectory(staleSetup); File.WriteAllText(Path.Combine(staleSetup, "package.zip"), "left by a setup that was ended");
         var longAgo = DateTime.UtcNow - Updates.SetupLeftoverAge - TimeSpan.FromDays(1);
         Directory.SetCreationTimeUtc(staleSetup, longAgo); Directory.SetLastWriteTimeUtc(staleSetup, longAgo);
-        var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath,setupTemp:setupTemp);
+        // 3D headphone audio's SOFA import: fixture files for the converter's test double (FixtureHrtfConverter), never a
+        // real SOFA file or the real converter.
+        var sofa = Directory.CreateDirectory(Path.Combine(fixture, "sofa")).FullName;
+        File.WriteAllText(Path.Combine(sofa, "My ears.sofa"), "warn: fixture SOFA"); File.WriteAllText(Path.Combine(sofa, "broken.sofa"), "reject: not a SimpleFreeFieldHRIR file");
+        var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath,setupTemp:setupTemp,hrtfConverter:new FixtureHrtfConverter());
         using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
         var env = await CoreWebView2Environment.CreateAsync(null,Path.Combine(fixture,"browser"),new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-component-update --no-first-run --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion"));
         Log("Environment ready");
@@ -428,7 +436,7 @@ internal static class WebVerification
             // A signed x64 DLL that is not NVIDIA's, named like the runtime: it must never become the saved copy.
             var invalidRuntime = Path.Combine(fixture,"not-nvidia/nvngx_dlssnr.dll"); Directory.CreateDirectory(Path.GetDirectoryName(invalidRuntime)!);
             File.Copy(Path.Combine(AppContext.BaseDirectory,"WebView2Loader.dll"),invalidRuntime,true);
-            await core.AddScriptToExecuteOnDocumentCreatedAsync("window.offlineFixture="+JsonSerializer.Serialize(new { neuralRuntimePath = neural, invalidRuntimePath = invalidRuntime, pimaxMode = fine ? "Fine" : "Quick", updateVersion = update.Version })+";");
+            await core.AddScriptToExecuteOnDocumentCreatedAsync("window.offlineFixture="+JsonSerializer.Serialize(new { neuralRuntimePath = neural, invalidRuntimePath = invalidRuntime, pimaxMode = fine ? "Fine" : "Quick", updateVersion = update.Version, sofaPath = Path.Combine(sofa, "My ears.sofa"), sofaRejected = Path.Combine(sofa, "broken.sofa") })+";");
             Log("Controller ready");
             core.NavigationStarting += (_,e) => Log("Navigation: "+e.Uri+" cancelled="+e.Cancel);
             core.ProcessFailed += (_,e) => Log("Process failed: "+e.ProcessFailedKind+" "+e.Reason);
@@ -468,7 +476,7 @@ internal static class WebVerification
             var screenshots = new List<object>(); var index = 0;
             // Every page of the rail, in a fixed order (the first ten as before); a page added to app.js without being
             // listed here fails the run, so no page goes without screenshots.
-            string[] shotPages = ["overview","presets","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery","pupil","visual","osd","support"];
+            string[] shotPages = ["overview","presets","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery","pupil","visual","osd","support","audio"];
             var railPages = JsonSerializer.Deserialize<string[]>(JsonSerializer.Deserialize<string>(await core.ExecuteScriptAsync("JSON.stringify([...document.querySelectorAll('#pages > section.page')].map(s => s.id.slice(5)))"))!)!;
             if (railPages.Except(shotPages).ToArray() is { Length: > 0 } unlisted) throw new IOException("Pages without screenshots: " + string.Join(", ", unlisted));
             await core.ExecuteScriptAsync("window.screenshotDraft=window.dcsUi.draft();");

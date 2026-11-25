@@ -26,6 +26,16 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public const string LegacyStateFolder = "DcsVrControl";
     /// <summary>The app's saved copy of the user's DLSS 5 runtime (state root\runtimes).</summary>
     public NeuralRuntimeStore SavedRuntime => new(Path.Combine(StateRoot, "runtimes"));
+    /// <summary>The pilot's own HRTF sets for 3D headphone audio (state root\hrtf), imported from SOFA files.</summary>
+    public HrtfLibrary Hrtf => new(StateRoot);
+    /// <summary>The engine module this installation deploys (its generic HRTF set is a resource in it).</summary>
+    public string EnginePayloadPath => Path.Combine(DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
+    /// <summary>3D audio has a set to render with: the generic one in this build's engine module, or one of the pilot's own
+    /// (<see cref="Binaural.Usable"/>).</summary>
+    public bool BinauralAudioUsable() => AssumeGenericHrtf || Binaural.Usable(EnginePayloadPath, Hrtf.List().Count);
+    /// <summary>The interface's offline verification: its distribution is the app's build folder, whose engine module may
+    /// lack the generic set; it stands for a release, which scripts/build-release.ps1 only builds with the set.</summary>
+    public bool AssumeGenericHrtf { get; set; }
 
     /// <summary>
     /// Journal folders of earlier versions: state root\transactions and, for the default state root, the private copies
@@ -198,6 +208,10 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // Checked and deployed with the saved runtime copy when the draft has no runtime file of its own; profile.json
         // keeps the draft's own (empty) path.
         profile = ResolveNeuralRuntime(profile, out var savedNeuralSha);
+        // 3D audio needs a set to render with (the generic one in this build's engine module, or the pilot's own): without
+        // one nothing of it is deployed (no Stereo speaker layout, no head pose, no [Audio]); Checks says why
+        // (audio-unavailable). profile.json keeps the pilot's choice.
+        if (profile.BinauralAudio && !BinauralAudioUsable()) profile = profile with { BinauralAudio = false };
         var appliedFovea = fovea.Applies ? AppliedFovea.From(profile, fovea.Pimax?.Stamp) : null;
         var errors = ProfileValidation.Validate(profile, inventory).Where(i => i.Severity == IssueSeverity.Error).ToArray();
         if (errors.Length > 0) throw new InvalidDataException(string.Join(Environment.NewLine, errors.Select(i => i.Message)));
@@ -277,13 +291,15 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 }
             }
             string? pupilShift = null;
-            if (profile.ForLaunch().UsesPerceptionLayer)
+            // 3D audio's head pose alone: optional (a distribution without the layer flies 3D audio without it).
+            if (profile.ForLaunch().UsesPerceptionLayer && (profile.ForLaunch().PerceptionLayerRequired || File.Exists(Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll"))))
             {
                 pupilShift = Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll");
                 if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
                     throw new InvalidDataException("The pupil shift layer is modified or incomplete.");
             }
-            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectoryFor(inventory.OptionsPath));
+            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectoryFor(inventory.OptionsPath),
+                profile.UsesBinauralAudio ? Hrtf.ForDeployment() : null);
         }
         string Import(string id)
         {
@@ -573,6 +589,14 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var current = LiveSettings.Current(journal);
         var current07 = LiveSettings.Current07(journal);
         var nvidiaFlow = applied.Profile.ForLaunch().FrameGen == FrameGeneration.Nvidia;
+        var audio = LiveSettings.AudioInstalled(journal); var hrtfSets = LiveSettings.InstalledHrtfSets(journal);
+        // 3D audio turned on in flight starts at once only when nothing else it needs is read at launch: in VR with
+        // Follow the head the head pose (PupilShift.ini [HeadPose], read when DCS starts VR), and DCS's speaker layout
+        // unless options.lua already has Stereo (none is Auto: Launch DCS writes Stereo into DCS's sound settings, which
+        // DCS reads at start). Otherwise Binaural=1 waits with them for the next launch.
+        var launchDraft = draft.ForLaunch();
+        var audioOnLive = (launchDraft.Desktop || !launchDraft.BinauralLateHeadTracking)
+            && inventory.DcsSettings.TryGetValue("sound.main_layout", out var audioLayout) && Binaural.LayoutValue(audioLayout).Equals(Binaural.StereoLayout, StringComparison.OrdinalIgnoreCase);
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
@@ -610,7 +634,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
             if (!LiveSettings.Reloads(name, applied.Profile, journal)
-                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow))) { blocked.Add(name); continue; }
+                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow, audio, hrtfSets, audioOnLive))) { blocked.Add(name); continue; }
             if (!selfWritten) { updates.Add(new(entry.Path, wanted.Content, entry.InstalledSha256)); continue; }
             // Only the changed keys, in the file as it is now (Cheeky's learned calibration and formatting stay).
             var values = changed.Where(after.ContainsKey).ToDictionary(k => k, k => after[k], StringComparer.OrdinalIgnoreCase);
@@ -965,6 +989,9 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var current = Originals.Read() is { State: "applied", Current: { } applied } ? applied : null;
         EnsureDcsClosed(current?.Entries.Select(e => e.Path), ManagedRoot);
         if (current is null) throw new InvalidOperationException("No profile is applied. Launch DCS from DCS Control to apply one.");
+        // DCS is closed: a 3D audio kill-switch flag the module never took would start this session switched off.
+        foreach (var module in current.Entries.Where(e => Path.GetFileName(e.Path).Equals("DcsQvCull.dll", StringComparison.OrdinalIgnoreCase)))
+            if (Path.GetDirectoryName(module.Path) is { } folder && Binaural.RemoveStaleKillFlag(folder)) Originals.AppendLog("Removed a 3D audio switch flag left from the last DCS session.");
         var launch = VerifyInstalled(current);
         if (!File.Exists(launch.Executable)) throw new IOException("DCS executable is missing: " + launch.Executable);
         if (LaunchSafety.LauncherRestartBlocked && KeepsLauncher(current)) throw new InvalidOperationException(LaunchSafety.LauncherBlockedMessage);

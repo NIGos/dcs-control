@@ -25,12 +25,13 @@ window.runWebSmoke = async function() {
     'glare','glareStrength','nightVisionBlue','nightVisionBlur','nightVisionScotopic','nightVisionPhotopic','glareThresholdEv','glareRadius','glareStreak',
     'gazeDof','gazeDofStrength','gazeDofMaxArcmin','gazeDofSaccadeRelease','gazeDofSettleMs','gazeDofFadeInMs','gazeDofToleranceD','gazeDofFoveaGuardDeg','gazeDofPupilMm',
     'gVision','gVisionStrength','gVisionUseGaze','gVisionRedout','gVisionTolerance','gVisionMode',
+    'binauralAudio','headCircumferenceCm','binauralHrtf','binauralLateHeadTracking','binauralNearField','binauralMaxObjects','binauralLevelTrimDb','binauralCpuBudgetPercent','binauralLogVoices',
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
-    'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
+    'depthBoostToggleKey','colorModeKey','audioToggleKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
   const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','nvidiaFlowScale','showOverlay',
     'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
-    'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','runtimeManifestPath'];
+    'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','binauralNearField','binauralLogVoices','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
   const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
     return missing.length || extra.length || twice.length || expected.length !== actual.length ? ` (missing: ${missing.join(', ') || 'none'}; extra: ${extra.join(', ') || 'none'}${twice.length ? '; twice: '+twice.join(', ') : ''})` : ''; };
@@ -204,8 +205,9 @@ window.runWebSmoke = async function() {
     { const result = await ui.request('lastFlight'), f = result.flight;
       check('Last flight is read from the logs: headset frames, 2x/3x share, frame time, DLSS 5, CPU Boost and the terrain prefetch fix',!result.running && f && f.closed && f.dcsPid === 4242 && f.headset.seconds > 60 && f.headset.averageFps > 80 && f.framegen.seconds2x > 0 && f.framegen.seconds3x > 0 && f.frameTime.p90Ms >= f.frameTime.p50Ms && f.dlss5.state === 'ran' && f.dlss5.version === '310.8' && f.dlss5.toggles === 2 && f.dlss5.onAtExit === true && !f.dlss5.error && f.boost.moved === 3 && f.boost.errors.length === 1 && f.prefetch.skippedPercent > 90);
       check('Last flight reads the engine optimizations from the module log: all on after the warm-up, none turned off',f.engine && f.engine.on === 18 && f.engine.configured === 18 && !f.engine.turnedOff.length && !f.engine.offSeconds && f.engine.warmupSeconds === 95);
+      check('Last flight reads 3D headphone audio from the module log: on, 32 sounds at 0.21 ms',f.audio && f.audio.state === 'running' && f.audio.sounds === 32 && Math.abs(f.audio.costMs - 0.21) < 1e-9 && f.audio.hrtf === 'default' && f.audio.headTracking === true && !f.audio.backoffs);
       ui.loadFlight(0); await sleep(150);
-      check('Overview shows the last flight as one compact card',$('flightBody').querySelectorAll('.flight-item').length === 7 && $('flightBody').textContent.includes('18 of 18 on') && $('flightBody').textContent.includes('warm-up 2 min') &&$('flightTitle').textContent.includes('min') && $('flightBody').textContent.includes('3×') && $('flightBody').textContent.includes('310.8'));
+      check('Overview shows the last flight as one compact card, with 3D audio',$('flightBody').querySelectorAll('.flight-item').length === 8 && $('flightBody').textContent.includes('32 sounds · 0.21 ms p99') &&$('flightBody').textContent.includes('18 of 18 on') && $('flightBody').textContent.includes('warm-up 2 min') &&$('flightTitle').textContent.includes('min') && $('flightBody').textContent.includes('3×') && $('flightBody').textContent.includes('310.8'));
       check('Overview opens with the launch status and the checks in one line, without a separate list of problems',!$('overviewNotes') && $('dashStatus').querySelector('.dash-main b') && $('dashStatus').querySelector('.dash-chip') && $('featureList').querySelectorAll('.feature').length >= 5 && $('featureList').closest('#page-overview')); }
     edit('fpsLimit','MatchRefresh'); edit('headsetRefreshHz',90); edit('frameGen','Nvidia');
     check('OFXR matching mode with frames only when needed lets DCS render up to 90 FPS at 90 Hz',$('cadenceMetrics').textContent.includes('90 FPS'));
@@ -368,9 +370,9 @@ window.runWebSmoke = async function() {
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
       { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-frameGenHudSymbology','setting-frameGenFoveated',
-          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
+          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes','audioControls'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its fourteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its fifteen settings and cards (3D headphone audio included)',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -490,7 +492,7 @@ window.runWebSmoke = async function() {
     edit('quadSharpening',.62); await sleep(900); check('The draft is saved after an edit',ui.savedDraft === JSON.stringify(ui.draft()));
     check('Profile name follows the route and the checked features',ui.profile.name === 'Pimax · Quad Views + DLSS 5 + Frame generation + CPU Boost' && ui.profile.id === 'pimax-qv-dlss5-fg-boost' && $('profileName').textContent === ui.profile.name);
     check('Overview shows a CPU Boost card next to the other features',$('feature-boost').closest('#page-overview') && $('feature-boost').classList.contains('on'));
-    check('Overview shows Perception, Visual realism and Keys & headset panel as a third tile group in VR',$('pipeline').querySelectorAll('.stage-group.extra .stage').length === 3 && $('pipeline').querySelector('.stage-group.extra [data-page=osd]').classList.contains('on') === (ui.profile.frameGen !== 'Off' || Boolean(ui.profile.headsetPanel)));
+    check('Overview shows Perception, Visual realism, 3D audio and Keys & headset panel as a third tile group in VR',$('pipeline').querySelectorAll('.stage-group.extra .stage').length === 4 && $('pipeline').querySelector('.stage-group.extra [data-page=audio]').classList.contains('on') === Boolean(ui.profile.binauralAudio) &&$('pipeline').querySelector('.stage-group.extra [data-page=osd]').classList.contains('on') === (ui.profile.frameGen !== 'Off' || Boolean(ui.profile.headsetPanel)));
     edit('quadViews','PimaxNative');
     check('DLSS 5 with Quad Views keeps the bundled provider and the focus adapter, explained in one short note',ui.profile.quadViews === 'QuadViewsFoveated' && ui.profile.quadFocusAdapter && $('featureNotes-quad').textContent.includes("can't host") && $('featureNotes-quad').textContent.length < 60 && $('input-quadViews').querySelector('[value=PimaxNative]').disabled);
     check('DLSS 5 without its runtime file asks for it inline',ui.profile.neuralRuntimePath || $('featureNotes-dlss').textContent.includes('Select file'));
@@ -855,8 +857,66 @@ window.runWebSmoke = async function() {
       await poll({stuck:'NoWindow'}); await poll({simulate:false}); await ui.request('dcsStatus',{stuck:null});
       check('The top bar goes back as soon as DCS answers again or is gone',again && healthy && end.hidden && !dot.classList.contains('stuck') && !bar().startsWith('DCS ') && !ui.state.dcsRunning && !ui.state.dcsStuck);
       await sleep(60); await waitIdle(); }
+    // 3D headphone audio (Audio page): off by default with the generic ears, a card with its EXPERIMENTAL tag and no consent
+    // gate, greyed settings that say why, Small/Medium/Large, SOFA import through the converter's test double (a name
+    // taken asks for another, a refused file changes nothing), Remove, its key, the guide and the status from the log.
+    { const f = path => ui.fields.find(x => x.path === path), why = path => $('why-'+path).hidden ? null : $('why-'+path).textContent;
+      const wasDesktop = Boolean(ui.profile.desktop), route = ui.profile.runtime;
+      ui.navigate('audio');
+      { // A build without any HRTF set (no generic one, none of the pilot's own): the switch is greyed out and the reason
+        // shown; Import stays the way in. (This host stands for a release, which has the generic set.)
+        const saved = ui.state;
+        ui.sync({...saved, profile: ui.profile, audioUsable: false, sofaImport: true});
+        check('Without any HRTF set 3D audio is greyed out, says why, and Import SOFA stays available',$('input-binauralAudio').disabled && !$('audioNeeds').hidden
+          && $('audioNeeds').textContent.includes('no generic HRTF set') && !$('hrtfImport').disabled);
+        ui.sync({...saved, profile: ui.profile, audioUsable: false, sofaImport: false});
+        check('Without a SOFA converter Import SOFA is greyed out with a reason',$('hrtfImport').disabled && $('hrtfImport').title.includes('cannot convert'));
+        ui.sync({...saved, profile: ui.profile});
+      }
+      check('The Audio page is in the rail, named for its content, with an EXPERIMENTAL card and no consent gate',$('nav-audio') && !$('page-audio').hidden && $('pageTitle').textContent === 'Audio'
+        && [...$('audioControls').querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL') && !$('audioControls').querySelector('dialog, [role=alertdialog]') && !$('input-binauralAudio').disabled);
+      // (The head size itself was set to its range's ends by the number checks above; DcsVr.Tests checks the 57 cm default.)
+      check('Off by default, with the generic ears selected out of the box',!ui.profile.binauralAudio && ui.profile.binauralHrtf === 'default'
+        && $('input-binauralHrtf').selectedOptions[0].textContent.startsWith('Generic (KU100)'));
+      check(`Off, its settings are greyed out and say why (${why('headCircumferenceCm')})`,f('headCircumferenceCm').input.disabled && why('headCircumferenceCm') === 'Turn on 3D headphone audio to change these.' && $('hrtfImport').disabled);
+      edit('binauralAudio',true);
+      check('On, its settings open; the head size has Small, Medium and Large',!f('headCircumferenceCm').input.disabled && !f('binauralMaxObjects').input.disabled && !$('hrtfImport').disabled && $('hrtfRemove').hidden
+        && $('headPresets').querySelectorAll('[data-head]').length === 3 && $('navState-audio').textContent === 'ON');
+      $('headPresets').querySelector('[data-head="60"]').click();
+      check('Large sets the head size to 60 cm',ui.profile.headCircumferenceCm === 60 && f('headCircumferenceCm').input.value === '60' && $('headPresets').querySelector('[data-head="60"]').getAttribute('aria-pressed') === 'true');
+      edit('headCircumferenceCm',57);
+      check('A typed 57 cm marks Medium',$('headPresets').querySelector('[data-head="57"]').getAttribute('aria-pressed') === 'true' && $('headPresets').querySelector('[data-head="60"]').getAttribute('aria-pressed') === 'false');
+      const late = f('binauralLateHeadTracking');
+      check('Follow the head is greyed out with a reason when this build has no pupil shift layer, usable when it has',ui.profile.desktop ? late.input.disabled && why('binauralLateHeadTracking').startsWith('In VR only')
+        : ui.state.headPoseLayer ? !late.input.disabled : late.input.disabled && why('binauralLateHeadTracking').includes('pupil shift layer'));
+      if (!wasDesktop) { $('routeSwitch').querySelector('[data-route="Desktop"]').click(); await waitIdle(); }
+      check('Optimizations only keeps the Audio page (3D audio works on a monitor) and greys Follow the head with its reason',!$('nav-audio').hidden && Boolean(ui.profile.desktop) && late.input.disabled && why('binauralLateHeadTracking').startsWith('In VR only'));
+      if (!wasDesktop) { $('routeSwitch').querySelector(`[data-route="${route}"]`).click(); await waitIdle(); ui.navigate('audio'); }
+      ui.hrtfFixture = window.offlineFixture.sofaPath; await ui.importHrtf(); await waitIdle();
+      check('Import SOFA converts the file, selects it and shows the report with the converter\'s warning',ui.profile.binauralHrtf === 'My ears' && ui.state.hrtfSets.some(s => s.name === 'My ears' && s.directions === 145)
+        && $('input-binauralHrtf').value === 'My ears' && !$('hrtfReport').hidden && $('hrtfReport').textContent.includes('Imported "My ears"') && $('hrtfReport').textContent.includes('145 measured directions')
+        && $('hrtfReport').textContent.includes('Fixture warning') && !$('hrtfRemove').hidden);
+      await ui.importHrtf(); await waitIdle();
+      check('Importing under a name already taken asks for another one, with a free name proposed',!$('hrtfNameForm').hidden && $('hrtfNameInput').value === 'My ears 2' && $('hrtfNameLabel').textContent.includes('My ears') && ui.profile.binauralHrtf === 'My ears');
+      // A name the library refuses asks again with the rule, and keeps the file picked.
+      $('hrtfNameInput').value = 'default'; $('hrtfNameForm').requestSubmit(); await sleep(50); await waitIdle();
+      check('A name that cannot be used asks again with the reason, keeping the file',!$('hrtfNameForm').hidden && $('hrtfNameLabel').textContent.startsWith('Use a name of') && ui.state.hrtfSets.length === 1);
+      $('hrtfNameInput').value = 'Second set'; $('hrtfNameForm').requestSubmit(); await sleep(50); await waitIdle();
+      check('The new name imports it',$('hrtfNameForm').hidden && ui.profile.binauralHrtf === 'Second set' && ui.state.hrtfSets.length === 2);
+      ui.hrtfFixture = window.offlineFixture.sofaRejected; await ui.importHrtf(); await waitIdle();
+      check('A file the converter refuses is not imported, says why and changes nothing',ui.profile.binauralHrtf === 'Second set' && ui.state.hrtfSets.length === 2 && !$('hrtfReport').hidden
+        && $('hrtfReport').textContent.includes('not a SimpleFreeFieldHRIR file') && $('hrtfReport').classList.contains('warn'));
+      await ui.removeHrtf(); await waitIdle();
+      check('Remove deletes the set and goes back to the generic ears',ui.profile.binauralHrtf === 'default' && ui.state.hrtfSets.length === 1 && $('hrtfRemove').hidden);
+      ui.navigate('osd');
+      check('Its in-flight key sits with the others, Alt+Shift+F6 by default',f('audioToggleKey').page === 'osd' && f('audioToggleKey').input.textContent.includes('Alt+Shift+F6') && !f('audioToggleKey').input.disabled);
+      ui.navigate('guide');
+      check('The Feature guide explains it under Audio, with its key',[...$('featureGuide').querySelectorAll('.guide-section')].some(s => s.querySelector('h2').textContent === 'Audio' && s.textContent.includes('3D headphone audio') && s.textContent.includes('Alt+Shift+F6')));
+      ui.navigate('audio'); await ui.refreshAudio();
+      check('The status card reads the module\'s log (no module in this fixture: not installed)',ui.audioStatus && $('audioStatus').querySelector('.engine-state b').textContent.length > 0 && $('audioToggleNow').disabled);
+      check('Checks list no audio problem for the generic ears',!ui.state.issues.some(i => i.code.startsWith('audio-') && i.severity === 'Error')); }
     // The page area never scrolls sideways (the document itself cannot: the area clips it, so it is measured here).
-    { const wide = []; for (const id of ['overview','presets','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); await sleep(40); const area = $('scrollArea'), limit = area.getBoundingClientRect().right;
+    { const wide = []; for (const id of ['overview','presets','guide','foveation','dlss','framegen','pupil','visual','audio','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); await sleep(40); const area = $('scrollArea'), limit = area.getBoundingClientRect().right;
         if (area.scrollWidth > area.clientWidth) wide.push(id+' +'+(area.scrollWidth - area.clientWidth)+' '+[...area.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > limit + 1).slice(0,2).map(e => e.tagName+'#'+e.id).join(',')); }
       check('No page scrolls sideways'+(wide.length ? ' ('+wide.join('; ')+')' : ''),!wide.length); }
     ui.navigate('overview'); check('No fixture change remains',ui.state.originals.count === 0 && !ui.state.launchReady);

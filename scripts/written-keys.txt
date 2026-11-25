@@ -38,6 +38,16 @@ Cheeky	CheekyFoveatedDLSS	PeripheralDlaaScale
 Cheeky	CheekyFoveatedDLSS	SchemaVersion
 Cheeky	CheekyFoveatedDLSS	TransitionWidth
 Cheeky	CheekyFoveatedDLSS	Width
+DcsQvCull	Audio	Binaural
+DcsQvCull	Audio	CpuBudgetPercent
+DcsQvCull	Audio	ExcludeContexts
+DcsQvCull	Audio	HeadCircumferenceCm
+DcsQvCull	Audio	Hrtf
+DcsQvCull	Audio	LateHeadTracking
+DcsQvCull	Audio	LevelTrimDb
+DcsQvCull	Audio	LogVoices
+DcsQvCull	Audio	MaxObjects
+DcsQvCull	Audio	NearField
 DcsQvCull	Bench	AutoStartSec
 DcsQvCull	Bench	BlockSec
 DcsQvCull	Bench	Blocks
@@ -115,6 +125,7 @@ DcsQvCull	Governor	RenderIdlePct
 DcsQvCull	Governor	RevertBackoffSec
 DcsQvCull	Governor	TrialSec
 DcsQvCull	Governor	WindowSec
+DcsQvCull	Hotkeys	AudioToggle
 DcsQvCull	Hotkeys	DeveloperKeys
 DcsQvCull	Hotkeys	Toggle
 DcsQvCull	Log	DumpViews
@@ -378,10 +389,12 @@ PupilShift	DepthBoost	Transition
 PupilShift	DepthBoost	TransitionToggle
 PupilShift	DepthBoost	UpMmPerS
 PupilShift	DlssPreset	IgnoreDriverPreset
+PupilShift	HeadPose	Publish
 PupilShift	PupilShift	Enabled
 PupilShift	PupilShift	EyeRadiusMm
 PupilShift	PupilShift	Ipd
 PupilShift	PupilShift	MaxGazeDeg
+PupilShift	PupilShift	OpenXrEyeGaze
 PupilShift	PupilShift	PublishGaze
 PupilShift	PupilShift	QuadViewsFixedFocus
 PupilShift	PupilShift	SimulateGaze

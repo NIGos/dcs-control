@@ -310,6 +310,16 @@ DWORD WINAPI WorkerThread(void*) {
       lastCfg = now;
       ftl::TaskScope ts(ftl::kTConfig);
       LoadConfig(false);
+      {
+        // 3D audio turned on Live while its control thread is not running (it starts only with [Audio] Binaural=1):
+        // looked at only when the ini was reloaded, the thread started once.
+        static uint64_t s_audioSeenReloads = 0;
+        const uint64_t reloads = g_iniReloads.load();
+        if (reloads != s_audioSeenReloads) {
+          s_audioSeenReloads = reloads;
+          audio::StartIfWanted();
+        }
+      }
       if (!po) pffix::UpdateNoSleepTid(g_quadTid.load(std::memory_order_relaxed), BenchRenderTid());  // SpinCap: never sleeps there
       if (!po) pffix::Tick();  // new modules (terrain DLLs per mission), slot verify, 10 s statistics line
       g_statusSink.Publish(StatusWordNow());  // last second's states (the retries below show next time)

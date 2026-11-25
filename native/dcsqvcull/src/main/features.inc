@@ -61,3 +61,8 @@
 #include "early_shaders.h"  // 0.7: shaders DCS creates before load: identity by output, SSAO water skip, census ([D3D] EarlyShaders / [Suite] EarlyShaderCensus, default 0)
 #include "per_eye_pass.h"  // One geometry pass per eye, stage 0 (PER_EYE_PASS_DESIGN.md): pure parts, [Suite] PerEyePassCensus (default 0)
 #include "per_eye_live.h"  // ... stage 2: live captures C2 / C4 / C5 / C7 ([Suite] PerEyeC2 / C4 / C5 / C7 seconds, measure only, default 0)
+#include "audio_voice.h"   // binaural audio ([Audio] Binaural, default 0): ed_sound structures, mono gain rule, VoiceMeta
+#include "audio_render.h"  // binaural audio: the output rule inside ed_sound's mix, re-pan fallback, budget, events
+#include "audio_sim.h"     // binaural audio: voice ownership and the mono tag (simulation thread)
+#include "audio_hooks.h"   // binaural audio: ed_sound's call sites found, validated and patched
+#include "audio_config.h"  // binaural audio: the [Audio] keys

@@ -29,6 +29,16 @@ if ($Sign -and -not $AllowDirty) {
             (($sourceChanges | Select-Object -First 10) -join "`n") + "`nCommit them or move them out of the tree, then build again. -AllowDirty builds anyway and the manifest says so.")
     }
 }
+# 3D headphone audio's generic HRTF set (native/binaural/data, made by scripts/fetch-hrtf.ps1) is what pilots without a
+# SOFA file of their own hear: a release without it would offer 3D audio that cannot run. Its Apache-2.0 licence and
+# NOTICE go with it (section 4). A -LocalOnly package may lack it (the app then greys 3D audio out and says why).
+$hrtfData = Join-Path $workspaceRoot 'native/binaural/data'
+$hrtfMissing = @('sadie2_ku100.dcshrtf', 'SADIE_II_LICENSE.txt', 'NOTICE') | Where-Object { -not (Test-Path -LiteralPath (Join-Path $hrtfData $_)) }
+if ($hrtfMissing) {
+    $hrtfWhy = "native/binaural/data lacks $($hrtfMissing -join ', ') (scripts/fetch-hrtf.ps1 makes the generic HRTF set)"
+    if (-not $LocalOnly) { throw "$hrtfWhy`: a release needs the generic HRTF set and its licence. -LocalOnly builds without 3D audio's set." }
+    Write-Warning "$hrtfWhy`: this local package has no generic HRTF set; 3D audio is greyed out in it."
+}
 $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
@@ -100,8 +110,11 @@ New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
 # DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
 # them (the terrain prefetch fix included), and the pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in
 # the profile folder when the profile enables it. Built on every release so a stale DLL can never ship; collected below.
+# BinauralCore (scripts/build-binaural.ps1), the HRTF renderer the engine payload links, is built and tested beside them:
+# its harness (A1-A14 of docs/BINAURAL_AUDIO.md) runs only here, the payload build compiles the same sources.
 if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
-$nativeBuilds = @((Start-NativeBuild 'dcsqvcull' 'build-dcsqvcull.ps1'), (Start-NativeBuild 'pupil-shift' 'build-pupil-shift.ps1'))
+$nativeBuilds = @((Start-NativeBuild 'dcsqvcull' 'build-dcsqvcull.ps1'), (Start-NativeBuild 'pupil-shift' 'build-pupil-shift.ps1'),
+    (Start-NativeBuild 'binaural' 'build-binaural.ps1'))
 # A release that stops before collecting them stops them too.
 trap { if ($nativeBuilds) { $nativeBuilds.Job | Where-Object State -eq 'Running' | Stop-Job -ErrorAction SilentlyContinue }; break }
 # The launcher at the top of the release folder (starts files\DcsControl.exe); the interface render below uses it too.
@@ -157,6 +170,77 @@ foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/nati
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
     Write-Sha256Sidecar $target
 }
+# The engine payload carries the generic HRTF set itself, as the RCDATA resource HRTF_DEFAULT. Checked the way the app
+# reads it (DcsVr.Core PeResource: the resource directory's first language of type / name), and byte for byte against
+# native/binaural/data: a payload built before the set was made, or from another one, would leave 3D audio greyed out or
+# play another set. Read here by Find-PeResource (the same walk in PowerShell): loading the net10.0 DcsVr.Core.dll into
+# this pwsh would need pwsh on .NET 10 or later, which the script does not require.
+function Find-PeResource([byte[]]$image, [int]$type, [string]$name) {
+    function U32([int]$o) { [BitConverter]::ToUInt32($image, $o) }
+    function U16([int]$o) { [BitConverter]::ToUInt16($image, $o) }
+    $high = [uint32]2147483648; $low = [uint32]2147483647  # a directory entry's "name is a string" / "points to a directory" bit
+    try {
+        if ($image.Length -lt 0x40 -or (U16 0) -ne 0x5a4d) { return $null }
+        $pe = [int](U32 0x3c)
+        if ($pe -lt 0 -or $pe + 24 -gt $image.Length -or (U32 $pe) -ne 0x4550) { return $null }
+        $sections = U16 ($pe + 6); $optSize = U16 ($pe + 20); $opt = $pe + 24
+        $magic = U16 $opt
+        if ($magic -eq 0x20b) { $dirs = $opt + 112 } elseif ($magic -eq 0x10b) { $dirs = $opt + 96 } else { return $null }
+        $rsrcRva = U32 ($dirs + 16)
+        if ($rsrcRva -eq 0) { return $null }
+        $table = $opt + $optSize
+        $offset = {
+            param([uint32]$rva)
+            for ($i = 0; $i -lt $sections; $i++) {
+                $sh = $table + 40 * $i
+                $va = U32 ($sh + 12); $size = [Math]::Max((U32 ($sh + 8)), (U32 ($sh + 16))); $raw = U32 ($sh + 20)
+                if ($rva -ge $va -and $rva -lt $va + $size) { return [int64]$raw + ($rva - $va) }
+            }
+            return -1
+        }
+        $root = & $offset $rsrcRva
+        if ($root -lt 0) { return $null }
+        # A directory's entry matching an id ($id) or a string name ($text); returns its offset field, or $null.
+        $entry = {
+            param([int64]$dir, $id, $text)
+            $count = (U16 ($dir + 12)) + (U16 ($dir + 14))
+            for ($i = 0; $i -lt $count; $i++) {
+                $e = $dir + 16 + 8 * $i
+                $n = U32 $e
+                if ($n -band $high) {
+                    if ($null -eq $text) { continue }
+                    $at = $root + ($n -band $low)
+                    $len = U16 $at
+                    if ([string]::Equals([Text.Encoding]::Unicode.GetString($image, $at + 2, $len * 2), $text, [StringComparison]::OrdinalIgnoreCase)) { return U32 ($e + 4) }
+                } elseif ($null -ne $id -and $n -eq $id) { return U32 ($e + 4) }
+            }
+            return $null
+        }
+        $t = & $entry $root $type $null
+        if ($null -eq $t -or -not ($t -band $high)) { return $null }
+        $nm = & $entry ($root + ($t -band $low)) $null $name
+        if ($null -eq $nm -or -not ($nm -band $high)) { return $null }
+        $nameDir = $root + ($nm -band $low)
+        if ((U16 ($nameDir + 12)) + (U16 ($nameDir + 14)) -eq 0) { return $null }
+        $lang = U32 ($nameDir + 16 + 4)
+        if ($lang -band $high) { return $null }
+        $data = $root + $lang
+        $at2 = & $offset (U32 $data)
+        $dataSize = [int](U32 ($data + 4))
+        if ($at2 -lt 0 -or $at2 + $dataSize -gt $image.Length) { return $null }
+        $bytes = [byte[]]::new($dataSize)
+        [Array]::Copy($image, $at2, $bytes, 0, $dataSize)
+        return , $bytes
+    } catch { return $null }  # a malformed image (an offset past its end): no resource
+}
+if (Test-Path -LiteralPath (Join-Path $hrtfData 'sadie2_ku100.dcshrtf')) {
+    $payloadImage = [IO.File]::ReadAllBytes((Join-Path $payloadRoot 'components/dcsqvcull/DcsQvCullPayload.dll'))
+    $embeddedHrtf = Find-PeResource $payloadImage 10 'HRTF_DEFAULT'
+    $expectedHrtf = [IO.File]::ReadAllBytes((Join-Path $hrtfData 'sadie2_ku100.dcshrtf'))
+    if ($null -eq $embeddedHrtf) { throw 'DcsQvCullPayload.dll has no HRTF_DEFAULT resource: rebuild the engine module (scripts/build-dcsqvcull.ps1) now that native/binaural/data has the generic set.' }
+    if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$embeddedHrtf, $expectedHrtf)) { throw "DcsQvCullPayload.dll embeds another HRTF set ($($embeddedHrtf.Length) bytes) than native/binaural/data/sadie2_ku100.dcshrtf: rebuild the engine module." }
+    Write-Output "DcsQvCullPayload.dll embeds the generic HRTF set ($($expectedHrtf.Length) bytes, as native/binaural/data)."
+}
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/pupilshift') -Force | Out-Null
 $pupilShift = Join-Path $payloadRoot 'components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/pupil-shift/XR_APILAYER_DCSVR_pupil_shift.dll') -Destination $pupilShift -Force
@@ -209,6 +293,16 @@ $webView2 = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'src/DcsVr
 if (-not $webView2) { throw 'DcsVr.App.csproj does not reference Microsoft.Web.WebView2.' }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/nuget/microsoft.web.webview2/$webView2/LICENSE.txt") -Destination (Join-Path $payloadRoot 'licenses/WebView2-SDK.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/nuget/microsoft.web.webview2/$webView2/NOTICE.txt") -Destination (Join-Path $payloadRoot 'licenses/WebView2-NOTICE.txt') -Force
+# PureHDF (MIT), the SOFA reader DcsVr.Core references (one place: DcsVr.Core.csproj). Its package carries no licence
+# file, so the pinned version's repository texts are kept in src/DcsVr.Core/ThirdParty/PureHDF: its MIT licence and the
+# BSD licence of the C-Blosc2 code it includes.
+$pureHdf = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'src/DcsVr.Core/DcsVr.Core.csproj') -Raw)).SelectSingleNode("//PackageReference[@Include='PureHDF']").Version
+if ($pureHdf -ne '[2.2.0]') { throw "DcsVr.Core.csproj references PureHDF $pureHdf; src/DcsVr.Core/ThirdParty/PureHDF and docs/THIRD_PARTY.md record 2.2.0." }
+if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot 'PureHDF.dll'))) { throw 'The published application lacks PureHDF.dll (the SOFA import).' }
+$pureHdfLicences = Join-Path $workspaceRoot 'src/DcsVr.Core/ThirdParty/PureHDF'
+Copy-Item -LiteralPath (Join-Path $pureHdfLicences 'LICENSE.md') -Destination (Join-Path $payloadRoot 'licenses/PureHDF-MIT.txt') -Force
+Copy-Item -LiteralPath (Join-Path $pureHdfLicences '3rd-party-licenses.md') -Destination (Join-Path $payloadRoot 'licenses/PureHDF-third-party.md') -Force
+Copy-Item -LiteralPath (Join-Path $pureHdfLicences 'C-Blosc2-LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/PureHDF-C-Blosc2-BSD-3-Clause.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/cheeky/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-GPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/ofxr/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-LGPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-djules75-LGPL-3.0.txt') -Force
@@ -220,6 +314,12 @@ Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Mi
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/ThirdPartyNotices.txt') -Destination (Join-Path $payloadRoot 'licenses/WIL-ThirdPartyNotices.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/cheeky/licenses') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-dependencies') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/sboys/LICENCE.md') -Destination (Join-Path $payloadRoot 'licenses/Sboys-GPL-2.0.md') -Force
+# The generic HRTF set embedded in the engine payload (SADIE II, Apache-2.0): its licence and its NOTICE (attribution and
+# the changes made), checked present above.
+if (Test-Path -LiteralPath (Join-Path $hrtfData 'sadie2_ku100.dcshrtf')) {
+    Copy-Item -LiteralPath (Join-Path $hrtfData 'SADIE_II_LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/SADIE-II-Apache-2.0.txt') -Force
+    Copy-Item -LiteralPath (Join-Path $hrtfData 'NOTICE') -Destination (Join-Path $payloadRoot 'licenses/SADIE-II-NOTICE.txt') -Force
+}
 $presets = & $dotnet (Join-Path $payloadRoot 'DcsVr.Cli.dll') presets
 if ($LASTEXITCODE -ne 0 -or -not $presets) { throw 'Preset export failed.' }
 $presets | Set-Content -LiteralPath (Join-Path $payloadRoot 'profiles/presets.json') -Encoding utf8

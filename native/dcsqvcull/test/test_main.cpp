@@ -1,5 +1,6 @@
 // Offline checks: frustum decoding, exclusion building, Scene.dll export lookup.
 #include "../src/main.cpp"
+#include "audio_fake_core.h"  // binaural audio: the stand-in core's controls (global scope: defined in audio_fake_core.cpp)
 
 #include <cassert>
 #include <d3dcompiler.h>
@@ -350,6 +351,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "periph_census_test.h"  // Perf audit B6: periphery instance census (pure parts, kernels, one WARP run)
 #include "early_shaders_test.h"  // 0.7 early shaders (SSAO patch and build, identity by output on WARP, swap, census)
 #include "invariants_test.h"  // engine parts: all off = stock, kill switch = stock, app ini round trip, defaults
+#include "audio_test.h"       // binaural audio module (fake ed_sound image, real ed_sound checks, ownership, null test)
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -680,6 +682,12 @@ int main() {
     PrintSummary();
     return g_fail ? 1 : 0;
   }
+  // QV_AUDIO_ONLY=1: only the binaural audio module tests.
+  if (getenv("QV_AUDIO_ONLY")) {
+    audiotest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
   if (getenv("QV_VRAM_ONLY")) {
     gpttest::Run();
     vctest::Run();
@@ -689,6 +697,7 @@ int main() {
   potest::EarlyFixationTick();  // R107: before any test maps GraphicsCore.dll (perception_only_test.h)
   lptest::Run();  // R107: app-parsed log phrases
   iktest::Run();  // R107: the app's ini keys, retired keys
+  audiotest::Run();  // binaural audio module
   // The cache prewarm compiles on the workers whenever they idle: off for the suite (counts of D3DCompile calls
   // would depend on timing); "shadow inst prewarm" turns it on for its own worker.
   shadowinst::g_prewarmOn = false;

@@ -93,6 +93,7 @@ bool QuiesceForExit(DWORD timeoutMs) {
   g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
   d3ds::g_stopRefresher = true;
   const bool idle = StopWorkerThreads(timeoutMs);
+  audio::Quiesce(timeoutMs);  // its thread stops; ed_sound's call sites stay on our wrappers (they only read our memory)
   g_statusSink.Detach();  // stores 0: "not running" for the app's panel
   g_dualStatusSink.Detach();
   Log("payload: quiesced for exit (%s)", idle ? "worker stopped" : "worker still busy");
@@ -112,6 +113,7 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<WorkerThread>, nullptr, 0, nullptr);
   if (!t) return 2;
   g_workerThread = t;  // joined by DcsQvPayload_Stop
+  audio::Start();      // binaural audio: its own control thread, only with [Audio] Binaural=1 (independent of the engine)
   return 0;
 }
 
@@ -171,6 +173,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   // Worker and suite out first: neither may install a hook after the
   // Shutdown calls below (bounded wait, see StopWorkerThreads).
   const bool workerIdle = StopWorkerThreads(15000);
+  audio::Stop();  // binaural audio: owned voices faded back to DCS's panning, ed_sound's call sites restored
   if (workerIdle) perfmon::Shutdown();  // the render-thread handle and our adapter reference (worker-owned)
   if (workerIdle) tplace::Shutdown();   // R39: our threads' previous affinity masks back (worker-owned)
   ftl::Shutdown(workerIdle);            // R52 timeline: OpenXR dispatch and device create slots back (no-op unless used)

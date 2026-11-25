@@ -54,6 +54,12 @@
 //   bit 51      the percent is valid
 //   bit 52      cache prewarm running ([Model] ShaderCachePrewarm: stale
 //               entries rechecked from payload start, usually in the menu)
+//   Binaural audio ([Audio], docs/BINAURAL_AUDIO.md; 0 from payloads without the audio module):
+//   bit 53      [Audio] Binaural=1
+//   bit 54      binaural audio active: hooks in, the output bound, at least one sound rendered binaurally, kill switch
+//               off
+//   bit 55      binaural audio configured but off: refused at install (ed_sound.dll differs), output not stereo, no HRTF
+//               set, or off for the session (DCS overruns, pan law mismatch); the reason is the log's "audio: off (...)"
 //   0           not running / not ready (no payload, payload swap, after stop)
 //
 // Production optimizations counted: 18 (ComputeStatus in main.cpp; the 18th
@@ -96,6 +102,9 @@ constexpr uint64_t kCockpitSymbology = 1ull << 43;   // R95: a symbology slot co
 constexpr int kWarmPercentShift = 44;                // 7 bits, 0-100
 constexpr uint64_t kWarmValid = 1ull << 51;
 constexpr uint64_t kPrewarm = 1ull << 52;
+constexpr uint64_t kAudioConfigured = 1ull << 53;   // [Audio] Binaural=1
+constexpr uint64_t kAudioActive = 1ull << 54;       // binaural audio rendering
+constexpr uint64_t kAudioOff = 1ull << 55;          // configured, but off (see the log's "audio: off (...)")
 
 // One production optimization: active = doing its work right now (a
 // recorder counts only when it drew passes from command lists since the last

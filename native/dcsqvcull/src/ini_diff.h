@@ -22,7 +22,8 @@
 //     worker.inc's retries), the governor that steps them, and the suite / benchmark keys;
 //   - [General] LowPowerPacer and LowPowerPacerTimeoutUs (the pacer is gated by the kill switch).
 // Not engine keys (a change keeps the kill switch as it is): [Color] [ColorFix] [ColorEnhanced] [Night] [VrFx]
-// [DLSS] [Perception] [DepthBoost] [Log] [Perf] [Profile] [Hotkeys] [Dev], and [General] PerceptionOnly (latched
+// [DLSS] [Perception] [DepthBoost] [Log] [Perf] [Profile] [Hotkeys] [Dev] [Audio] (binaural audio has its own kill
+// switch, toggle_audio.flag), and [General] PerceptionOnly (latched
 // at start), Diagnostics (measurement hooks; R144: a live 0 -> 1 installs them), Beeps, SigScan, PatchMode. [DLSS]: the per-view preset passes
 // through while the kill switch is off and acts only at the next mission load; a Live write of it must not turn the
 // engine back on. Unknown sections (not read by the payload) are not engine keys.
@@ -169,7 +170,7 @@ inline Class Classify(const std::wstring& sec, const std::wstring& key) {
     return kEngine;
   if (s == L"general") return In(k, {L"lowpowerpacer", L"lowpowerpacertimeoutus"}) ? kEngine : kNotEngine;
   if (In(s, {L"color", L"colorfix", L"colorenhanced", L"night", L"vrfx", L"dlss", L"perception", L"depthboost",
-             L"log", L"perf", L"profile", L"hotkeys", L"dev"}))
+             L"log", L"perf", L"profile", L"hotkeys", L"dev", L"audio"}))
     return kNotEngine;
   return kUnknown;
 }

@@ -33,6 +33,9 @@ public static class NeuralHotkeys
     public const string FarDepthDefault = "119:6";
     /// <summary>The color mode hotkey of the engine module ([Color] ModeKey): off unless chosen.</summary>
     public const string ColorModeDefault = "Off";
+    /// <summary>3D headphone audio's in-flight switch ([Hotkeys] AudioToggle): Alt+Shift+F6, free in DCS's default
+    /// bindings and outside the engine optimizations' Ctrl+Alt keys.</summary>
+    public const string AudioDefault = "117:6";
     /// <summary>Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift: the engine optimizations module's
     /// own keys (its test suite, for one, starts on Ctrl+Alt+F11 whatever else is held).</summary>
     public static bool EngineModuleKey(Hotkey key) => (key.Modifiers & 3) == 3 && key.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22;

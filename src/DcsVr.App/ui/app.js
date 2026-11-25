@@ -11,6 +11,7 @@ const pages = [
   ['framegen','Frame generation','Extra frames between the ones DCS renders, and the DCS frame limit.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
   ['pupil','Perception','Eye distance, Pupil shift, Depth boost and Far depth.','Eyes & depth','M2.5 12c2.2-3.7 5.4-5.5 9.5-5.5s7.3 1.8 9.5 5.5c-2.2 3.7-5.4 5.5-9.5 5.5S4.7 15.7 2.5 12Z M14.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z M17 3.5l2.5 2.5L17 8.5 M19.5 6h-5'],
   ['visual','Visual realism','How the image looks in the headset: color, night vision, glare, eye-focus blur and G vision. Off by default.','Color, night & G','M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z M12 3v18 M12 7h5 M12 11h7 M12 15h6'],
+  ['audio','Audio','3D headphone audio: sounds come from where they are, front, back and above. Off by default.','3D headphone audio','M4.5 14.5v-2a7.5 7.5 0 0 1 15 0v2 M4.5 14h3v6h-3Z M16.5 14h3v6h-3Z'],
   ['setup','DCS & headset','Where DCS is installed, the DCS launcher and, in VR, the headset software.','Paths & launcher','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
   ['osd','Keys & headset panel','Every in-flight key, and the status panel in the headset.','Keys & headset panel','M3 5h18v11H3Z M8 20h8 M12 16v4 M6 8.5h6 M6 11.5h9'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & files','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
@@ -41,7 +42,7 @@ const pending = new Map(), fields = [], invalid = new Set();
 const clone = value => JSON.parse(JSON.stringify(value));
 let pendingDxgiAction = null;
 const dxgiAcknowledged = dxgi => { try { return localStorage.getItem('dxgiAck:'+dxgi.sha256) === '1'; } catch { return false; } };
-const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess','resumeTobii','updateInstall','updateRollback']);
+const NO_TIMEOUT = new Set(['browse','hrtfImport','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess','resumeTobii','updateInstall','updateRollback']);
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = value => value.trim() || null;
 const num = value => String(Number(Number(value).toFixed(4)));
@@ -177,6 +178,7 @@ function sync(next) {
   state = next; if (next.version) $('appVersion').textContent = next.version.split('-')[0]; profile = clone(next.profile); dcs = next.dcs ?? ''; options = next.options ?? ''; plan = next.plan; invalid.clear();
   rememberProvider(profile);
   if (profile.frameGen !== 'Off') lastFrameGen = profile.frameGen;
+  renderHrtfOptions(); // the select must hold the profile's set before it takes its value
   fields.forEach(f => setFieldValue(f, f.path === 'dcs' ? dcs : f.path === 'options' ? options : profile[f.path]));
   // The first reply is the draft already on disk (or the applied profile); later replies are saved when they differ.
   if (savedDraftJson === null) savedDraftJson = JSON.stringify(draft()); else saveDraftSoon();
@@ -192,6 +194,7 @@ function renderPage() {
   if (page === 'pupil') { renderPupilNeeds(); renderPupil(); }
   if (page === 'foveation') renderStabilityNeeds();
   if (page === 'visual') renderVisualNeeds();
+  if (page === 'audio') { renderAudioNeeds(); renderAudio(); }
   if (page === 'guide') renderGuide();
 }
 // ---- Features: what the checklist turns on, and what follows from it -------------------------------------------
@@ -586,8 +589,11 @@ const HOTKEYS = {
   pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesPupilShift(p),name:'Pupil shift',fallback:'121:5'},
   depthBoostToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesDepthBoost(p),name:'Depth boost',fallback:'121:6'},
   farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','colorModeKey'],used:p => usesFarDepth(p),name:'Far depth',fallback:'119:6'},
-  colorModeKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => !p.desktop,name:'Color mode',fallback:'Off'}
+  colorModeKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => !p.desktop,name:'Color mode',fallback:'Off'},
+  audioToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => Boolean(p.binauralAudio),name:'3D audio',fallback:'117:6'}
 };
+// 3D audio's key is a key of its own for every other in-flight key too.
+Object.keys(HOTKEYS).filter(k => k !== 'audioToggleKey').forEach(k => HOTKEYS[k].others.push('audioToggleKey'));
 /** Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift, belong to the engine optimizations module itself. */
 const engineReserved = ([vk,mods]) => (mods & 3) === 3 && ((vk >= 0x77 && vk <= 0x7B) || vk === 33 || vk === 34);
 const isDcsDefault = k => Boolean(k && k[0] && state?.dcsDefaultKeys?.includes(keyCode(k)));
@@ -1006,6 +1012,39 @@ function buildFields() {
   field(more,'gazeDofToleranceD','Depth of focus','Distance range kept sharp around where you look, in dioptres. Larger: less blur.','number',[.1,1,.05],usesGazeDof,'D');
   field(more,'gazeDofFoveaGuardDeg','Sharp zone around gaze','Nothing within this angle of where you look is ever blurred.','number',[0,5,.5],usesGazeDof,'°');
   field(more,'gazeDofPupilMm','Pupil size','0 = automatic from the scene brightness (about 2.5 mm by day, 6.5 mm at night), else 2 to 8 mm. A larger pupil blurs more.','number',[0,8,.5],usesGazeDof,'mm');
+  // Audio page: 3D headphone audio (the engine module's [Audio]; every key applies in flight). The generic HRTF is
+  // selected out of the box; Head size is the personalisation everybody gets; a personal SOFA file is an extra.
+  const audioOn = usesBinauralAudio;
+  c = card('audioControls','<span class="tag">EXPERIMENTAL</span> 3D headphone audio',['Sounds come from where they are: front, back, above. For headphones.','Engines, wingmen, missiles and cockpit switches get a direction you can hear, behind and above you too. Radio and intercom stay as DCS plays them. Works in VR and on a monitor.']);
+  needsNote(c,'audioNeeds');
+  // Without any HRTF set (no generic one in this build, none of the pilot's own) it cannot run: greyed out, the reason
+  // above it (renderAudioNeeds); a profile that has it on can still turn it off.
+  field(c,'binauralAudio','3D headphone audio',['Replaces DCS\'s left and right panning with 3D sound.','Distance, doppler and the canopy stay DCS\'s own. It uses a little CPU on DCS\'s sound thread, not the GPU. Its key on the Keys & headset panel page switches it off and on in flight, to compare.'],'toggle',null,p => state?.audioUsable !== false || Boolean(p.binauralAudio));
+  field(c,'headCircumferenceCm','Head size',['Measure around your head, just above the eyebrows and ears.','A tape measure or a piece of string will do. It sets how far apart your ears sound: 57 cm is the average.'],'number',[48,66,.5],audioOn,'cm');
+  { const row = document.createElement('div'); row.className = 'inline-actions head-presets'; row.id = 'headPresets';
+    row.innerHTML = [['Small',54],['Medium',57],['Large',60]].map(([t,v]) => `<button type="button" class="button quiet" data-head="${v}" aria-label="Head size ${t}, ${v} cm">${t} · ${v} cm</button>`).join('');
+    $('setting-headCircumferenceCm').append(row);
+    row.addEventListener('click',e => { const b = e.target.closest('[data-head]'); if (!b || b.disabled || busy) return; const f = fields.find(x => x.path === 'headCircumferenceCm');
+      f.input.value = b.dataset.head; f.input.dispatchEvent(new Event('input',{bubbles:true})); }); }
+  field(c,'binauralHrtf','Ears (HRTF)',['Generic suits most people. You can import your own measurement.','An HRTF is how your head and ears change a sound from each direction. Generic is a measured dummy head (Neumann KU100, SADIE II, University of York). Your own comes as a SOFA file from an ear scan or a measurement.'],'select',[['default','Generic (KU100) · default']],audioOn);
+  { const row = document.createElement('div'); row.className = 'inline-actions'; row.id = 'hrtfActions';
+    row.innerHTML = '<button type="button" class="button secondary" id="hrtfImport">Import SOFA…</button><button type="button" class="button quiet" id="hrtfRemove">Remove</button>';
+    const form = document.createElement('form'); form.id = 'hrtfNameForm'; form.className = 'preset-form'; form.hidden = true;
+    form.innerHTML = '<label class="fine" for="hrtfNameInput" id="hrtfNameLabel">That name is taken. Name:</label><input id="hrtfNameInput" type="text" maxlength="64" spellcheck="false" autocomplete="off"><button class="button primary" type="submit">Import</button><button class="button quiet" type="button" id="hrtfNameCancel">Cancel</button>';
+    const report = document.createElement('div'); report.id = 'hrtfReport'; report.className = 'pimax-note'; report.hidden = true; report.setAttribute('role','status');
+    $('setting-binauralHrtf').append(row, form, report);
+    $('hrtfImport').addEventListener('click',() => importHrtf());
+    $('hrtfRemove').addEventListener('click',() => removeHrtf());
+    form.addEventListener('submit',e => { e.preventDefault(); importHrtf($('hrtfNameInput').value.trim()); });
+    $('hrtfNameCancel').addEventListener('click',() => { form.hidden = true; }); }
+  field(c,'binauralLateHeadTracking','Follow the head between frames',['Sounds stay in place when you turn your head fast.','The headset\'s head position is read at audio rate, from the pupil shift layer, which Launch DCS installs for it. VR only.'],'toggle',null,p => audioOn(p) && !p.desktop && state?.headPoseLayer !== false);
+  more = disclosure(c,'Advanced','The defaults suit most pilots.',() => `${shown('binauralMaxObjects')} sounds · ${shown('binauralLevelTrimDb')} · CPU ${shown('binauralCpuBudgetPercent')}`);
+  field(more,'binauralNearField','Close sounds per ear','Switches and voices in the cockpit sound close, each ear on its own.','toggle',null,audioOn);
+  field(more,'binauralMaxObjects','Most 3D sounds','The loudest sounds at once in 3D. The rest keep DCS\'s panning.','number',[8,64,1],audioOn,'');
+  field(more,'binauralLevelTrimDb','3D sound level','Louder or softer 3D sounds against the rest of DCS\'s sound. 0 = as DCS.','number',[-12,6,.5],audioOn,'dB');
+  field(more,'binauralCpuBudgetPercent','CPU budget','How much of each sound block 3D audio may use. If it needs more, it renders fewer sounds in 3D.','number',[5,50,1],audioOn,'%');
+  more = disclosure(c,'Diagnostics','For a report.',p => p.binauralLogVoices ? 'Sound log on' : 'Off');
+  field(more,'binauralLogVoices','Sound log','Writes every 3D sound to a file next to the engine module\'s log. Leave it off unless asked.','toggle',null,audioOn);
   // The in-headset panel (OFXR): with frame generation always; without it OFXR is loaded only to draw the panel.
   const panelOn = headsetPanelWanted;
   c = card('panelControls','Headset panel (OSD)',['A small status panel in the headset. Its key shows or hides it in flight.','It shows FPS, DLSS 5, Engine Optimizations, Pupil shift, Depth boost and Far depth.']);
@@ -1026,6 +1065,7 @@ function buildFields() {
   field(c,'depthBoostToggleKey','Depth boost','Off and on, to compare. Beeps: low = off, high = on.','hotkey',null,HOTKEYS.depthBoostToggleKey.used,'',vrKey);
   field(c,'farDepthToggleKey','Far depth','Off and on, to compare. One low beep off, two high beeps on.','hotkey',null,HOTKEYS.farDepthToggleKey.used,'',vrKey);
   field(c,'colorModeKey','Color mode','Cycles Off, Fix and Enhanced (Visual realism page). Beeps: 1, 2 or 3.','hotkey',null,HOTKEYS.colorModeKey.used,'',vrKey);
+  field(c,'audioToggleKey','3D audio','Off and on, to compare with DCS\'s own sound (Audio page).','hotkey',null,HOTKEYS.audioToggleKey.used);
   // The module's own keys apply to every key above, so the note sits under the card heading, not under the last key.
   { const fixed = document.createElement('p'); fixed.className = 'fine keys-reserved'; fixed.textContent = 'Not available: Ctrl+Alt with F8 to F12, Page Up or Page Down (used by Engine Optimizations).'; c.querySelector('.card-heading').after(fixed); }
   // The headset software this profile uses and what runs now; the Sboys driver (Sboys route only), then the override.
@@ -1089,9 +1129,11 @@ function buildFields() {
   because(f => f.path.startsWith('glare'),p => !enhancedOn(p) ? null : 'Turn on Light glare to change these.');
   because(f => f.condition === usesGazeDof,p => !layerGaze(p) ? null : 'Turn on Eye-focus blur to change these.');
   because(f => f.condition === gVisionOn,'Turn on G vision to change these.');
+  because(at('binauralLateHeadTracking'),p => !audioOn(p) ? 'Turn on 3D headphone audio to change this.' : p.desktop ? 'In VR only. On a monitor, sounds follow DCS\'s own head position.' : 'Needs the pupil shift layer, which this DCS Control build does not have.');
+  because(f => f.condition === audioOn,'Turn on 3D headphone audio to change these.');
   because(at('headsetPanel'),'In VR only.');
   because(f => f.condition === panelOn,p => p.desktop ? 'In VR only.' : 'Turn on the headset panel, or Frame generation, to change these.');
-  const keyFeature = {diagnosticOverlayKey:'the headset panel',engineToggleKey:'Engine Optimizations',neuralToggleKey:'DLSS 5',pupilShiftToggleKey:'Pupil shift',farDepthToggleKey:'Far depth',depthBoostToggleKey:'Depth boost'};
+  const keyFeature = {diagnosticOverlayKey:'the headset panel',engineToggleKey:'Engine Optimizations',neuralToggleKey:'DLSS 5',pupilShiftToggleKey:'Pupil shift',farDepthToggleKey:'Far depth',depthBoostToggleKey:'Depth boost',audioToggleKey:'3D headphone audio'};
   fields.filter(f => f.type === 'hotkey' && !f.why).forEach(f => f.why = keyFeature[f.path] ? `Used when ${keyFeature[f.path]} is on.` : 'Used in VR only.');
 }
 function buildFeatureList() {
@@ -1115,6 +1157,7 @@ function navigate(id) {
   if (id === 'pupil' && profile) { renderPupilNeeds(); refreshPupil(); }
   if (id === 'foveation' && profile) renderStabilityNeeds();
   if (id === 'visual' && profile) renderVisualNeeds();
+  if (id === 'audio' && profile) { renderAudioNeeds(); refreshAudio(); }
   if (id === 'support' && profile) refreshDlssFocus();
   if (id === 'guide') renderGuide();
   if (id === 'overview' && profile) loadFlight();
@@ -1274,7 +1317,12 @@ const depthMax = p => p.depthBoostMode === 'Enhanced' ? p.depthBoostMax : p.dept
 /** The strength the layer reaches with an eye distance of mm (1 when it is unknown): with the dual camera the world's
  *  eye distance is limited only by the selected strength, the cockpit keeps the real one. */
 const depthMaxAt = (p, mm) => mm > 1 ? depthMax(p) : 1;
-const usesPerceptionLayer = p => usesPupilShift(p) || usesDepthBoost(p) || usesGazePublish(p) || usesPeripheryDlssPreset(p);
+/** The layer is installed for its features, and for 3D audio's head pose (VrProfile.UsesPerceptionLayer, UsesHeadPosePublish). */
+const usesPerceptionLayer = p => usesPupilShift(p) || usesDepthBoost(p) || usesGazePublish(p) || usesPeripheryDlssPreset(p) || usesHeadPosePublish(p);
+/** 3D headphone audio runs, in VR or on a monitor (VrProfile.UsesBinauralAudio). */
+const usesBinauralAudio = p => Boolean(p.binauralAudio);
+/** The pupil shift layer publishes the head pose for 3D audio's late head tracking: VR only (VrProfile.UsesHeadPosePublish). */
+const usesHeadPosePublish = p => Boolean(usesBinauralAudio(p) && p.binauralLateHeadTracking && !p.desktop);
 /** The Periphery DLSS preset runs (VrProfile.UsesPeripheryDlssPreset): a VR flight with Quad Views-Foveated and Engine
  *  Optimizations. The pupil shift layer then hides the driver's forced preset from DLSS, so it is installed for it too. */
 const usesPeripheryDlssPreset = p => Boolean(['E','F','K','M'].includes(p.peripheryDlssPreset) && !p.desktop && p.quadViews === 'QuadViewsFoveated' && p.engineOptimizations);
@@ -1382,6 +1430,119 @@ function renderPupil() {
   box.querySelectorAll('details.report-details').forEach((d,i) => { d.open = Boolean(open[i]); });
   $('pupilLog').disabled = busy || !s.logPath;
 }
+// ---- 3D headphone audio --------------------------------------------------------------------------------------------
+/** The HRTF choices: the generic set and the pilot's own (state.hrtfSets). A set the profile names that is gone stays
+ *  listed as missing, so the profile keeps it (Launch DCS then uses the generic one, and Checks says so). */
+function renderHrtfOptions() {
+  const f = fields.find(x => x.path === 'binauralHrtf'); if (!f || !profile) return;
+  const sets = state?.hrtfSets || [], value = profile.binauralHrtf || 'default';
+  const options = [['default','Generic (KU100) · default'], ...sets.map(s => [s.name, s.title && s.title !== s.name ? `${s.name} · ${s.title}` : s.name])];
+  if (!options.some(([v]) => v.toLowerCase() === value.toLowerCase())) options.push([value, value+' · missing']);
+  const html = options.map(([v,t]) => `<option value="${escape(v)}">${escape(t)}</option>`).join('');
+  if (f.input.dataset.options !== html) { f.input.dataset.options = html; f.input.innerHTML = html; }
+  f.input.value = options.find(([v]) => v.toLowerCase() === value.toLowerCase())[0];
+  const personal = sets.find(s => s.name.toLowerCase() === value.toLowerCase());
+  // Import needs this installation's SOFA converter; it is also the way in when 3D audio has no set at all yet.
+  const canImport = state?.sofaImport !== false;
+  $('hrtfImport').disabled = busy || !canImport || !(profile.binauralAudio || state?.audioUsable === false);
+  $('hrtfImport').title = canImport ? '' : 'This DCS Control cannot convert SOFA files yet.';
+  $('hrtfRemove').hidden = !personal; $('hrtfRemove').disabled = busy || !personal;
+}
+/** What the chosen set is, after an import or for the set selected: the conversion report in plain words. */
+function hrtfReportHtml(s, fresh) {
+  // The fitted radius is a Woodworth fit of the measured onsets (larger than the head itself): shown as the largest
+  // time difference between the ears it stands for, not as a head size.
+  const itd = (Number(s.headRadiusMm) / 1000 / 343 * (Math.PI / 2 + 1) * 1000).toFixed(2);
+  return `<p><b>${escape(fresh ? `Imported "${s.name}"` : s.title || s.name)}</b>: ${s.directions} measured directions, ${(s.sampleRate/1000).toLocaleString('en-US')} kHz`
+    + `${s.coverage != null ? `, ${Math.round(s.coverage*100)}% of the sphere covered` : ''}, sound reaches the two ears up to ${itd} ms apart.</p>`
+    + (s.warnings?.length ? `<ul>${s.warnings.map(w => `<li>${escape(w)}</li>`).join('')}</ul>` : '<p>No warnings.</p>');
+}
+function renderHrtfReport() {
+  const box = $('hrtfReport'); if (!box || !profile) return;
+  // An import's report stays while its set is the one chosen.
+  if (box.dataset.fresh && box.dataset.fresh === profile.binauralHrtf && profile.binauralAudio) return;
+  delete box.dataset.fresh;
+  const s = (state?.hrtfSets || []).find(x => x.name.toLowerCase() === String(profile.binauralHrtf).toLowerCase());
+  box.hidden = !s || !profile.binauralAudio; box.classList.toggle('warn', Boolean(s?.warnings?.length));
+  const html = s ? hrtfReportHtml(s, false) : '';
+  if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
+}
+/** Imports a SOFA file: the app picks it and converts it once; a name already taken asks for another here. */
+async function importHrtf(name) {
+  if (busy) return; setBusy(true);
+  const form = $('hrtfNameForm'), box = $('hrtfReport');
+  try {
+    // The offline verification has no file dialog: its smoke test names a fixture file.
+    const data = name ? {name} : hrtfFixture ? {fixture:hrtfFixture} : {};
+    const r = await request('hrtfImport', data);
+    if (r.cancelled) { form.hidden = true; return; }
+    if (r.hrtfSets) state.hrtfSets = r.hrtfSets;
+    if (r.needName) { form.hidden = false; $('hrtfNameLabel').textContent = r.invalid ? `${r.invalid} Name for this one:` : `You already have "${r.taken}". Name for this one:`; $('hrtfNameInput').value = r.suggested; $('hrtfNameInput').focus(); return; }
+    form.hidden = true;
+    if (r.refused) { box.hidden = false; box.classList.add('warn'); box.dataset.fresh = profile.binauralHrtf; box.dataset.html = ''; box.innerHTML = `<p>${escape(r.refused)}</p>`; $('status').textContent = 'The SOFA file was not imported.'; return; }
+    const f = fields.find(x => x.path === 'binauralHrtf');
+    profile.binauralHrtf = r.imported.name; renderHrtfOptions(); f.input.dispatchEvent(new Event('change',{bubbles:true}));
+    box.dataset.fresh = r.imported.name; box.dataset.html = ''; box.hidden = false; box.classList.toggle('warn', Boolean(r.imported.warnings?.length)); box.innerHTML = hrtfReportHtml(r.imported, true);
+    $('status').textContent = r.message;
+  } catch (error) { showError(error); } finally { setBusy(false); updateControls(); }
+}
+async function removeHrtf() {
+  const name = profile?.binauralHrtf; if (busy || !name || name === 'default') return;
+  setBusy(true);
+  try {
+    const r = await request('hrtfDelete', {name}); state.hrtfSets = r.hrtfSets;
+    profile.binauralHrtf = 'default'; renderHrtfOptions(); fields.find(x => x.path === 'binauralHrtf').input.dispatchEvent(new Event('change',{bubbles:true}));
+    $('status').textContent = r.message;
+  } catch (error) { showError(error); } finally { setBusy(false); updateControls(); }
+}
+let hrtfFixture = null;
+/** What 3D audio still needs, at the top of its card: a set that is gone, or the layer for the head. */
+function renderAudioNeeds() {
+  if (!profile) return;
+  const name = String(profile.binauralHrtf || 'default'), missing = name.toLowerCase() !== 'default' && !(state?.hrtfSets || []).some(s => s.name.toLowerCase() === name.toLowerCase());
+  const unusable = state?.audioUsable === false ? [`${state.audioUnusableReason || 'There is no HRTF set to render with.'} ${state?.sofaImport === false ? 'It comes with a later DCS Control.' : 'Import your own SOFA file to use it.'}`] : null;
+  showNeeds('audioNeeds', unusable || (!profile.binauralAudio ? null : missing ? [`Your HRTF "${name}" is missing, so the generic one is used. Import the SOFA file again, or choose Generic.`,['audioHrtfFix','binauralHrtf','Choose HRTF']] : null), false);
+}
+let audioTimer, audioSequence = 0, audioStatus = null;
+/** The module's audio lines, read again every 5 s while the page is open. */
+async function refreshAudio() {
+  clearTimeout(audioTimer);
+  const mine = ++audioSequence;
+  try { const result = await request('audioStatus'); if (mine === audioSequence) { audioStatus = result; renderAudio(); } }
+  catch (error) { if (mine === audioSequence) $('audioStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
+  if (page === 'audio' && mine === audioSequence) audioTimer = setTimeout(refreshAudio, 5000);
+}
+/** DCS's speaker layout ids (options.lua sound.main_layout) as its Audio options name them (Binaural.LayoutName). */
+const LAYOUT_NAMES = {'':'Auto', stereo:'Stereo', mono:'Mono', stereo_2_1:'2.1', quadraphonic:'Quadraphonic', suround_5_1:'5.1', surround_5_1:'5.1', suround_7_1:'7.1', surround_7_1:'7.1', spatial_8_1_4_4:'Spatial 8.1.4.4'};
+const AUDIO_STATE = {'not-installed':['Not installed',''], disabled:['Off in this profile',''], unavailable:['Not available',''], waiting:['Ready: starts with DCS',''], running:['Running','loaded'], 'switched-off':['Switched off',''], off:['Off','failed']};
+function renderAudio() {
+  const box = $('audioStatus'); if (!box) return;
+  const r = audioStatus, s = r?.status;
+  if (!r) { box.innerHTML = '<p class="fine">Reading the status…</p>'; $('audioToggleNow').disabled = true; return; }
+  const [label, tone] = s ? AUDIO_STATE[s.state] || [s.state,''] : ['Unknown',''];
+  const pending = profile && state?.audioUsable !== false && Boolean(profile.binauralAudio) !== Boolean(r.applied) ? `<p class="fine">${profile.binauralAudio ? 'Launch DCS turns it on with this profile.' : 'Launch DCS turns it off with this profile.'}</p>` : '';
+  const key = parseKey(profile?.audioToggleKey ?? HOTKEYS.audioToggleKey.fallback), keyText = key && key[0] ? keyLabel(key) : null;
+  const layout = state?.inventory?.dcsSettings?.['sound.main_layout'], layoutValue = String(layout ?? '').replace(/"/g,'').trim().toLowerCase();
+  const rows = s && ['running','switched-off'].includes(s.state) ? [
+    ['Sounds in 3D', s.sounds != null ? String(s.sounds) : '—'], ['CPU per sound block (p99)', s.costMs != null ? s.costMs.toFixed(2)+' ms' : '—'],
+    ['Ears (HRTF)', s.hrtf ? (s.hrtf === 'default' ? 'Generic (KU100)' : s.hrtf === 'personal' ? 'Your own' : s.hrtf) : '—'], ['Follows the head between frames', s.headTracking == null ? '—' : s.headTracking ? 'Yes' : 'No'],
+    ['Fewer sounds to stay in budget', s.backoffs ? `${s.backoffs} time${s.backoffs === 1 ? '' : 's'}${s.maxObjectsNow ? ', down to '+s.maxObjectsNow : ''}` : 'No'],
+  ] : [];
+  const lines = s?.lines?.length ? `<details class="report-details"><summary>Log lines</summary><pre class="log-lines">${escape(s.lines.join('\n'))}</pre></details>` : '';
+  const open = [...box.querySelectorAll('details.report-details')].map(d => d.open);
+  box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(s?.summary || 'Select DCS\'s options.lua first.')}</span></div>${pending}`
+    + (profile?.binauralAudio && layout !== undefined && layoutValue !== 'stereo' ? `<p class="pimax-note">DCS's speaker layout is ${escape(LAYOUT_NAMES[layoutValue] ?? layoutValue)}. Launch DCS sets it to Stereo while 3D audio is on; Back to stock DCS puts yours back.</p>` : '')
+    + (s?.hrtfFallback ? `<p class="pimax-note">Your HRTF${s.hrtfFallback === 'personal' ? '' : ` "${escape(s.hrtfFallback)}"`} could not be used (${escape(s.hrtfFallbackReason || 'refused')}), so the generic one played. Import the SOFA file again.</p>` : '')
+    + statusRows(rows, []) + lines
+    + `<p class="fine">To compare: ${keyText ? `press <kbd>${escape(keyText)}</kbd> in flight` : 'set a key on the Keys & headset panel page'}, or use the button below. Turn your head while a sound plays behind you.</p>`;
+  box.querySelectorAll('details.report-details').forEach((d,i) => { d.open = Boolean(open[i]); });
+  $('audioToggleNow').disabled = busy || !r.dcsRunning || !r.applied;
+}
+async function toggleAudioNow() {
+  if (busy) return;
+  try { const result = await request('audioToggle'); $('status').textContent = result.message; refreshAudio(); }
+  catch (error) { showError(error); }
+}
 // ---- Diagnostics ---------------------------------------------------------------------------------------------------
 let dlssFocusSequence = 0;
 const FOCUS_STATE = {applied:['Applied','loaded'], 'not-applied':['Not applied','failed'], 'no-dlss':['No DLSS frames','failed'], 'no-session':['No session','']};
@@ -1481,6 +1642,9 @@ function updateControls() {
   document.querySelectorAll('[data-dev]').forEach(e => { e.hidden = !profile.developerOptions; });
   { const observe = $('seg-boostPrefetch')?.querySelector('[data-value="Observe"]'); if (observe) observe.hidden = !profile.developerOptions; }
   if ($('colorTuneTip')) $('colorTuneTip').hidden = !profile || profile.desktop || profile.colorMode !== 'Off';
+  // 3D audio: the HRTF choices, the chosen set's report, what it still needs; Small, Medium and Large follow the switch.
+  renderHrtfOptions(); renderHrtfReport(); renderAudioNeeds();
+  document.querySelectorAll('#headPresets [data-head]').forEach(b => { b.disabled = busy || !profile.binauralAudio; b.setAttribute('aria-pressed', String(Number(b.dataset.head) === Number(profile.headCircumferenceCm))); });
   // With Optimizations only there is no headset panel; the Keys & headset panel page keeps the keys that work on a monitor.
   $('panelControls').hidden = Boolean(profile.desktop);
   // Pimax native exists only on the Pimax route and cannot host the focus adapter DLSS needs.
@@ -1536,7 +1700,7 @@ function updateControls() {
   const names = {};
   const tile = ([target,label,active,title,detail]) => { if (!active) { title = names[target] || title; detail = String(detail).replace(/^Off · /,''); } else detail = String(detail).replace(/^(Bundled|Pimax native|NVIDIA|FidelityFX) · /,''); return `<button type="button" class="stage ${active ? 'on' : 'off'}" data-page="${target}" aria-label="${escape(title)}: ${active ? 'on' : 'off'}. Open settings"><span>${label}<em>${active ? 'ON' : 'OFF'}</em></span><b>${escape(title)}</b><small>${escape(detail)}</small></button>`; };
   // Then, in VR, what the checklist does not show (as the "Also on" line under it): Perception, Visual realism, the headset panel.
-  const look = [['pupil','EYES &amp; DEPTH','Perception',g => g.section === 'perception','Depth boost, Far depth, Pupil shift'],['visual','COLOR, NIGHT &amp; G','Visual realism',g => g.section === 'visual','Color, night vision, G vision'],['osd','HEADSET PANEL','Keys & headset panel',g => g.page === 'osd','Status panel in the headset']].map(([target,label,name,test,offer]) => {
+  const look = [['pupil','EYES &amp; DEPTH','Perception',g => g.section === 'perception','Depth boost, Far depth, Pupil shift'],['visual','COLOR, NIGHT &amp; G','Visual realism',g => g.section === 'visual','Color, night vision, G vision'],['audio','3D AUDIO','Audio',g => g.section === 'audio','Sound from all around'],['osd','HEADSET PANEL','Keys & headset panel',g => g.page === 'osd','Status panel in the headset']].map(([target,label,name,test,offer]) => {
     const list = FEATURE_GUIDE.filter(g => test(g) && g.on(profile)).map(g => g.name === 'Color modes' ? 'Color: '+profile.colorMode : g.name);
     return [target,label,list.length > 0,name,list.length ? list.join(' · ') : offer];
   });
@@ -1593,12 +1757,12 @@ function renderHeadsetSoftware() {
  *  any of their features is). */
 function renderNavState() {
   const on = featureState(profile), any = section => FEATURE_GUIDE.some(g => g.section === section && g.on(profile));
-  const states = {engine:on.engine, boost:on.boost, foveation:on.quad, dlss:on.dlss, framegen:on.framegen, pupil:any('perception'), visual:any('visual')};
+  const states = {engine:on.engine, boost:on.boost, foveation:on.quad, dlss:on.dlss, framegen:on.framegen, pupil:any('perception'), visual:any('visual'), audio:any('audio')};
   Object.entries(states).forEach(([id,active]) => { const tag = $('navState-'+id); tag.hidden = false; tag.textContent = active ? 'ON' : 'OFF'; tag.classList.toggle('on',Boolean(active)); $('nav-'+id).setAttribute('aria-label', pages.find(p => p[0] === id)[1]+(active ? ', on' : ', off')); });
 }
 /** Under the checklist: the Perception, Visual realism and headset panel features that apply at launch, each opening its page. */
 function renderAlsoOn() {
-  const on = FEATURE_GUIDE.filter(g => (['perception','visual'].includes(g.section) || g.page === 'osd') && g.on(profile));
+  const on = FEATURE_GUIDE.filter(g => (['perception','visual','audio'].includes(g.section) || g.page === 'osd') && g.on(profile));
   const name = g => g.name === 'Color modes' ? 'Color '+profile.colorMode : g.name;
   $('alsoOn').innerHTML = on.length ? 'Also on: '+on.map(g => `<button type="button" class="link-button" data-open-page="${g.page}" title="Open ${escape(g.name)} settings">${escape(name(g))}</button>`).join(', ') : '';
   // In VR the "In the headset" tiles right below say the same, with ON and OFF: the line would only repeat them.
@@ -1771,6 +1935,15 @@ const CHECK_INFO = {
   'nvidia-mfaa':['NVIDIA MFAA',null], 'eye-distance':['Eye distance',{reveal:'eyeDistanceMm',label:'Open'}],
   'smooth-cursor-images':['Smooth mouse cursor',{reveal:'smoothCursor',label:'Open'}], 'fps-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'dcs-vsync':['Desktop VSync',{reveal:'disableDcsVSync',label:'Open'}],
   'hotkey-conflict':['In-flight keys',{reveal:'diagnosticOverlayKey',label:'Change'}],
+  // 3D headphone audio (ProfileValidation and Readiness: the module's ranges, its key, DCS's sound output, the log).
+  'audio-hrtf':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}], 'audio-hrtf-missing':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}],
+  'audio-head-size':['Head size',{reveal:'headCircumferenceCm',label:'Open'}], 'audio-max-sounds':['Most 3D sounds',{reveal:'binauralMaxObjects',label:'Open'}],
+  'audio-level':['3D sound level',{reveal:'binauralLevelTrimDb',label:'Open'}], 'audio-cpu':['3D audio CPU budget',{reveal:'binauralCpuBudgetPercent',label:'Open'}],
+  'audio-contexts':['3D audio contexts',null], 'audio-hotkey':['3D audio key',{reveal:'audioToggleKey',label:'Change'}], 'audio-hotkey-dcs':['3D audio key',{reveal:'audioToggleKey',label:'Change'}],
+  'audio-layout':['DCS speaker layout',{page:'audio',label:'Open'}], 'audio-spatial':['Windows spatial sound in DCS',{page:'audio',label:'Open'}],
+  'audio-head-pose':['Follow the head between frames',{reveal:'binauralLateHeadTracking',label:'Open'}], 'audio-status':['3D headphone audio',{page:'audio',label:'Open'}],
+  'audio-unavailable':['3D headphone audio',{page:'audio',label:'Open'}], 'audio-hrtf-refused':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}],
+  'audio-backoff':['3D audio CPU budget',{reveal:'binauralCpuBudgetPercent',label:'Open'}],
   'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}], 'quad-vertical-offset':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}], 'quad-offset-gaze':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}],
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],
   'quad-focus':['Focus adapter',null], 'pimax-native-replaced':['Quad Views provider',null], 'fovea-source':['Focus area source',{reveal:'foveaSource',label:'Open'}],
@@ -1802,7 +1975,7 @@ const CHECK_INFO = {
 };
 /** A key conflict opens the key its message names first (ProfileValidation's wording). */
 function conflictInfo(text) {
-  const key = [['Far depth','farDepthToggleKey'],['color mode key','colorModeKey'],['Depth boost switch','depthBoostToggleKey'],['Pupil shift switch','pupilShiftToggleKey'],
+  const key = [['3D audio switch','audioToggleKey'],['Far depth','farDepthToggleKey'],['color mode key','colorModeKey'],['Depth boost switch','depthBoostToggleKey'],['Pupil shift switch','pupilShiftToggleKey'],
     ['Engine Optimizations switch','engineToggleKey'],['DLSS 5 toggle','neuralToggleKey']].find(([name]) => String(text).startsWith('The '+name))?.[1] || 'diagnosticOverlayKey';
   return ['In-flight keys',{reveal:key,label:'Change'}];
 }
@@ -1951,6 +2124,13 @@ function renderFlight() {
       e.warmupSeconds != null ? `warm-up ${span(e.warmupSeconds)}${e.warmupUnfinished ? ', another still running at exit' : ''}` : e.warmupUnfinished ? 'warm-up not finished' : null].filter(Boolean);
     rows.push(['Engine Optimizations',mostlyOff ? 'Off in flight' : count,notes.join(' · ') || 'All flight',mostlyOff ? 'off' : e.turnedOff.length ? true : 'ok']);
   }
+  // 3D headphone audio (LastFlight.ParseAudio): on with its sounds and cost, off with the module's reason (amber), or
+  // switched off with its key (grey).
+  if (f.audio) {
+    const a = f.audio, running = a.state === 'running';
+    rows.push(['3D audio',running ? 'On' : a.state === 'switched-off' ? 'Switched off' : 'Off',running ? [a.sounds != null ? `${a.sounds} sounds` : null, a.costMs != null ? `${fmt(a.costMs,2)} ms p99` : null, a.backoffs ? `fewer sounds ${a.backoffs}× to stay in its CPU budget` : null].filter(Boolean).join(' · ') || 'All flight'
+      : a.state === 'switched-off' ? (a.switchedOffBy === 'settings' ? 'In the settings; DCS\'s own sound since' : 'With its key; DCS\'s own sound since') : `${a.reason || 'see the module log'}; DCS's own sound played`, running ? (a.backoffs ? true : 'ok') : a.state === 'switched-off' ? 'off' : true]);
+  }
   // A frame rate held by the headset software (motion smoothing at half the refresh rate, for example): CPU and GPU
   // have headroom, so no setting here can raise it. Not with frame generation (DCS runs at a fraction of the refresh
   // rate on purpose) and not at the full refresh rate (divider 1).
@@ -2050,6 +2230,7 @@ const GUIDE_SECTIONS = [
   ['vr','VR','Pimax, Sboys (SteamVR) and Quest 3 through Virtual Desktop.'],
   ['perception','Perception','Experimental: new, off by default, and still being tuned. Feedback welcome.'],
   ['visual','Visual realism','Off by default. The color mode key switches color modes in flight.'],
+  ['audio','Audio','Experimental, off by default. For headphones, in VR or on a monitor.'],
   ['safety','Safety net','']
 ];
 const FEATURE_GUIDE = [
@@ -2145,6 +2326,12 @@ const FEATURE_GUIDE = [
    gives:'Under high G, color fades and vision closes in toward where you look, then goes black. Red-out under negative G.',
    expect:'Works together with DCS\'s own G effect without doubling it.',
    cost:'About 0.04 ms, only while G is high.'},
+  {section:'audio', page:'audio', name:'3D headphone audio', impact:'Hear direction', on:usesBinauralAudio,
+   gives:'Sounds come from where they are: in front, behind, above, close in the cockpit.',
+   expect:'Wingmen, rotors, missiles and switches you can place without looking. Radio and intercom stay as they are.',
+   cost:'A little CPU on DCS\'s sound thread; no GPU.',
+   needs:'Headphones. Works with the generic ears; your own SOFA file and head size make it more exact.',
+   keyPath:'audioToggleKey', keyText:'off and on, to compare'},
   {section:'safety', page:'recovery', name:'Back to stock DCS', impact:'Undo all', on:() => false,
    gives:'Puts back every file and setting DCS Control changed, in one step.',
    expect:'DCS exactly as it was before. Your profiles stay, so Launch DCS applies them again.',
@@ -2439,6 +2626,8 @@ async function initialize() {
   $('engineReport').addEventListener('click',() => engineAction('engineOpen',{target:'report'}));
   $('engineLog').addEventListener('click',() => engineAction('engineOpen',{target:'log'}));
   $('refreshPupil').addEventListener('click',() => refreshPupil());
+  $('refreshAudio').addEventListener('click',() => refreshAudio());
+  $('audioToggleNow').addEventListener('click',() => toggleAudioNow());
   $('refreshDlssFocus').addEventListener('click',() => refreshDlssFocus());
   $('diagnosticPackage').addEventListener('click',() => run('diagnosticPackage').catch(()=>{}));
   $('pupilLog').addEventListener('click',() => request('pupilOpenLog').catch(showError));
@@ -2457,7 +2646,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,pollDcs,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,goBack,renderUpdates,set updates(v){updates = v;},setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,HIDE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,pollDcs,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,goBack,renderUpdates,set updates(v){updates = v;},setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},set hrtfFixture(v){hrtfFixture = v;},importHrtf,removeHrtf,refreshAudio,get audioStatus(){return audioStatus;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,HIDE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;

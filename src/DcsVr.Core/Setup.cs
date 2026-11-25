@@ -70,6 +70,28 @@ public static class Readiness
         if (profile.UsesEngineModule && inventory.OptionsPath is { } engineOptions && File.Exists(engineOptions)
             && EngineOptimizations.Read(engineOptions, null, inventory.DcsRunning).VersionWarnings is { Count: > 0 } offOnThisBuild)
             Add("engine-dcs-version", CheckState.Warning, "DCS version", "At the last DCS start: " + string.Join(" ", offOnThisBuild));
+        // 3D headphone audio: the set picked is still in the library, the head pose has its layer, and what the module said
+        // at the last DCS start (it stays off, with DCS's own sound, on anything unexpected).
+        if (profile.UsesBinauralAudio && !service.BinauralAudioUsable())
+            Add("audio-unavailable", CheckState.Warning, "3D headphone audio", Binaural.UnusableReason + " Launch DCS leaves 3D audio off.");
+        else if (profile.UsesBinauralAudio)
+        {
+            if (!profile.BinauralHrtf.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && Binaural.IsValidHrtfName(profile.BinauralHrtf) && !service.Hrtf.Contains(profile.BinauralHrtf))
+                Add("audio-hrtf-missing", CheckState.Warning, "3D headphone audio", $"Your HRTF set \"{profile.BinauralHrtf}\" is missing, so the generic one is used. Import the SOFA file again on the Audio page, or choose Generic.");
+            if (profile.UsesHeadPosePublish && !File.Exists(Path.Combine(service.DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll")))
+                Add("audio-head-pose", CheckState.Manual, "3D headphone audio", "Follow the head between frames needs the pupil shift layer, which this DCS Control build does not have. Sounds follow DCS's own head position.");
+            // Only about a DCS start that had it on (the applied profile's), never one from before it was turned on.
+            if (inventory.OptionsPath is { } audioOptions && File.Exists(audioOptions) && service.ReadAppliedProfile()?.Profile.ForLaunch().UsesBinauralAudio == true
+                && Binaural.ReadStatus(audioOptions, inventory.DcsRunning) is { } audio)
+            {
+                if (audio.State == "off" && audio.Reason is { } reason)
+                    Add("audio-status", CheckState.Warning, "3D headphone audio", $"At the last DCS start it stayed off: {reason}. DCS's own sound played.");
+                if (audio.HrtfFallback is { } refused)
+                    Add("audio-hrtf-refused", CheckState.Warning, "3D headphone audio", $"At the last DCS start your HRTF set{(refused == Binaural.ModulePersonalSet ? "" : $" \"{refused}\"")} could not be used ({audio.HrtfFallbackReason}), so the generic one played. Import the SOFA file again on the Audio page.");
+                else if (audio.Backoffs > 0)
+                    Add("audio-backoff", CheckState.Manual, "3D headphone audio", $"At the last DCS start it rendered fewer sounds in 3D to stay within its CPU budget{(audio.MaxObjectsNow is { } n ? $" (down to {n})" : "")}. Raise CPU budget on the Audio page if your CPU has room, or lower Most 3D sounds.");
+            }
+        }
         if (!profile.Desktop && inventory.Layers.Any(l => l.Enabled && VectorXr.Is(l)))
             Add("vectorxr", CheckState.Pass, "VectorXR", "Installed. Launch DCS keeps it off in DCS so it doesn't stack with these settings. Started from Steam or a shortcut, DCS still loads it; other games keep it.");
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();

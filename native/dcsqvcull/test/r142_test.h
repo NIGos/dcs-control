@@ -93,7 +93,7 @@ void Classes() {
     (c == inidiff::kEngine ? engine : other) += 1;
     const std::wstring s = inidiff::Lower(k.sec);
     const bool visual = inidiff::In(s, {L"color", L"colorfix", L"colorenhanced", L"night", L"vrfx", L"dlss",
-                                        L"perception", L"hotkeys", L"dev", L"log"}) ||
+                                        L"perception", L"hotkeys", L"dev", L"log", L"audio"}) ||
                         (s == L"general" && (inidiff::Lower(k.key) == L"perceptiononly" ||
                                              inidiff::Lower(k.key) == L"diagnostics" ||
                                              inidiff::Lower(k.key) == L"beeps" || inidiff::Lower(k.key) == L"sigscan"));
@@ -111,7 +111,7 @@ void Classes() {
   printf("     app template keys: %d engine, %d not engine\n", engine, other);
   Check(unknown == 0 && wrongVisual == 0 && wrongEngine == 0,
         "R142 engine key set: every key DCS Control's template writes is classified; [Color] [ColorFix] "
-        "[ColorEnhanced] [Night] [VrFx] [DLSS] [Perception] [Hotkeys] [Dev] [Log] and [General] PerceptionOnly / "
+        "[ColorEnhanced] [Night] [VrFx] [DLSS] [Perception] [Hotkeys] [Dev] [Log] [Audio] and [General] PerceptionOnly / "
         "Diagnostics / Beeps / SigScan are not engine keys; the optimization sections are");
   // Every section literal the payload reads (GetPrivateProfile*W / ReadDouble / qvini::Mask / clampInt) is classified.
   const std::string src = lptest::ReadAllSources();

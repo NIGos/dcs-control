@@ -34,6 +34,14 @@
 #include <unordered_set>
 #include <vector>
 
+// Binaural audio's contract headers (native/binaural/include) at global scope: BinauralCore is a separate library whose
+// symbols live in ::binaural (the audio headers below include these again inside main.cpp's anonymous namespace,
+// where #pragma once makes that a no-op).
+#include "binaural_config.h"
+#include "binaural_core.h"
+#include "head_pose_shm.h"
+#include "head_pose_reader.h"
+
 #include "loader_api.h"
 #include "log_utf8.h"
 #include "dev_path.h"  // R62: [Dev] IniPath read whole, an unusable one logged
@@ -76,6 +84,7 @@ using namespace layout;
 #include "main/xr_state.inc"                  // profile thread, XR state from dcs.log, CheckConfiguration
 #include "main/suite.inc"                     // suite helpers and SuiteThread
 #include "main/perception_tick.inc"           // StartBench, the perception configuration and tick
+#include "main/audio.inc"                     // binaural audio: wrappers, install / restore, its control thread
 #include "main/worker.inc"                    // WorkerThread
 #include "main/bench_variant.inc"             // SetBenchVariant and the engine-off bench switch
 #include "main/exports.inc"                   // Stop, mission and shutdown, the DcsQvPayload_* exports
