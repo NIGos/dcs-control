@@ -2,7 +2,7 @@
 
 DCS mixes every sound straight to the headphones with a left/right amplitude panner. Front and back sound the same,
 there is no height, and the direction only updates at DCS's frame rate. This feature replaces that panning, for the
-mono 3D sounds of the world and the cockpit, with real HRTF rendering:
+3D sounds of the world and the cockpit (mono and stereo waves), with real HRTF rendering:
 - direction cues per ear (time, level, pinna colouring);
 - the head followed at audio rate between DCS frames;
 - close cockpit sources rendered per ear.
@@ -39,8 +39,8 @@ no WorldGeneral hooks, scope of v1).
  ───────────────────────────────────────────────────         ─────────────────────────────────────────────
   panner call P3a/P3b ──► PanWrap                              mix call P5 ──► MixWrap: BeginBlock
      original panner (DCS state stays exact)                     │  read head pose (newest, predicted to output time)
-     ownership (3D, mono, not 2D ctx, top MaxObjects)            │  late correction per context
-     mono gain m (DCS's frontal gain), tag ch0=(m,0) ch1=(m,0)    │  original mix:
+     ownership (3D, mono/stereo, not 2D ctx, top MaxObjects)     │  late correction per context
+     mono gain m (DCS's frontal gain), tag (m,0)(m,0) / stereo  │  original mix:
      VoiceMeta[slot] ← pos, dist, m, ctx, gen  (seqlock)          │    voice call P4 ──► RenderWrap
      once per frame: q_used tag (pose DCS used)                   │      candidate: original → scratch (2 ch)
                                                                   │      tag state → pass / fade in / HRTF / fade out
@@ -637,8 +637,8 @@ redacted in the diagnostic package).
 | `audio: off (<reason>)` | off for the session; the reason is shown as is (Checks `audio-status`) |
 | `audio: off (<id> not found (<why>))` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
 | `audio: kill switch (<by>): binaural OFF (...)` / `... binaural ON` | the kill switch (key or flag) |
-| `audio: running, <n> sounds, p99 <x> ms per block, ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D, the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
-| `audio: idle, blocks <n> (armed <n>), pan calls <n>; refused: off <n>, output <n>, not 3D <n>, offline <n>, not mono <n>, context <n>, distance <n>, output not stereo <n>, gains <n>, pan law <n>, not at start <n>, limit <n>` | every 10 s instead of `running,` while 3D audio is on and nothing was rendered in 3D: over those 10 s, the output blocks the module saw and how many it armed, DCS's panner calls, and why each call's sound was not given to the 3D renderer (the first reason that applied). No blocks: the module is not on DCS's output; blocks but none armed: no output bound; pan calls all refused: the reason with the count. Diagnostic only (the app does not read it) |
+| `audio: running, <n> sounds, p99 <x> ms per block, ..., limit <n>; mono <n>, stereo <n> (wide <n>); ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D (of them: mono waves, stereo waves, and stereo waves kept wide, hook spec §10), the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
+| `audio: idle, blocks <n> (armed <n>), pan calls <n>; refused: off <n>, output <n>, not 3D <n>, offline <n>, channels <n>, context <n>, distance <n>, output not stereo <n>, gains <n>, pan law <n>, not at start <n>, limit <n>` | every 10 s instead of `running,` while 3D audio is on and nothing was rendered in 3D: over those 10 s, the output blocks the module saw and how many it armed, DCS's panner calls, and why each call's sound was not given to the 3D renderer (the first reason that applied: a 2D sound is `not 3D` on any output, `output` is a 3D sound on another output, `channels` a wave of more than two channels). No blocks: the module is not on DCS's output; blocks but none armed: no output bound; pan calls all refused: the reason with the count. Diagnostic only (the app does not read it) |
 | `audio: CPU budget: at most <n> sounds now (... over budget)` | a CPU back-off, down to n sounds (Checks `audio-backoff`); `(10 s under half the budget)` raises it again |
 | `audio: on (re-enabled in the settings, HRTF <set>: <n> directions)` / `audio: on (re-armed by the kill switch ..., ...)` | running again on the same binding (after Binaural=0 live, or after the overrun stop); a later `running,` line also means running |
 | `audio: HRTF <set> not usable (<why>); the default set is used` | the pilot's set was refused by the module: the Audio page and Checks (`audio-hrtf-refused`) say so with the reason |

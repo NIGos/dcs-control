@@ -239,7 +239,7 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
   const int64_t t1 = Qpc();
   const int r = g_res.voiceRender(voice, scratch, frames);
   const int64_t t2 = Qpc();
-  float snap[4];
+  float snap[6];  // channels 0..2: the gains just rendered and the stereo tag's mark (audio_voice.h IsStereoTag)
   memcpy(snap, static_cast<const uint8_t*>(voice) + audv::off::kVSnapGain, sizeof(snap));
   audv::MetaData md;
   const bool ok = audv::MetaRead(g_meta.slot[slot], &md);
@@ -679,7 +679,9 @@ void Bind(void* rend, const char* how) {
   b->renderer = rend;
   b->rate = static_cast<uint32_t>(rate);
   b->core = core;
-  b->scratch = static_cast<float*>(_aligned_malloc(sizeof(float) * 2 * audr::kMaxFrames, 64));
+  // 3 x kMaxFrames: the voice's two channels, then the onset buffer (audr::Binding::onset)
+  b->scratch = static_cast<float*>(_aligned_malloc(sizeof(float) * 3 * audr::kMaxFrames, 64));
+  b->onset = b->scratch ? b->scratch + 2 * audr::kMaxFrames : nullptr;
   b->overrun = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rend) + audv::off::kROverrun);
   if (!b->scratch) {
     audr::CoreDelete(core);
@@ -1088,11 +1090,16 @@ void ControlTick() {
       const uint64_t pc = g_cnt.poseBlocks.load();
       const char* pose = !g_cfgRead.cfg.lateHeadTracking ? "unused" : pc != L.statsPose ? "on" : "off";
       L.statsPose = pc;
+      // The sounds' make-up: mono waves, stereo ones (a point source at the stereo's loudness), and of those the ones
+      // whose sdef asks for width (auto_width: DCS's own side around a binaural mid).
+      const uint32_t owned = g_cnt.ownedNow.load(), st = std::min(owned, g_cnt.ownedStereoNow.load());
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
-          "%u; fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), pan solves %llu (median %llu, mismatch "
+          "%u; mono %u, stereo %u (wide %u); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "
+          "pan solves %llu (median %llu, mismatch "
           "%llu), overruns %llu; head pose %s",
-          g_cnt.ownedNow.load(), P99Ms(), g_cfgRead.cfg.cpuBudgetPercent, budgetMs,
-          std::min<uint32_t>(g_cnt.limitNow.load(), static_cast<uint32_t>(g_cfgRead.cfg.maxObjects)),
+          owned, P99Ms(), g_cfgRead.cfg.cpuBudgetPercent, budgetMs,
+          std::min<uint32_t>(g_cnt.limitNow.load(), static_cast<uint32_t>(g_cfgRead.cfg.maxObjects)), owned - st, st,
+          std::min(st, g_cnt.ownedWideNow.load()),
           static_cast<unsigned long long>(g_cnt.fadeIns.load()), static_cast<unsigned long long>(g_cnt.fadeOuts.load()),
           static_cast<unsigned long long>(g_cnt.repanCalls.load()), static_cast<unsigned long long>(g_cnt.coreRejected.load()),
           static_cast<unsigned long long>(g_meta.torn.load()), static_cast<unsigned long long>(g_cnt.tornSnaps.load()),
@@ -1108,11 +1115,11 @@ void ControlTick() {
       for (int i = 0; i < audr::kRefuseCount; ++i) refused[i] = g_cnt.refused[i].load() - L.idleRefused[i];
       const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
       Log("audio: idle, blocks %llu (armed %llu), pan calls %llu; refused: off %llu, output %llu, not 3D %llu, offline %llu, "
-          "not mono %llu, context %llu, distance %llu, output not stereo %llu, gains %llu, pan law %llu, not at start "
+          "channels %llu, context %llu, distance %llu, output not stereo %llu, gains %llu, pan law %llu, not at start "
           "%llu, limit %llu",
           u(blocks - L.idleBlocks), u(armed - L.idleArmed), u(pan - L.idlePan), u(refused[audr::kRefuseOff]),
           u(refused[audr::kRefuseOutput]), u(refused[audr::kRefuseNot3D]), u(refused[audr::kRefuseOffline]),
-          u(refused[audr::kRefuseNotMono]), u(refused[audr::kRefuseContext]), u(refused[audr::kRefuseDistance]),
+          u(refused[audr::kRefuseChannels]), u(refused[audr::kRefuseContext]), u(refused[audr::kRefuseDistance]),
           u(refused[audr::kRefuseStereoOut]), u(refused[audr::kRefuseGains]), u(refused[audr::kRefusePanMismatch]),
           u(refused[audr::kRefuseNotCreation]), u(refused[audr::kRefuseLimit]));
     }

@@ -130,6 +130,20 @@ inline bool Own(Sim& s, Rec& r, const Env& e, bool initial) {
   return true;
 }
 
+// The owned set's make-up for the "audio: running" line (stereo waves, and those of them kept wide).
+inline void StoreOwnedCounts(Sim& s) {
+  uint32_t st = 0, wide = 0;
+  const Rec* t = s.own.rec[s.own.cur];
+  for (uint32_t i = 0; i < Owner::kRecCap; ++i)
+    if (t[i].voice && t[i].owned && t[i].chans == 2) {
+      ++st;
+      wide += t[i].wide ? 1u : 0u;
+    }
+  s.cnt->ownedNow.store(static_cast<uint32_t>(s.own.owned), std::memory_order_relaxed);
+  s.cnt->ownedStereoNow.store(st, std::memory_order_relaxed);
+  s.cnt->ownedWideNow.store(wide, std::memory_order_relaxed);
+}
+
 // The sim stops tagging the voice; its slot waits for the render side's acknowledgement.
 inline void Release(Sim& s, Rec& r, int64_t now) {
   if (!r.owned) return;
@@ -236,7 +250,7 @@ inline void BeginFrame(Sim& s, const Cfg& cfg, const Env& e, uint32_t frame, boo
   Rec* t = o.rec[o.cur];
   if (!cfg.on) {
     ReleaseAll(s, e.now);
-    s.cnt->ownedNow.store(static_cast<uint32_t>(o.owned), std::memory_order_relaxed);
+    StoreOwnedCounts(s);
     return;
   }
   const uint32_t prev = s.prevFrame;
@@ -274,7 +288,7 @@ inline void BeginFrame(Sim& s, const Cfg& cfg, const Env& e, uint32_t frame, boo
     ++ci;
     ++oi;
   }
-  s.cnt->ownedNow.store(static_cast<uint32_t>(o.owned), std::memory_order_relaxed);
+  StoreOwnedCounts(s);
 }
 
 // The context id of a sound (8: not one of the context array's entries).
@@ -312,18 +326,21 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   // Which output the world's 3D sounds use (counted whether binaural is on or not: the binding is chosen by it).
   if (sound && Rd<uint64_t>(sound, off::kSndIs3D) != 0 && Rd<uint8_t>(voice, off::kVCtx2d) == 0)
     s.CountWorld(Rd<void*>(voice, off::kVRenderer));
-  // Qualification (hook spec 5.1).
-  bool q = cfg.on && e.boundRenderer && sound && Rd<void*>(voice, off::kVRenderer) == e.boundRenderer &&
-           e.engineState != off::kStateOffline && Rd<uint64_t>(sound, off::kSndIs3D) != 0 &&
-           Rd<uint8_t>(voice, off::kVCtx2d) == 0 && Rd<uint32_t>(voice, off::kVChannels) == 1;
-  // Why not (the "audio: idle" line): counted only, the decision above is unchanged.
+  // Qualification (hook spec 5.1). A mono wave or a stereo one (wave channels at voice+0xec4; ed_sound's panner gives
+  // both the same gains, its stereo kernels apply a to the left channel and b to the right).
+  const uint32_t chans = Rd<uint32_t>(voice, off::kVChannels);
+  const bool is3d = sound && Rd<uint64_t>(sound, off::kSndIs3D) != 0 && Rd<uint8_t>(voice, off::kVCtx2d) == 0;
+  bool q = cfg.on && e.boundRenderer && is3d && Rd<void*>(voice, off::kVRenderer) == e.boundRenderer &&
+           e.engineState != off::kStateOffline && (chans == 1 || chans == 2);
+  // Why not (the "audio: idle" line): counted only, the decision above is unchanged. A 2D sound (or a voice of a 2D
+  // context) is counted as "not 3D" whatever output it plays on: the radio and the second output's sounds are 2D.
   int refuse = -1;
   if (!q)
-    refuse = !cfg.on                                                                           ? audr::kRefuseOff
-             : !e.boundRenderer || (sound && Rd<void*>(voice, off::kVRenderer) != e.boundRenderer) ? audr::kRefuseOutput
-             : !sound || Rd<uint64_t>(sound, off::kSndIs3D) == 0 || Rd<uint8_t>(voice, off::kVCtx2d) != 0 ? audr::kRefuseNot3D
-             : e.engineState == off::kStateOffline                                              ? audr::kRefuseOffline
-                                                                                                : audr::kRefuseNotMono;
+    refuse = !cfg.on                                                          ? audr::kRefuseOff
+             : !is3d                                                          ? audr::kRefuseNot3D
+             : !e.boundRenderer || Rd<void*>(voice, off::kVRenderer) != e.boundRenderer ? audr::kRefuseOutput
+             : e.engineState == off::kStateOffline                            ? audr::kRefuseOffline
+                                                                              : audr::kRefuseChannels;
   uint32_t ctxId = 8;
   if (q) {
     const void* ctx = Rd<void*>(sound, off::kSndCtx);
@@ -374,28 +391,40 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   }
   r->qualifies = q;
   r->ctx = static_cast<uint8_t>(ctxId);
-  if (q) r->loud = m;
+  if (q) {
+    r->loud = m;
+    r->chans = static_cast<uint8_t>(chans);
+    r->wide = chans == 2 && Rd<uint8_t>(sound, off::kSndAutoWidth) != 0;
+  }
   if (!q) {
     if (refuse >= 0) s.cnt->refused[refuse].fetch_add(1, std::memory_order_relaxed);
     if (r->owned) Release(s, *r, e.now);
+    ClearStereoMark(voice);
     return;
   }
   if (!r->owned && r->slot < 0 && initial && o.owned < std::min(cfg.limit, kSlots)) Own(s, *r, e, true);
   if (!r->owned) {
     // Not taken: a voice is taken only when it starts (or by the ranking, BeginFrame), and only under the limit.
     s.cnt->refused[initial ? audr::kRefuseLimit : audr::kRefuseNotCreation].fetch_add(1, std::memory_order_relaxed);
+    ClearStereoMark(voice);
     return;
   }
-  // The mono tag and the voice's metadata.
+  // The tag and the voice's metadata. Mono: ch0 = ch1 = (m, 0). Stereo: ch0 = (m, 0), ch1 = (0, m), ch2 = (m, mark),
+  // so the render side gets m L' and m R' (DCS's own width, filters, doppler and fades kept).
   const float mt = m > kTagFloor ? m : kTagFloor;
-  const float tag[4] = {mt, 0.0f, mt, 0.0f};
-  memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, sizeof(tag));
+  const bool stereo = chans == 2;
+  const float tag[6] = {mt, 0.0f, stereo ? 0.0f : mt, stereo ? mt : 0.0f, stereo ? mt : 0.0f, stereo ? kStereoMark : 0.0f};
+  if (stereo || Rd<float>(voice, off::kVPendGain + 20) == kStereoMark)  // a stream that turned mono: its mark goes
+    memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, off::kTagBytes);
+  else
+    memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, 16);
   MetaData d = s.last[r->slot];
   d.voice = voice;
   d.gen = o.slotGen[r->slot];
   d.flags = meta_flags::kOwned | (r->initialOwned ? meta_flags::kInitial : 0u) |
             (e.poseValid ? meta_flags::kPoseValid : 0u) | (e.poseValid && e.posValid ? meta_flags::kPosValid : 0u) |
-            (dist < audr::kNearM ? meta_flags::kNear : 0u);
+            (dist < audr::kNearM ? meta_flags::kNear : 0u) | (stereo ? meta_flags::kStereo : 0u) |
+            (stereo && r->wide ? meta_flags::kWide : 0u);
   d.frame = o.frame;
   d.ctx = ctxId;
   double p[3];

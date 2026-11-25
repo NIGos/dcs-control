@@ -42,7 +42,10 @@ constexpr uint32_t kWasapiSize = 0x2800, kSoundSize = 0x400, kVoiceSize = 0x1f10
 constexpr uint32_t kVPhase = 0x1800, kVStep = 0x1808, kVAmp = 0x1810, kVKind = 0x1814, kVRng = 0x1818,
                    kVRemaining = 0x1820, kVAlive = 0x1828, kVEnded = 0x182c;
 constexpr uint32_t kSndCrosstalk = 0x300;  // test field: crosstalk x of the pan law
-enum Kind : uint32_t { kSine = 0, kDc = 1, kNoise = 2 };
+// Stereo waves: kSine plays sin(ph) left and sin(1.3 ph + 0.5) right, kNoise two independent noises (decorrelated
+// channels), kDual the same sine on both (DCS's dual-mono stereo files), kDc the same DC on both, kDcSplit DC amp left
+// and amp / 4 right (a side for click tests).
+enum Kind : uint32_t { kSine = 0, kDc = 1, kNoise = 2, kDual = 3, kDcSplit = 4 };
 
 using DrvP3a = void (*)(void** soundSlot);
 using DrvP3b = void (*)(void* voice, uint8_t ctx2d);
@@ -97,6 +100,15 @@ inline void FakePanner(void* v) {
     W<float>(v, 0x48 + 8 * ch, a);
     W<float>(v, 0x4c + 8 * ch, b);
   }
+  // A stereo wave's width (panner 0x1c5ee): 1, or with auto_width (sound+0x1a6) 1 within inner_radius (sound+0x144),
+  // falling to 0 at inner_radius + 1200 m of the attenuation distance (sound+0x1d0).
+  float width = 1.0f;
+  if (R<uint8_t>(s, 0x1a6)) {
+    const float rin = R<float>(s, 0x144);
+    const double d = R<double>(s, 0x1d0);
+    if (!(rin >= d)) width = d >= rin + 1200.0f ? 0.0f : static_cast<float>((rin + 1200.0f - d) / 1200.0);
+  }
+  W<float>(v, 0x24, width);
 }
 
 inline float NextSample(void* v, float* right) {
@@ -106,6 +118,14 @@ inline float NextSample(void* v, float* right) {
   float l = 0, rr = 0;
   if (kind == kDc) {
     l = rr = amp;
+  } else if (kind == kDcSplit) {
+    l = amp;
+    rr = 0.25f * amp;
+  } else if (kind == kDual) {
+    l = rr = amp * static_cast<float>(std::sin(ph));
+    ph += R<double>(v, kVStep);
+    if (ph > 6.283185307179586 * 1000) ph -= 6.283185307179586 * 1000;
+    W<double>(v, kVPhase, ph);
   } else if (kind == kNoise) {
     uint32_t st = R<uint32_t>(v, kVRng);
     st = st * 1664525u + 1013904223u;
@@ -139,16 +159,25 @@ inline int FakeVoiceRender(void* v, float* out, uint32_t frames) {
     tb[ch] = R<float>(v, 0xfc + 8 * ch);
   }
   const bool mono = R<uint32_t>(v, 0xec4) == 1;
+  // The stereo width stage (kernel 0x183e0, 0x185ac..0x186a9): L' = M + w S, R' = M - w S, w ramped from its current
+  // value (voice+0x618) to the snapshot's width (voice+0xd4).
+  const float w0 = R<float>(v, 0x618), w1 = R<float>(v, 0xd4);
   const float inv = 1.0f / static_cast<float>(frames);
   for (uint32_t i = 0; i < frames; ++i) {
     float sr = 0;
-    const float sl = NextSample(v, &sr);
+    float sl = NextSample(v, &sr);
     const float t = static_cast<float>(i + 1) * inv;
+    if (!mono) {
+      const float m = (sr + sl) * 0.5f, sd = (sl - sr) * 0.5f, w = w0 + (w1 - w0) * t;
+      sl = sd * w + m;
+      sr = m - sd * w;
+    }
     for (uint32_t ch = 0; ch < chans && ch < 17; ++ch) {
       const float a = sa[ch] + (ta[ch] - sa[ch]) * t, b = sb[ch] + (tb[ch] - sb[ch]) * t;
       out[i * chans + ch] += mono ? sl * (a + b) : sl * a + sr * b;
     }
   }
+  W<float>(v, 0x618, w1);
   for (uint32_t ch = 0; ch < chans && ch < 17; ++ch) {
     W<float>(v, 0xa54 + 0x30 * ch, ta[ch]);
     W<float>(v, 0xa6c + 0x30 * ch, tb[ch]);
@@ -310,6 +339,7 @@ inline Image Build(uint32_t timestamp, uint32_t sizeOfImage = kImageSize) {
   im.B(0x1c1c0 + 0x28c, {0xF3, 0x42, 0x0F, 0x11, 0x44, 0xFD, 0x48});
   im.B(0x1c1c0 + 0x29c, {0xF3, 0x42, 0x0F, 0x11, 0x74, 0xFD, 0x4C});
   im.B(0x1c1c0 + 0x2a6, {0x44, 0x3B, 0xBE, 0x74, 0x22, 0x00, 0x00});
+  im.B(0x1c1c0 + 0x42e, {0x80, 0xBB, 0xA6, 0x01, 0x00, 0x00, 0x00});  // cmp byte [rbx+0x1a6], 0 (auto_width)
   // ---- WASAPI loop 0x1ff00-0x20312: driver void drv(Wasapi*, float* out, uint32_t frames) ----
   im.B(0x20160, {0x53, 0x57, 0x55, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xD9, 0x41, 0x8B, 0xF8, 0x48, 0x89, 0x54, 0x24, 0x20,
                  0x48, 0x8D, 0x6C, 0x24, 0x41, 0x90});
@@ -383,6 +413,9 @@ struct World {
     W<void*>(v, 0x010, s);
     W<uint32_t>(v, 0xec4, channels);
     W<uint32_t>(v, 0xec8, 48000);
+    W<float>(v, 0x24, 1.0f);   // width: pending, snapshot, current
+    W<float>(v, 0xd4, 1.0f);
+    W<float>(v, 0x618, 1.0f);
     W<uint8_t>(v, 0xec2, image ? R<uint8_t>(image + kCtxArray + 0x388 * ctx, 0xe0) : 0);
     W<double>(v, kVStep, 6.283185307179586 * hz / 48000.0);
     W<float>(v, kVAmp, amp);
@@ -414,6 +447,12 @@ struct World {
       W<float>(v, 0xa54 + 0x30 * ch, R<float>(v, 0x48 + 8 * ch));
       W<float>(v, 0xa6c + 0x30 * ch, R<float>(v, 0x4c + 8 * ch));
     }
+    W<float>(v, 0x618, R<float>(v, 0x24));
+  }
+  // The sdef's auto_width with its inner_radius (as DCS stores them in the sound: +0x1a6, +0x144).
+  void SetAutoWidth(int i, float innerRadius) {
+    W<uint8_t>(sounds[i], 0x1a6, 1);
+    W<float>(sounds[i], 0x144, innerRadius);
   }
 };
 

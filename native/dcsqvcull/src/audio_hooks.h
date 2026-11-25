@@ -271,6 +271,8 @@ inline bool Resolve(const uint8_t* base, const SigTable& t, ImportFn imports, Re
   if (!BytesAt(pan + 0x263, "F3 42 0F 11 44 FD 48") || !BytesAt(pan + 0x28c, "F3 42 0F 11 44 FD 48") ||
       !BytesAt(pan + 0x29c, "F3 42 0F 11 74 FD 4C") || !BytesAt(pan + 0x2a6, "44 3B BE 74 22 00 00"))
     return Fail(r, "panner not found (per-channel gain stores or channel bound differ)");
+  // The sound's auto_width flag (sound+0x1a6, read for stereo waves): cmp byte [rbx+0x1a6], 0 at 0x1c5ee.
+  if (!BytesAt(pan + 0x42e, "80 BB A6 01 00 00 00")) return Fail(r, "panner not found (the sound's auto_width flag differs)");
   const uint8_t* vr = loc[audsig::kVoiceRender];
   if (!BytesAt(vr + 6, "80 B9 C0 0E 00 00 00") || !BytesAt(vr + 0x10, "0F 10 41 20"))
     return Fail(r, "voice render not found (kill flag or snapshot copy differ)");
