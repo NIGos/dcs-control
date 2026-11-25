@@ -2057,7 +2057,7 @@ const FEATURE_GUIDE = [
    gives:'DCS needs less CPU time for every frame. The image stays exactly the same.',
    expect:'The busier the scene, the bigger the gain: airfields, carriers and large missions run noticeably smoother. Little or no change when the graphics card is the limit.',
    cost:'Nothing visible. The first start prepares some data for a few minutes.',
-   needs:'On NVIDIA, MFAA off for DCS (Checks tells you). On AMD Radeon, the multi-threaded parts need their own switch on the page.',
+   needs:'On NVIDIA, MFAA off for DCS (Checks tells you). On AMD Radeon, the multi-threaded parts run on emulated lists, with a smaller gain.',
    keyPath:'engineToggleKey', keyText:'off and on, to compare'},
   {section:'every', page:'boost', name:'CPU Boost', impact:'Steadier', on:p => p.cpuBoost,
    gives:'DCS gets priority and its best CPU cores; other programs step out of its way while you fly.',

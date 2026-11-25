@@ -137,7 +137,7 @@ inline const char* DescribeCapsFailure(ID3D11Device* dev, const Caps& c) {
     hint = " -- this GPU's driver does not report native command lists";
   const char* optIn = !c.commandLists && !g_allowEmulatedLists.load(std::memory_order_relaxed)
                           ? "; opt-in: RecordersEmulatedLists ([Model] key or recorders_emulated_lists.flag) runs the "
-                            "recorders on the runtime's emulated lists (untested on real GPUs)"
+                            "recorders on the runtime's emulated lists (DCS Control turns it on where it can matter)"
                           : "";
   snprintf(buf, sizeof(buf),
            "the D3D11 device lacks what the recorder needs: DriverCommandLists=%d ConstantBufferOffsetting=%d "

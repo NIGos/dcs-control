@@ -2902,13 +2902,31 @@ Test("Recorders on emulated command lists: on by default, [Model] RecordersEmula
     File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(2));
     Require(!EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: driver command lists");
     Require(!EngineOptimizations.EmulatedListsMatter(module) && !EngineOptimizations.EmulatedListsMatter((string?)null), "NVIDIA with lists, or no module folder: not written");
+    Require(!EngineOptimizations.Read(options, null, false).Warnings.Any(w => w.Contains("emulates", StringComparison.Ordinal)), "driver command lists: no emulated-lists note");
+    // The recorders ran on emulated lists on a PC with an NVIDIA card (DCS on the iGPU here): the page says what gives the full gain.
+    File.WriteAllText(log, "loader: starting payload\nenv: GPU Intel(R) UHD Graphics 770 (DCS's device, vendor 0x8086), driver 31.0; DriverCommandLists=0 (recorders on emulated lists)\n"
+        + "gbuffer recorder: no driver command lists; RecordersEmulatedLists on (ini key or flag file): recording on the runtime's emulated lists\n");
+    File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(3));
+    var emulatedStatus = EngineOptimizations.Read(options, null, false);
+    Require(emulatedStatus.NoDriverCommandLists && emulatedStatus.Warnings.Count(w => w.Contains("emulates", StringComparison.Ordinal)) == 1
+        && emulatedStatus.Warnings.Any(w => w.Contains("DCS runs on Intel(R) UHD Graphics 770, not on the NVIDIA card", StringComparison.Ordinal)), "NVIDIA PC on emulated lists: why, and the fix");
     var adapters = GpuInfo.Adapters;
     try
     {
-        GpuInfo.Adapters = () => [radeon]; Require(EngineOptimizations.EmulatedListsMatter(module) && EngineOptimizations.EmulatedListsMatter((string?)null), "AMD only: written, whatever the log says");
+        GpuInfo.Adapters = () => [radeon];
+        Require(!EngineOptimizations.Read(options, null, false).Warnings.Any(w => w.Contains("emulates", StringComparison.Ordinal)), "AMD only on emulated lists: nothing to fix, no note");
+        Require(EngineOptimizations.EmulatedListsMatter(module) && EngineOptimizations.EmulatedListsMatter((string?)null), "AMD only: written, whatever the log says");
         GpuInfo.Adapters = () => []; Require(EngineOptimizations.EmulatedListsMatter(module), "adapters unknown: written (inert with lists)");
     }
     finally { GpuInfo.Adapters = adapters; }
+});
+Test("Live mode: [Model] RecordersEmulatedLists following the module's log does not hold back live engine settings", () =>
+{
+    var applied = new VrProfile { EngineOptimizations = true };
+    string[] changed = ["Model.RecordersEmulatedLists", "Prefetch.Mode"];
+    Require(LiveSettings.ProfileChanges(LiveSettings.EngineFile, changed, applied, applied).SequenceEqual(["Prefetch.Mode"]), "the setting unchanged: the key is not a change");
+    Require(LiveSettings.ProfileChanges(LiveSettings.EngineFile, changed, applied with { EngineRecordersEmulatedLists = false }, applied).SequenceEqual(changed), "the setting changed: it is (and waits for the next launch)");
+    Require(LiveSettings.ProfileChanges(LiveSettings.PupilFile, changed, applied, applied).SequenceEqual(changed), "other files: unchanged");
 });
 Test("Profile migration: Multi-threading without driver support turned on once in the draft and presets of 0.7.0, a later choice kept", () =>
 {
@@ -2936,11 +2954,88 @@ Test("Profile migration: Multi-threading without driver support turned on once i
     drafts.Save(draft.Profile with { EngineRecordersEmulatedLists = false }, null, null);
     File.WriteAllText(presets.PathOf("Airfield"), oldJson);
     Require(ProfileMigrations.Run(state).Count == 0 && !drafts.Load()!.Profile.EngineRecordersEmulatedLists && File.ReadAllText(presets.PathOf("Airfield")) == oldJson, "never again: the pilot's off stays off");
-    Require(File.Exists(ProfileMigrations.MarkerPath(state)) && !File.Exists(Path.Combine(state, "presets", "migrations.json")), "recorded next to the draft, outside what Go back swaps");
+    Require(File.Exists(ProfileMigrations.MarkerPath(state)) && !File.Exists(Path.Combine(state, "presets", "migrations.json")), "recorded next to the draft");
+    // A damaged record counts as done: an earlier choice is never undone on a guess.
+    File.WriteAllText(ProfileMigrations.MarkerPath(state), "{ damaged");
+    Require(ProfileMigrations.Run(state).Count == 0 && File.ReadAllText(presets.PathOf("Airfield")) == oldJson, "damaged record: nothing changes");
     // A new installation: nothing to change, recorded at once.
     var fresh = Path.GetFullPath(Path.Combine(root, "migration-fresh")); if (Directory.Exists(fresh)) Directory.Delete(fresh, true);
     Require(ProfileMigrations.Run(fresh).Count == 1 && File.Exists(ProfileMigrations.MarkerPath(fresh)) && ProfileMigrations.Run(fresh).Count == 0, "a new installation: recorded, nothing else");
     Directory.Delete(state, true); Directory.Delete(fresh, true);
+});
+Test("Profile migration: a hand-edited file with a repeated key, a file that cannot be written now, a record that cannot be written", () =>
+{
+    var state = Path.GetFullPath(Path.Combine(root, "migration-edge")); if (Directory.Exists(state)) Directory.Delete(state, true);
+    Directory.CreateDirectory(Path.Combine(state, "presets"));
+    var old = new VrProfile { EngineOptimizations = true, EngineRecordersEmulatedLists = false };
+    var oldJson = JsonData.Serialize(old);
+    // "developerOptions" added by hand to a file that has it already, and the key itself twice.
+    var repeated = oldJson.Replace("\"engineRecordersEmulatedLists\": false", "\"engineRecordersEmulatedLists\": false,\n  \"developerOptions\": false,\n  \"developerOptions\": false,\n  \"engineRecordersEmulatedLists\": false", StringComparison.Ordinal);
+    var presets = new PresetStore(state);
+    File.WriteAllText(presets.PathOf("Hand"), repeated);
+    File.WriteAllText(Path.Combine(state, "draft.json"), "{\"profile\": " + repeated + ", \"dcs\": null, \"options\": null, \"savedAt\": \"2026-11-20T10:00:00+00:00\"}");
+    File.WriteAllText(presets.PathOf("Locked"), oldJson);
+    IReadOnlyList<string> ran;
+    using (new FileStream(presets.PathOf("Locked"), FileMode.Open, FileAccess.Read, FileShare.None))
+        ran = ProfileMigrations.Run(state);
+    Require(ran.Count == 0, "a file that cannot be written: not done yet");
+    var hand = File.ReadAllText(presets.PathOf("Hand"));
+    Require(!hand.Contains("\"engineRecordersEmulatedLists\": false", StringComparison.Ordinal) && System.Text.RegularExpressions.Regex.Matches(hand, "\"engineRecordersEmulatedLists\": true").Count == 2
+        && System.Text.RegularExpressions.Regex.Matches(hand, "\"developerOptions\": false").Count == 2, "a repeated key: every occurrence on, everything else kept");
+    Require(new DraftStore(state).Load() is { } draft && draft.Profile.EngineRecordersEmulatedLists, "the draft with repeated keys: on, and it still loads");
+    Require(File.ReadAllText(presets.PathOf("Locked")) == oldJson, "the locked file: unchanged for now");
+    // Meanwhile the pilot turns it off in an updated preset: only the file left over is tried again.
+    File.WriteAllText(presets.PathOf("Hand"), oldJson);
+    Require(ProfileMigrations.Run(state).SequenceEqual([ProfileMigrations.EmulatedListsOn]) && JsonData.Deserialize<VrProfile>(File.ReadAllText(presets.PathOf("Locked"))).EngineRecordersEmulatedLists
+        && File.ReadAllText(presets.PathOf("Hand")) == oldJson, "the next start: only the file left over, the pilot's off elsewhere stays");
+    // A record that cannot be written: nothing changes at all this start.
+    var blocked = Path.GetFullPath(Path.Combine(root, "migration-blocked")); if (Directory.Exists(blocked)) Directory.Delete(blocked, true);
+    Directory.CreateDirectory(Path.Combine(blocked, "presets")); File.WriteAllText(Path.Combine(blocked, "presets", "Day.json"), oldJson);
+    Directory.CreateDirectory(ProfileMigrations.MarkerPath(blocked)); // a folder where the record goes: it cannot be written
+    Require(ProfileMigrations.Run(blocked).Count == 0 && File.ReadAllText(Path.Combine(blocked, "presets", "Day.json")) == oldJson, "no record, no change");
+    Directory.Delete(ProfileMigrations.MarkerPath(blocked));
+    Require(ProfileMigrations.Run(blocked).Count == 1 && JsonData.Deserialize<VrProfile>(File.ReadAllText(Path.Combine(blocked, "presets", "Day.json"))).EngineRecordersEmulatedLists, "next start: done");
+    Directory.Delete(state, true); Directory.Delete(blocked, true);
+});
+Test("Start profile: the applied profile, the draft, and the one-time update of Multi-threading without driver support", () =>
+{
+    var applied = new VrProfile { EngineOptimizations = true, EngineRecordersEmulatedLists = false };
+    var on = applied with { EngineRecordersEmulatedLists = true };
+    SavedDraft Draft(VrProfile p, string? dcs = @"C:\DCS\bin\DCS.exe") => new(p, dcs, @"C:\SG\Config\options.lua", DateTimeOffset.UtcNow);
+    const string exe = @"C:\DCS\bin\DCS.exe", lua = @"C:\SG\Config\options.lua";
+    Require(StartProfile.Choose(null, null, null, null, true) is null, "nothing saved: the defaults");
+    // Without a usable draft (none, damaged or newer): the update ran now, so the applied profile gets it and is kept as the draft.
+    Require(StartProfile.Choose(applied, exe, lua, null, true) is { SaveDraft: true, Status: StartProfile.EmulatedListsStatus, Dcs: exe } s1 && s1.Profile == on, "applied without a draft: on, saved as the draft");
+    Require(StartProfile.Choose(applied, exe, lua, null, false) is { SaveDraft: false, Status: StartProfile.AppliedStatus } s2 && s2.Profile == applied, "the update ran earlier: the applied profile as it is");
+    Require(StartProfile.Choose(on, exe, lua, null, true) is { SaveDraft: false } s3 && s3.Profile == on, "applied already on: nothing to save");
+    // The migrated draft equals the applied profile but for this setting: said plainly, not "differs".
+    Require(StartProfile.Choose(applied, exe, lua, Draft(on), true) is { Status: StartProfile.EmulatedListsStatus, SaveDraft: false } s4 && s4.Profile == on, "only the update differs: its own line");
+    Require(StartProfile.Choose(applied, exe, lua, Draft(on with { FrameGen = FrameGeneration.Nvidia }), true)!.Status.Contains("differs", StringComparison.Ordinal), "other changes too: the draft differs");
+    Require(StartProfile.Choose(applied, exe, lua, Draft(applied), false) is { Status: StartProfile.AppliedStatus } s5 && s5.Profile == applied, "a draft equal to the applied profile: the applied one");
+    Require(StartProfile.Choose(null, null, null, Draft(on, null), false) is { Dcs: null, Status: "Your last draft is back. Launch DCS applies it." }, "no applied profile: the draft");
+});
+Test("Go back and update again: the files the earlier version left get the profile update, presets saved by this version keep their value", () =>
+{
+    var six = ReleaseFixture("migration-back-6", "0.6.6-preview", "six"); var seven = ReleaseFixture("migration-back-7", "0.6.7-preview", "seven");
+    var target = Path.Combine(root, "rollback/migration/app"); var installer = new ApplicationInstaller(target);
+    var old = JsonData.Serialize(new VrProfile { EngineOptimizations = true, EngineRecordersEmulatedLists = false });
+    var state = RollbackState("migration", "{\"profile\": " + old + ", \"dcs\": null, \"options\": null, \"savedAt\": \"2026-11-20T10:00:00+00:00\"}", ("Day.json", old));
+    var settings = new AppSettingsStore(state); var now = new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero);
+    installer.Install(six, stateRoot: state); installer.Install(seven, stateRoot: state);
+    bool On(string relative) => JsonData.Deserialize<VrProfile>(relative == "draft.json" ? System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(state, relative))).RootElement.GetProperty("profile").GetRawText() : File.ReadAllText(Path.Combine(state, relative))).EngineRecordersEmulatedLists;
+    // The new version: the update runs; the pilot then saves a preset with it off.
+    Require(new Rollback(state, target, "0.6.7-preview", () => now).Reconcile(settings).ReturnedPresets.Count == 0 && ProfileMigrations.Run(state).Count == 1 && On("draft.json") && On("presets/Day.json"), "updated");
+    File.WriteAllText(Path.Combine(state, "presets", "Night.json"), old);
+    // Go back: the earlier version gets its own files (no record), this version's are set aside with the record.
+    new Rollback(state, target, "0.6.7-preview", () => now.AddDays(1)).Prepare("0.6.6-preview", settings);
+    Require(!File.Exists(ProfileMigrations.MarkerPath(state)) && File.Exists(Path.Combine(state, "versions", "0.6.7-preview", ProfileMigrations.FileName)) && !On("draft.json") && !On("presets/Day.json"), "the earlier version: its files, no record");
+    installer.Install(six);
+    Require(new Rollback(state, target, "0.6.6-preview", () => now.AddDays(2)).Reconcile(settings).Undone == false, "the earlier version runs");
+    // Update again: the earlier version's files are updated; Night (saved by this version, off) comes back as it was.
+    installer.Install(seven, stateRoot: state);
+    var returned = new Rollback(state, target, "0.6.7-preview", () => now.AddDays(3)).Reconcile(settings).ReturnedPresets;
+    Require(returned.SequenceEqual(["Night"]) && ProfileMigrations.Run(state, skipPresets: returned).Count == 1, "the update runs again on return");
+    Require(On("draft.json") && On("presets/Day.json") && !On("presets/Night.json"), "the earlier version's files on; the returned preset keeps the pilot's off");
 });
 Test("Engine shader warm-up: settings in DcsQvCull.ini and warmup.json for the Engine page", () =>
 {
@@ -5212,6 +5307,12 @@ Test("NVIDIA MFAA On is named before the flight and in the engine status; Thread
             NvidiaSettings.MfaaForDcs = () => new(true, true);
             Require(ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-mfaa").Message.Contains("MFAA is On in the DCS program profile", StringComparison.Ordinal), "MFAA warning");
             Require(EngineOptimizations.NoCommandListsAdvice().Contains("Antialiasing - MFAA is On", StringComparison.Ordinal), "MFAA advice");
+            // Multi-threading without driver support on (the default): the recorders still run, on emulated lists.
+            var mfaaOn = ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-mfaa").Message;
+            var mfaaOff = ProfileValidation.Validate(profile with { EngineRecordersEmulatedLists = false }).Single(i => i.Code == "nvidia-mfaa").Message;
+            Require(mfaaOn.Contains("run only on the lists Windows emulates", StringComparison.Ordinal) && !mfaaOn.Contains("cannot run", StringComparison.Ordinal)
+                && mfaaOff.Contains("cannot run", StringComparison.Ordinal), "MFAA warning: smaller gain with emulated lists on, cannot run with them off");
+            Require(EngineOptimizations.EmulatedListsAdvice("gbuffer recorder: no driver command lists; RecordersEmulatedLists on")!.Contains("Antialiasing - MFAA is On", StringComparison.Ordinal), "emulated lists on NVIDIA: MFAA named");
             NvidiaSettings.MfaaForDcs = () => new(false, true);
             Require(!ProfileValidation.Validate(profile).Any(i => i.Code == "nvidia-mfaa"), "MFAA off: nothing");
         }
@@ -5220,6 +5321,12 @@ Test("NVIDIA MFAA On is named before the flight and in the engine status; Thread
         Require(EngineOptimizations.NoCommandListsAdvice().Contains("integrated graphics", StringComparison.Ordinal));
         var adapters = GpuInfo.Adapters;
         try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")]; Require(EngineOptimizations.NoCommandListsAdvice().Contains("common on AMD", StringComparison.Ordinal) && EngineOptimizations.NoCommandListsAdvice().Contains("without driver support", StringComparison.Ordinal), "AMD: names the opt-in"); }
+        finally { GpuInfo.Adapters = adapters; }
+        // Recorders on emulated lists: nothing to fix on AMD; on a PC with an NVIDIA card, what gives the full gain.
+        const string igpu = "env: GPU Intel(R) UHD Graphics 770 (DCS's device, vendor 0x8086), driver 31.0; DriverCommandLists=0 (recorders on emulated lists); feature level b100";
+        Require(EngineOptimizations.EmulatedListsAdvice(igpu) is { } onIgpu && onIgpu.Contains("emulates", StringComparison.Ordinal) && onIgpu.Contains("DCS runs on Intel(R) UHD Graphics 770, not on the NVIDIA card", StringComparison.Ordinal), "NVIDIA PC, DCS on the iGPU: named from the GPU line");
+        Require(EngineOptimizations.EmulatedListsAdvice("shadow recorder: no driver command lists; RecordersEmulatedLists on")!.Contains("no other program wraps DCS's graphics", StringComparison.Ordinal), "NVIDIA PC, recorder line only: the general NVIDIA causes");
+        try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")]; Require(EngineOptimizations.EmulatedListsAdvice(igpu) is null, "AMD only: emulated lists are as good as it gets, no advice"); }
         finally { GpuInfo.Adapters = adapters; }
         // The module's own line (0.5.7) says which capability, the creation flags and DCS's adapter.
         const string line = "shadow recorder: the D3D11 device lacks what the recorder needs: DriverCommandLists=0 ConstantBufferOffsetting=1 ID3D11DeviceContext1=1 creation flags 0x0 on {0} (vendor {1}, LUID 0:1) -- hint; unavailable";

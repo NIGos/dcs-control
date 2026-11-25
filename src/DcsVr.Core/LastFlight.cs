@@ -86,7 +86,7 @@ public sealed record FrameCap(double? Fps, double? RefreshHz, int CappedReports,
 /// <param name="Toggles">Times they were turned off with the in-flight key.</param>
 /// <param name="WarmupSeconds">The shader warm-ups' total time ("warmup: done after N s"); null when none finished.</param>
 /// <param name="WarmupUnfinished">A warm-up was still compiling when the log ends.</param>
-/// <param name="RecordersEmulated">No driver command lists, but the opt-in (RecordersEmulatedLists) ran the recorders on
+/// <param name="RecordersEmulated">No driver command lists, but Multi-threading without driver support (RecordersEmulatedLists, on by default) ran the recorders on
 /// the lists Windows emulates (the module's "DriverCommandLists=0 (recorders on emulated lists)"): they count as usual.</param>
 public sealed record EngineFlight(int On, int Configured, IReadOnlyList<string> TurnedOff, IReadOnlyList<string> NotStarted, bool RecordersUnavailable,
     int OffSeconds, int Seconds, bool OffAtExit, int Toggles, int? WarmupSeconds, bool WarmupUnfinished, bool RecordersEmulated = false);
@@ -649,7 +649,7 @@ public static partial class LastFlight
                 if (Number(w.Groups[1].Value) is { } seconds && seconds is >= 0 and < 86400) { warm += (int)Math.Round(seconds); warmed = true; }
                 continue;
             }
-            // The GPU line with the opt-in on (RecordersEmulatedLists): the device has no driver lists, but the recorders
+            // The GPU line with RecordersEmulatedLists on (the default where it matters): the device has no driver lists, but the recorders
             // run on the ones Windows emulates. A recorder's own "lacks what the recorder needs" line still means they could not.
             if (text.Contains("DriverCommandLists=0 (recorders on emulated lists)", StringComparison.Ordinal)) emulated = true;
             else if (text.Contains("DriverCommandLists=0", StringComparison.Ordinal)) noLists = true;

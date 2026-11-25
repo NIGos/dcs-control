@@ -1,6 +1,6 @@
 # Unreleased
 
-**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: on a Radeon RX 7900 XTX it gave about 7 % more FPS with no errors (GitHub #27). Profiles from earlier versions get it turned on once; on NVIDIA nothing changes.
+**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: on a Radeon RX 7900 XTX it gave about 7 % more FPS with no errors (GitHub #27). Profiles from earlier versions get it turned on once. On NVIDIA cards, which have their own command lists, nothing changes; when DCS gets none there (MFAA on, DCS on integrated graphics, a program hooked into DCS), the recorders now run on emulated lists and the Engine Optimizations page says what gives the full gain.
 
 # 0.7.0 preview
 

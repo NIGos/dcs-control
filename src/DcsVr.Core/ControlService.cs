@@ -606,7 +606,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 if (bytes.AsSpan().SequenceEqual(wanted.Content)) continue;
                 before = IniFile.Parse(IniFile.Decode(bytes)); after = IniFile.Parse(IniFile.Decode(wanted.Content));
             }
-            var changed = before.Keys.Union(after.Keys, StringComparer.OrdinalIgnoreCase).Where(k => before.GetValueOrDefault(k) != after.GetValueOrDefault(k)).ToArray();
+            var changed = LiveSettings.ProfileChanges(name, before.Keys.Union(after.Keys, StringComparer.OrdinalIgnoreCase).Where(k => before.GetValueOrDefault(k) != after.GetValueOrDefault(k)), draft, applied.Profile);
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
             if (!LiveSettings.Reloads(name, applied.Profile, journal)
