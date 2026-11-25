@@ -103,6 +103,14 @@ public sealed record VrProfile
     /// <summary>OFXR async_arm (fork patch 0050): frame generation for a new swapchain (leaving the F10 map) is prepared on
     /// a worker thread; frames pass through meanwhile. Off until flown; "Prepare in the background" in the Framegen page's Advanced fold.</summary>
     public bool FrameGenAsyncArm { get; init; }
+    /// <summary>OFXR dcs_motion_occlusion_fill (fork patch 0121): around a moving aircraft (or the world over the sky) the
+    /// background seen in one real frame only is taken from that frame alone, by DCS's class atlas of both frames, where
+    /// the motion vectors did not hold, instead of the optical flow's blend that smears the edge into a halo. NVIDIA
+    /// frame generation with DCS's motion vectors only. Measured offline (synthetic fixtures, sRGB error against the true
+    /// middle frame): behind a moving model by day 17.4 -> 5.8, ahead of it 12.0 -> 8.4, the whole image 1.44 -> 1.36; at
+    /// night smaller gains; HUD, smoke and particles unchanged; 0.06 ms more GPU a pair at 5424 px, no extra memory. Off
+    /// until flown (an A/B in the headset decides); profile file only.</summary>
+    public bool FrameGenOcclusionFill { get; init; }
     /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
     /// the full refresh rate; frames pass through (1X, less latency) while it holds that, and 2X/3X Auto takes over while
     /// it falls behind. Every session and scene starts at 2X (DCS paced at half the refresh rate by OFXR, which the

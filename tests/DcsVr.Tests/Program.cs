@@ -200,6 +200,10 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenPipelinedDeepHold = true, FrameGenAsyncArm = true }).Contains("\npipelined_deep_hold=1\nasync_arm=1\n"));
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\nparallel_eye_synthesis=0") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenParallelEyes = true }).Contains("\nparallel_eye_synthesis=1")
         && ConfigurationWriters.Ofxr(new() { FrameGenParallelEyes = true }).Contains("\nparallel_eye_synthesis=0") && !new VrProfile().FrameGenParallelEyes, "Both eyes at once: off by default, 1 only with frame generation");
+    // Fork patch 0121: the occlusion fill, off by default, written only with NVIDIA frame generation (DCS's MVs).
+    Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\ndcs_motion=1\n") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\ndcs_motion_occlusion_fill=0\n")
+        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = true }).Contains("\ndcs_motion_occlusion_fill=1\n")
+        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.FidelityFx, FrameGenOcclusionFill = true }).Contains("\ndcs_motion_occlusion_fill=0\n") && !new VrProfile().FrameGenOcclusionFill, "Occlusion fill: off by default, 1 only with NVIDIA frame generation");
 });
 Test("Explicit manifest keeps extension metadata", () =>
 {

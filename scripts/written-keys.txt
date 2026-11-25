@@ -337,6 +337,7 @@ Ofxr	ofxr	cursor_follow_mouse
 Ofxr	ofxr	cursor_templates
 Ofxr	ofxr	d3d11_bridge
 Ofxr	ofxr	dcs_motion
+Ofxr	ofxr	dcs_motion_occlusion_fill
 Ofxr	ofxr	deep_pipeline
 Ofxr	ofxr	diag_vram
 Ofxr	ofxr	enabled
