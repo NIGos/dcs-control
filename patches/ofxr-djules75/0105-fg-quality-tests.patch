@@ -3,10 +3,10 @@ quality options, XRFG_TEST_FG_QUALITY=<bits>, all by default), the MVs' fallback
 that cannot act on a scene changes nothing, XRFG_TEST_SRGB_VIEW=1 (every scene through an sRGB view), XRFG_TEST_DUMP_DIR
 (PPM dumps). New scenes: the occlusion at night (a grey aircraft 0.02-0.06 over a 0.002 sky, MVs at 10 and 3 pixels a
 texel, UNORM and sRGB views; the trailing copy asserted at most a quarter with dcs_motion_sky_occlusion), the world beside a
-cockpit mask's blocks, a still HUD over a dark rolling sky and a contrail at an aircraft over it (neither worse with the
-options). synthesize_nvidia_pair: a view format and XRFG_TEST_FG_QUALITY_ALL_PAIRS. DCS motion bench:
-XRFG_TEST_FG_QUALITY_BENCH=<bits> (both pipelines with MVs, the second with the options; pack, flow, whole-pair medians).
-Live ini parse test for the quality keys.
+cockpit mask's blocks, a still HUD over a dark and over a bright rolling sky (no worse with the options; with
+dcs_motion_hud_guard no worse than the flow alone) and a contrail at an aircraft over the dark sky. synthesize_nvidia_pair:
+a view format and XRFG_TEST_FG_QUALITY_ALL_PAIRS. DCS motion bench: XRFG_TEST_FG_QUALITY_BENCH=<bits> (both pipelines
+with MVs, the second with the options; pack, flow, whole-pair medians). Live ini parse test for the quality keys.
 
 diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
 --- a/tests/cockpit_mask_tests.cpp
@@ -206,7 +206,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
      };
      const StereoPattern flow = run(false, 1000, true, nullptr);
      // Without MVs that hold for the pair: the composition as before, byte for byte.
-@@ -1760,19 +1816,63 @@ void run_dcs_motion_scene(D3D12WarpFixture& fixture, const char* name, const Dcs
+@@ -1760,19 +1816,64 @@ void run_dcs_motion_scene(D3D12WarpFixture& fixture, const char* name, const Dcs
      const StereoPattern only = run(true, 1000, true, "1");
      const StereoPattern mixed = run(true, 1000, true, nullptr);
      require(counters->motion_pairs.load() == 2, std::string("dcs motion ") + name + ": the MV pairs are not counted");
@@ -218,12 +218,13 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
 +    const std::uint64_t back_improved = counters->motion_fallback_pixels.load() - back_before;
 +    const StereoPattern flow_improved = run(false, 1000, true, nullptr, quality); // the flow alone, with them
 +    // Options that cannot act on a scene leave it byte for byte (no cockpit:
-+    // dcs_motion_mask_band; no sky: dcs_motion_sky_occlusion): their gates hold.
++    // dcs_motion_mask_band; no sky: dcs_motion_sky_occlusion; a UNORM view:
++    // dcs_motion_hud_guard): their gates hold.
 +    {
 +        const bool has_sky = std::any_of(scene.layers.begin(), scene.layers.end(),
 +            [](const DcsMotionLayer& layer) { return layer.opaque && (layer.klass & 0x80U) != 0U; });
 +        const std::uint32_t inert = (scene.cockpit.empty() ? xrfg::kFgQualityMaskBand : 0U) |
-+            (has_sky ? 0U : xrfg::kFgQualitySkyOcclusion);
++            (has_sky ? 0U : xrfg::kFgQualitySkyOcclusion) | (view_format == kFormat ? xrfg::kFgQualityHudGuard : 0U);
 +        if (inert != 0U) {
 +            require(run(true, 1000, true, nullptr, inert) == mixed,
 +                std::string("dcs motion ") + name + ": an option that cannot act changed the image");
@@ -275,7 +276,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
      judge(errors);
      // Silence an unused warning when a scene has no use for the frames' fronts.
      static_cast<void>(a.front.size() + b.front.size());
-@@ -1817,7 +1917,7 @@ void run_dcs_motion_fixtures() {
+@@ -1817,7 +1918,7 @@ void run_dcs_motion_fixtures() {
          const auto thin = region(scene, [](std::int8_t f) { return f == 0; }, 2);
          run_dcs_motion_scene(fixture, "thin wires, rolling world", scene,
              {{"wires", thin}, {"rest", outside(thin)}, {"all", everywhere}},
@@ -284,7 +285,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
                  require(e[0][2].mae < e[0][0].mae, "dcs motion: the wires are not closer to the truth than the flow's");
                  require(e[1][2].mae <= e[1][0].mae * 1.05 + 0.5, "dcs motion: the world beside the wires is worse");
              });
-@@ -1832,11 +1932,164 @@ void run_dcs_motion_fixtures() {
+@@ -1832,11 +1933,173 @@ void run_dcs_motion_fixtures() {
          const auto edges = region(scene, [](std::int8_t f) { return f == 0; }, 30);
          run_dcs_motion_scene(fixture, "occlusion", scene,
              {{"object and its edges", edges}, {"rest", outside(edges)}, {"all", everywhere}},
@@ -411,20 +412,29 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
 +    // aircraft at its head (a G-buffer surface beside it). Neither may be moved
 +    // with the sky's vector or forced to one frame by dcs_motion_sky_occlusion.
 +    for (const DXGI_FORMAT view : {kFormat, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB}) {
++        const std::uint32_t quality = dcs_motion_quality();
 +        const double roll = 3.0 * pi / 180.0;
 +        const std::string suffix = view == kFormat ? ", UNORM view" : ", sRGB view";
-+        {
++        for (const bool night : {true, false}) {
 +            DcsMotionScene scene;
 +            scene.layers = {
-+                {2, 1.0, 0.0, 0.0, 0.0, 4, 0, 1.0, false, {0.3, 1.1, 0.3}, 0.25},
-+                {3, 0.35, roll, 0.0, 0.0, 0, 0x80, 1.0, true, {0.6, 0.75, 1.1}, 0.006},
++                {2, 1.0, 0.0, 0.0, 0.0, 4, 0, 1.0, false, {0.3, 1.1, 0.3}, night ? 0.25 : 0.0},
++                {3, 0.35, roll, 0.0, 0.0, 0, 0x80, 1.0, true, {0.6, 0.75, 1.1}, night ? 0.006 : 0.0},
 +            };
 +            const auto hud = region(scene, [](std::int8_t f) { return f == 0; }, 1);
-+            run_dcs_motion_scene(fixture, ("HUD over a dark rolling sky" + suffix).c_str(), scene,
++            const std::string label = std::string("HUD over a ") + (night ? "dark" : "bright") + " rolling sky" + suffix;
++            run_dcs_motion_scene(fixture, label.c_str(), scene,
 +                {{"HUD", hud}, {"sky", outside(hud)}, {"all", everywhere}},
-+                [](const std::vector<std::array<DepthTestError, 5>>& e) {
++                [quality](const std::vector<std::array<DepthTestError, 5>>& e) {
 +                    require(e[0][3].mae <= e[0][2].mae + 0.25, "dcs motion: the quality options move the HUD over the sky");
 +                    require(e[1][3].mae <= e[1][2].mae + 0.25, "dcs motion: the quality options worsen the sky under a HUD");
++                    // dcs_motion_hud_guard: the HUD no worse than the flow
++                    // alone gives it (14.8 against 0.97 at night on an sRGB
++                    // view without the key).
++                    if ((quality & xrfg::kFgQualityHudGuard) != 0U) {
++                        require(e[0][3].mae <= e[0][0].mae * 1.5 + 0.5,
++                            "dcs motion: the HUD over the sky is still smeared with dcs_motion_hud_guard");
++                    }
 +                },
 +                nullptr, view);
 +        }
@@ -450,7 +460,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
      // 3. Transparent overlays without MVs over a moving textured surface: a
      // smoke puff drifting the other way, and still HUD symbology.
      {
-@@ -1850,7 +2103,7 @@ void run_dcs_motion_fixtures() {
+@@ -1850,7 +2113,7 @@ void run_dcs_motion_fixtures() {
          const auto smoke = region(scene, [](std::int8_t f) { return f == 1; }, 0);
          run_dcs_motion_scene(fixture, "transparent overlays", scene,
              {{"HUD", hud}, {"smoke", smoke}, {"all", everywhere}},
@@ -459,7 +469,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
                  // The colour checks fall back where the MVs are not the content's.
                  require(e[0][2].mae < e[0][1].mae, "dcs motion: the HUD takes the MVs of the surface below");
                  require(e[0][2].mae <= e[0][0].mae * 1.1 + 1.0, "dcs motion: the HUD is worse than the flow's");
-@@ -1870,7 +2123,7 @@ void run_dcs_motion_fixtures() {
+@@ -1870,7 +2133,7 @@ void run_dcs_motion_fixtures() {
          const auto sky_region = region(scene, [](std::int8_t f) { return f == 1; }, 0);
          run_dcs_motion_scene(fixture, sky[0] == '1' ? "sky (its MVs)" : "sky (its flow)", scene,
              {{"sky", sky_region}, {"terrain", outside(sky_region)}, {"all", everywhere}},
@@ -468,7 +478,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
                  require(e[2][2].mae <= e[2][0].mae * 1.05 + 0.5, "dcs motion: the sky scene is worse than the flow's");
              },
              sky);
-@@ -1905,9 +2158,23 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+@@ -1905,9 +2168,23 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
          std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
          std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
          std::vector<std::uint64_t> composition;
@@ -492,7 +502,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
      for (UINT index = 0; index < pipelines.size(); ++index) {
          Pipeline& pipeline = pipelines[index];
          for (UINT frame = 0; frame < kFrames; ++frame) {
-@@ -1926,15 +2193,17 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+@@ -1926,15 +2203,17 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
                      D3D12_RESOURCE_STATE_RENDER_TARGET)), "motion bench: history");
          xrfg::D3D12NvidiaOpticalFlowOptions options{};
          options.cockpit_mask = true;
@@ -512,7 +522,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
      // Two mask frames with MVs, A's pointing at B's display time and B's at
      // A's, made afresh per pair (their display times advance).
      const auto with_mvs_b = make_dcs_motion_frame(fixture, scene, width, height, views, 0, 0, true, counters);
-@@ -1975,6 +2244,9 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+@@ -1975,6 +2254,9 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
              while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
                  if (timing.previous_serial == 0) continue;
                  pipeline.composition.push_back(timing.composition_microseconds);
@@ -522,7 +532,7 @@ diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
              }
          }
      }
-@@ -1985,6 +2257,16 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
+@@ -1985,6 +2267,16 @@ void bench_dcs_motion_composition(D3D12WarpFixture& fixture, UINT width, UINT he
          std::sort(values.begin(), values.end());
          return values[values.size() / 2];
      };
