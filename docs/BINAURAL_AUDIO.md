@@ -85,7 +85,9 @@ off or in perception-only mode, since audio is not an engine optimization.
 | **Crossfade on every parameter change** | Filters: old and new FIR both run and crossfade over 64 frames when the direction moves more than 0.5°. Gains and shelves: linear ramps. HRTF swap: 10 ms crossfade per source. Every crossfade and delay glide keeps its length across calls, so short calls never shorten it. Ownership: one-block crossfade with DCS's own output, exact at both ends (hook spec §5.2). |
 | **Near field: per-ear parallax (< 2 m) + first-order ILD shelf (< 1 m)** | Cockpit sources are 0.3 to 1 m away; far-field HRTFs measured at 1.2 m put them in the wrong place per ear. The Brungart-style shelf adds the close-range level difference (up to 12 dB more ILD at 0.25 m, 90°), level-neutral: its two ears' gains are scaled to a mean power of 1 (+2.75 / -9.25 dB there), so the loudness stays DCS's own. |
 | **Diffuse-field equalised, front normalised to 0 dB** | The KU100 colouring stays neutral on average, and a sound from the front keeps DCS's level exactly (the mono gain rule, hook spec §5.1). |
-| **No distance, doppler or filter of our own** | DCS already applied them once; applying them twice would change DCS's mix. The only distance term is the late-translation correction `r_dcs / r_now` for sources under 1.5 m, clamped to ±3 dB. |
+| **No distance, doppler or filter of our own** | DCS already applied them once; applying them twice would change DCS's mix. The only distance term is the late-translation correction `r_dcs / r_now` for sources near the head (under 1.4 m, kept until past 1.6 m), clamped to ±3 dB; it scales a wide sound's kept side as well as its mid. |
+| **DCS's own level for the direction (PanLevel)** | The HRTF is normalised to the front, and at low frequencies (where engine and cockpit sounds carry most of their power) it is about as loud from every direction, while DCS's level-only pan law plays a source behind or above 3-6 dB quieter than ahead. So the HRTF part's gain carries `PanLevel = sqrt((gL² + gR²) / 2) / m` of that voice's own DCS gains (m: DCS's gain for a source ahead on a ±60° pair), between -12 dB and +2.5 dB (4/3: the most any speaker pair can give against m): the kill switch keeps the level, the HRTF adds the direction's cues (hook spec §10.3). |
+| **Stereo waves: point or wide** | The HRTF input is the mid `(L' + R') / 2` (DCS's own stereo-to-mono rule) at the stereo's loudness. A voice near the head (under 1.4 m, until past 1.6 m) or a diffuse bed (by its own mid / side powers) keeps DCS's side around the binaural mid, delayed per ear by that ear's HRTF delay so the two arrive together (no comb). auto_width is not a reason: ED's flag only narrows a sound with distance (hook spec §10.3). |
 
 ## 4. HRTF data
 
@@ -415,8 +417,15 @@ wingman passing around, then a short flight with ATC/wingman radio.
 
 **Where to look:** every `audio:` line is in `DcsQvCull.log` (Saved Games, `Scripts\DcsQvCull`). The sound log
 `audio_voices.csv` is in the same folder: one row per 3D voice per second, columns
-`time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags`, listener frame (x forward, y up, z right, metres); `flags` are the
-voice's meta flags (8 under 1.5 m, 32 a stereo wave, 64 auto_width: added, so 40 is a close stereo wave).
+`time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags,comp,diffuse,wide,panLevel,power`, listener frame (x forward, y up,
+z right, metres). `flags` are the voice's meta flags, added: 1 owned, 2 owned from its creation (no fade in), 4 the head
+pose DCS used is known (late head tracking can apply), 8 near (under 1.4 m, kept until past 1.6 m: kept wide, the
+late-translation gain), 16 that pose had a tracked position (late translation can apply), 32 a stereo wave, 64 the sdef
+sets auto_width (informational); so 63 is an owned, near stereo wave with a full pose, owned from its creation. The last
+five columns are the render side's view of the voice in its last block (empty when it was not rendered by the module):
+`comp` the loudness factor `sqrt((P_M + P_S) / P_M)` (1-2), `diffuse` 0/1, `wide` 0/1 (DCS's side kept: near or
+diffuse), `panLevel` DCS's level for the direction (§3), `power` the smoothed per-frame power of `m L'`, `m R'` (sum it
+by `wide` for the point / wide energy share).
 
 | # | What to do | What to listen for (pass) | Log proof (pass) |
 |---|---|---|---|
@@ -643,7 +652,7 @@ redacted in the diagnostic package).
 | `audio: off (<reason>)` | off for the session; the reason is shown as is (Checks `audio-status`) |
 | `audio: off (<id> not found (<why>))` | a hook point missing: shown as "this DCS version's sound engine is not the one it was made for (<id>)" |
 | `audio: kill switch (<by>): binaural OFF (...)` / `... binaural ON` | the kill switch (key or flag) |
-| `audio: running, <n> sounds, p99 <x> ms per block, ..., limit <n>; mono <n>, stereo <n> (wide <n>); ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D (of them: mono waves, stereo waves, and stereo waves kept wide, hook spec §10), the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
+| `audio: running, <n> sounds, p99 <x> ms per block, ..., limit <n>; mono <n>, stereo <n>; wide <n> (near or diffuse); ...; head pose on\|off\|unused` | every 10 s: sounds rendered in 3D (of them: mono waves, stereo waves; and all voices kept wide in the last block, near the head or diffuse, hook spec §10), the p99 cost per block, and whether the headset's pose reached the audio (`unused` with LateHeadTracking=0) |
 | `audio: idle, blocks <n> (armed <n>), pan calls <n>; refused: off <n>, output <n>, not 3D <n>, offline <n>, channels <n>, context <n>, distance <n>, output not stereo <n>, gains <n>, pan law <n>, not at start <n>, limit <n>, no wave yet <n>` | every 10 s instead of `running,` while 3D audio is on and nothing was rendered in 3D: over those 10 s, the output blocks the module saw and how many it armed, DCS's panner calls, and why each call's sound was not given to the 3D renderer (the first reason that applied: a 2D sound is `not 3D` on any output, `output` is a 3D sound on another output, `channels` a wave of more than two channels). No blocks: the module is not on DCS's output; blocks but none armed: no output bound; pan calls all refused: the reason with the count. Diagnostic only (the app does not read it) |
 | `audio: CPU budget: at most <n> sounds now (... over budget)` | a CPU back-off, down to n sounds (Checks `audio-backoff`); `(10 s under half the budget)` raises it again |
 | `audio: on (re-enabled in the settings, HRTF <set>: <n> directions)` / `audio: on (re-armed by the kill switch ..., ...)` | running again on the same binding (after Binaural=0 live, or after the overrun stop); a later `running,` line also means running |

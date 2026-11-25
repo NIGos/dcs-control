@@ -20,6 +20,7 @@
 namespace audiofake {
 std::atomic<bool> g_refuse{false};
 std::atomic<uint32_t> g_spinUs{0};
+std::atomic<float> g_delayL{0.0f}, g_delayR{0.0f};
 std::atomic<uint64_t> g_renders{0}, g_resets{0}, g_setHrtf{0}, g_setRadius{0}, g_setNear{0}, g_begin{0}, g_end{0};
 std::atomic<int> g_liveSets{0};
 float g_lastAdded[2 * binaural::kMaxFramesPerCall];
@@ -175,6 +176,13 @@ bool Renderer::Render(std::uint32_t slot, const SourceUpdate& u, const MonoInput
 void Renderer::ResetSource(std::uint32_t slot) {
   if (slot < kMaxSources) impl_->src[slot].have = false;
   audiofake::g_resets.fetch_add(1, std::memory_order_relaxed);
+}
+// The stand-in adds no delay of its own; the tests set the delays it reports (0 by default: the side unshifted).
+bool Renderer::SourceDelays(std::uint32_t slot, float out[2]) const {
+  if (slot >= kMaxSources || !impl_->src[slot].have) return false;
+  out[0] = audiofake::g_delayL.load(std::memory_order_relaxed);
+  out[1] = audiofake::g_delayR.load(std::memory_order_relaxed);
+  return true;
 }
 Stats Renderer::GetStats() const {
   Stats s{};

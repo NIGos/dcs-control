@@ -212,12 +212,13 @@ namespace meta_flags {
 constexpr uint32_t kOwned = 1;      // render binaurally (else: fade back to DCS's panning, then acknowledge)
 constexpr uint32_t kInitial = 2;    // owned from the voice's creation (P3b): no fade-in, the onset is binaural
 constexpr uint32_t kPoseValid = 4;  // qUsed / tUsed hold the head pose DCS used for this frame (pose ring entry)
-constexpr uint32_t kNear = 8;       // under 1.5 m: the late-translation gain applies
+constexpr uint32_t kNear = 8;       // near the head (under 1.4 m, kept until past 1.6 m; a first frame at 1.5 m): kept
+                                    // wide (DCS's side around the binaural mid), the late-translation gain applies
 constexpr uint32_t kPosValid = 16;  // tUsed is a tracked position (the pose entry had one; else it is zero)
 constexpr uint32_t kStereo = 32;    // a stereo wave (counted; every owned voice carries the same tag)
-constexpr uint32_t kWide = 64;      // a stereo wave whose sdef asks for width (auto_width): the side keeps DCS's own
-                                    // stereo, the mid is the binaural point source (else: the mid alone, at the
-                                    // stereo's loudness)
+constexpr uint32_t kWide = 64;      // a stereo wave whose sdef sets auto_width: informational (the sound log). ED's
+                                    // flag only narrows a sound with distance; point or wide is decided by kNear and
+                                    // the render side's diffuse detector (audio_render.h)
 }  // namespace meta_flags
 
 struct MetaData {
@@ -283,7 +284,8 @@ struct Rec {
   int64_t ownedSince;  // QPC
   uint8_t ctx;
   uint8_t chans;       // wave channels in the last frame (1 or 2)
-  bool wide;           // stereo with auto_width
+  bool wide;           // stereo with auto_width (published as meta_flags::kWide, informational)
+  uint8_t nearState;   // 0 not decided yet, 1 far, 2 near (meta_flags::kNear, with hysteresis)
 };
 
 enum SlotState : uint8_t { kSlotFree = 0, kSlotOwned = 1, kSlotReleasing = 2 };
