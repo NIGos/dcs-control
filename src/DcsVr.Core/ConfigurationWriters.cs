@@ -405,13 +405,8 @@ public static class ConfigurationWriters
         dcs_motion={(p.FrameGen == FrameGeneration.Nvidia ? 1 : 0)}
         ; Generated-frame quality options (patch 0104, NVIDIA path only; off by default until flown).
         dcs_motion_sky_occlusion={NvidiaOption(p, p.FrameGenSkyOcclusion)}
-        perceptual_checks={NvidiaOption(p, p.FrameGenPerceptualChecks)}
-        flow_input_srgb={NvidiaOption(p, p.FrameGenFlowInputSrgb)}
-        low_confidence_current={NvidiaOption(p, p.FrameGenCurrentFallback)}
         nvidia_edge_choice={NvidiaOption(p, p.FrameGenEdgeChoice)}
-        nvidia_temporal_hints={NvidiaOption(p, p.FrameGenTemporalHints)}
         dcs_motion_mask_band={NvidiaOption(p, p.FrameGenMaskBand)}
-        foveated_fade_flow={NvidiaOption(p, p.FrameGenFadeFlow && p.UsesFoveatedFrameGen)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
