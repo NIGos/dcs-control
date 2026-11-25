@@ -832,7 +832,7 @@ function buildFields() {
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // Generated-frame quality options (OFXR 0104) and the occlusion fill (0121/0122), NVIDIA only, all off until flown:
   // one fold, a toggle each and the fill's mode, hidden with FidelityFX as the Optical flow fold is.
-  { const nvidia = p => p.frameGen === 'Nvidia', fidelityFg = p => p.frameGen === 'FidelityFx', ones = ['frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand'];
+  { const nvidia = p => p.frameGen === 'Nvidia', fidelityFg = p => p.frameGen === 'FidelityFx', ones = ['frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand','frameGenLightSingle'];
     const fillOn = p => (p.frameGenOcclusionFill || 'Off') !== 'Off';
     more = disclosure(c,'<span class="tag">EXPERIMENTAL</span> Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default. GPU cost: about 0.1 ms at 2X, 0.7 ms at 3X; Always fill 0.3 / 1.1 ms.',p => { const n = nvidia(p) ? ones.filter(k => p[k]).length + (fillOn(p) ? 1 : 0) : 0; return n ? n+' on' : 'All off'; }); more.dataset.hide = 'flow'; more.id = 'frameGenFineTune';
     toggles = toggleList(more);
@@ -840,6 +840,8 @@ function buildFields() {
     field(toggles,'frameGenHudGuard','Keep the HUD steady over the sky',['No smeared HUD or dark aircraft over the night sky.','Over the sky, colors are compared as you see them, so a dark stroke is not taken for the sky.'],'toggle',null,nvidia,'',fidelityFg);
     field(toggles,'frameGenEdgeChoice','Sharper moving edges','Picks the motion that fits best where two motions meet.','toggle',null,nvidia,'',fidelityFg);
     field(toggles,'frameGenMaskBand','Cleaner world beside the cockpit','Uses DCS\'s own motion right up to the cockpit frame.','toggle',null,nvidia,'',fidelityFg);
+    // OFXR light_single_image (0126): a distant light at night drawn once where it is, not a copy from each real frame.
+    field(toggles,'frameGenLightSingle','One image of distant lights',['A far aircraft\'s lights at night show once, not doubled.','Small bright lights on a dark sky are followed from one real frame to the next and drawn where they are in between. A light that cannot be followed is shown from the nearer real frame only.'],'toggle',null,nvidia,'',fidelityFg);
     // OFXR dcs_motion_occlusion_fill 0/1/2. Only with Sharp HUD (1) fills only frames Sharp HUD took the HUD out of, so the HUD
     // never moves; Always (2) also with the HUD in the image. Saved only when on (0.7.0 refuses keys it does not know).
     // Only with Sharp HUD picked while Sharp HUD is off: a line under the choice says what it needs (it stays pickable).
@@ -1823,7 +1825,7 @@ function renderCadence() {
 const derivedField = k => /^uses[A-Z]/.test(k) || ['quadSaccadeLeadMs','quadSaccadeHoldMs','quadSaccadeMaxExtend','depthBoostActiveMax','neuralEdgeFeather','boostHelperElevated'].includes(k);
 /** Settings profile.json holds only when set ([JsonIgnore(WhenWritingDefault)] in Models.cs), each with the default a
  *  missing key means: the default written out compares equal to the key left out. */
-const SAVED_WHEN_SET = {developerOptions:false,frameGenSkyOcclusion:false,frameGenHudGuard:false,frameGenEdgeChoice:false,frameGenMaskBand:false,frameGenOcclusionFill:'Off'};
+const SAVED_WHEN_SET = {developerOptions:false,frameGenSkyOcclusion:false,frameGenHudGuard:false,frameGenEdgeChoice:false,frameGenMaskBand:false,frameGenLightSingle:false,frameGenOcclusionFill:'Off'};
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).filter(k => k !== 'id' && k !== 'name' && !derivedField(k) && !(k in SAVED_WHEN_SET && value[k] === SAVED_WHEN_SET[k])).sort().map(k => [k, canonical(value[k])])) : value;
 /** The same file, as ControlService.SamePaths compares them: an empty side (detected automatically, or a profile that

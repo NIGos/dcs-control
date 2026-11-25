@@ -184,6 +184,10 @@ public sealed record VrProfile
     /// <summary>OFXR dcs_motion_hud_guard: over the sky, DCS's motion vectors judge colours as you see them, so a HUD or a dark
     /// object over the night sky is not taken for sky and smeared with it.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenHudGuard { get; init; }
+    /// <summary>OFXR light_single_image (patch 0126): a small bright light on dark surroundings that DCS's motion vectors
+    /// do not carry (a distant aircraft's lights at night) is drawn once in generated frames, where it is at that instant,
+    /// instead of a copy from each real frame. Off until flown; written only when on.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenLightSingle { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored
