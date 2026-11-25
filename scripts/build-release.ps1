@@ -279,14 +279,21 @@ try {
     if ($renderProcess.ExitCode -ne 0) { throw "Release interface render failed (see $renderRoot)." }
     $renderProcess.Dispose()
 } finally { Remove-Item -LiteralPath $demoRoot -Recurse -Force -ErrorAction SilentlyContinue }
-Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -like 'interface-*.png' -or $_.Name -eq 'interface-checks.json' -or $_.Name -eq 'interface-renders.json' } | Copy-Item -Destination (Join-Path $payloadRoot 'docs') -Force
-Remove-Item -LiteralPath $renderRoot -Recurse -Force -ErrorAction SilentlyContinue # copied into the payload; nothing else reads it
+# The checks and the render list ship (support reads them); the preview images themselves (about 100 PNGs, 12 MB, read
+# by nothing at runtime) stay next to the release in artifacts/release/DcsControl-<version>-interface.
+$previewRoot = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-interface"
+if (Test-Path -LiteralPath $previewRoot) { Remove-Item -LiteralPath $previewRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $previewRoot -Force | Out-Null
+Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -like 'interface-*.png' } | Copy-Item -Destination $previewRoot -Force
+Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -eq 'interface-checks.json' -or $_.Name -eq 'interface-renders.json' } | Copy-Item -Destination (Join-Path $payloadRoot 'docs') -Force
+Remove-Item -LiteralPath $renderRoot -Recurse -Force -ErrorAction SilentlyContinue # copied out; nothing else reads it
 # The render list names each image by its file name only: the build folder (and the build machine's user name) never ships.
 $rendersFile = Join-Path $payloadRoot 'docs/interface-renders.json'
 $renders = @(Get-Content -LiteralPath $rendersFile -Raw | ConvertFrom-Json)
 foreach ($render in $renders) { if ($render.PSObject.Properties['path']) { $render.path = Split-Path -Leaf $render.path } }
 ConvertTo-Json -InputObject $renders -Depth 8 | Set-Content -LiteralPath $rendersFile -Encoding utf8
-if ($renders.Count -eq 0 -or @($renders | Where-Object { -not (Test-Path -LiteralPath (Join-Path $payloadRoot ('docs/' + $_.path))) }).Count) { throw 'Release interface preview is incomplete.' }
+Copy-Item -LiteralPath $rendersFile -Destination $previewRoot -Force
+if ($renders.Count -eq 0 -or @($renders | Where-Object { -not (Test-Path -LiteralPath (Join-Path $previewRoot $_.path)) }).Count) { throw 'Release interface preview is incomplete.' }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Manager-GPL-3.0.txt') -Force
 # The WebView2 SDK's licence files come from the package version the app references (one place: DcsVr.App.csproj).
 $webView2 = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'src/DcsVr.App/DcsVr.App.csproj') -Raw)).SelectSingleNode("//PackageReference[@Include='Microsoft.Web.WebView2']").Version

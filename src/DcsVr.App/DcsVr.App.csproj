@@ -4,6 +4,8 @@
     <UseWPF>true</UseWPF><ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DcsControl</AssemblyName>
     <ApplicationIcon>Assets/app-icon.ico</ApplicationIcon>
+    <!-- English only: the interface is HTML (ui/); WPF's translated framework strings (13 languages, 8.7 MB) are not shipped. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../DcsVr.Core/DcsVr.Core.csproj" /></ItemGroup>
   <ItemGroup>
