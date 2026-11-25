@@ -20,6 +20,8 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 
 ## What's new in 0.7
 
+**New in 0.7.1:** **3D headphone audio** (experimental, off by default: real 3D sound for headphones, in VR and on a monitor), **cleaner generated frames** (experimental Fine-tune settings for NVIDIA frame generation, all off by default), Multi-threading without driver support on by default with AMD graphics (GitHub #27), and the Ultraleap crash fix (GitHub #35). Full list: [release notes](docs/RELEASE_NOTES.md).
+
 **New in 0.7.0:** 0.6.7 was never released, so coming from 0.6.6 all of this is new. Full list: [release notes](docs/RELEASE_NOTES.md).
 
 - **Foveated frame generation** (experimental, off by default): the focus area and the rest of the view get their generated frames separately, for less than half the GPU time and less video memory.
@@ -69,8 +71,8 @@ After each flight the Overview shows a **Last flight** summary.
 
 ## Install
 
-1. Download `DcsControl-0.7.0-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it. It installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Windows may say the publisher is unknown: choose More info → Run anyway.
-2. Or take `DcsControl-0.7.0-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it).
+1. Download `DcsControl-0.7.1-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it. It installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Windows may say the publisher is unknown: choose More info → Run anyway.
+2. Or take `DcsControl-0.7.1-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it).
 
 The app tells you when a newer release is out and updates itself after checking the release signature. Uninstall it from Settings → Apps; press **Back to stock DCS** first. Details: [Install](docs/USER_GUIDE.md#install).
 

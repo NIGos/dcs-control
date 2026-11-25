@@ -1,13 +1,26 @@
-# Unreleased
+# 0.7.1 preview
 
-**3D headphone audio (experimental).** A new **Audio** page, off by default: DCS's left/right panning is replaced by real 3D sound for headphones, so engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head. Generic ears (Neumann KU100, SADIE II) out of the box, a head size control, and your own SOFA file if you have one; radio and intercom stay as DCS plays them. Works in VR and on a monitor; Alt+Shift+F6 compares it with DCS's own sound in flight.
+**3D headphone audio (experimental).** A new **Audio** page, off by default. DCS's left/right panning is replaced by real 3D sound for headphones: engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head.
+- Generic ears (Neumann KU100, SADIE II) out of the box, a head size control (Small, Medium, Large or your own measure), and your own SOFA file if you have one (**Import SOFA…**).
+- Radio and intercom stay as DCS plays them. It works in VR and on a monitor, uses a little CPU on DCS's sound thread and no GPU.
+- **Alt+Shift+F6** in flight (or **Switch 3D audio off** on the page) compares it with DCS's own sound. Every setting applies in flight.
+- Feedback on GitHub is very welcome.
 
-**Cleaner generated frames** (NVIDIA frame generation). Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (Off, With Sharp HUD or Always), which takes away most of the smear just behind and ahead of another aircraft.
+**Cleaner generated frames (experimental, NVIDIA frame generation).** Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (Off, Only with Sharp HUD or Always), which takes away most of the smear just behind and ahead of another aircraft.
+- They were measured offline only and have not been flown yet: please tell us on GitHub what you see.
+- GPU cost: the four quality settings together about 0.1 ms per frame at 2X and 0.7 ms at 3X; Fill around moving aircraft on Always about 0.3 / 1.1 ms. With all of them off, frame generation is exactly as in 0.7.0.
+- Turning one on in flight no longer stalls the headset for a moment: what they need is prepared in the background, the first time one is turned on.
 
-**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: about 7 % more FPS on a Radeon RX 7900 XTX (GitHub #27). Earlier profiles get it turned on once. On NVIDIA cards, which have their own command lists, nothing changes; where DCS gets none there (MFAA on, the integrated GPU, a hooking program), the recorders run on emulated lists and the Engine Optimizations page says what gives the full gain.
+**Multi-threading without driver support is now on by default with AMD graphics** (AMD Radeon, GitHub #27): about 7 % more FPS on a Radeon RX 7900 XTX. Profiles from 0.7.0 get it once. On NVIDIA nothing changes: where DCS gets no command lists there (MFAA on, the integrated GPU, a hooking program) it stays off as before, the Engine Optimizations page says what gives the full gain, and you can still turn it on yourself.
 
-DCS no longer crashes at start with Quad Views, frame generation and Ultraleap hand tracking installed (#35). Turning Ultraleap's layer on or off in Windows (for example with OpenXR API Layers GUI) is now a change Launch DCS applies; the Checks say when it waits for the next launch.
+**Ultraleap hand tracking (GitHub #35).** DCS no longer crashes at start with Quad Views, frame generation and Ultraleap hand tracking installed. Turning Ultraleap's layer on or off in Windows (for example with OpenXR API Layers GUI) is now a change Launch DCS applies; Checks says when it waits for the next launch.
 
+**Profiles stay readable by 0.7.0.** A profile or preset that leaves the new settings at their defaults still opens in 0.7.0 (Go back, or an exported file). One that turns on 3D audio, a Fine-tune setting or changes Multi-threading without driver support does not.
+
+**Fixes:**
+- Pupil shift: when the headset software refuses the eye-tracking extension, the head pose keeps its exact display time.
+- The Engine Optimizations page counts 3D audio among the features that need the engine module.
+- The diagnostic package names your own HRTF sets "personal set 1" and so on, and leaves out 3D audio's file when it never ran.
 # 0.7.0 preview
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.

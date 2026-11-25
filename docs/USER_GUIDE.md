@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.7.0-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. A printable book with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf)**.
+**Version 0.7.1-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. A printable book with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe. Please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -8,7 +8,7 @@
 
 ## Contents
 
-- [New in 0.7](#new-in-07)
+- [New in 0.7.1](#new-in-071) and [New in 0.7](#new-in-07)
 - [What the app does](#what-the-app-does)
 - [Requirements](#requirements)
 - [Install](#install) and [Updates](#updates)
@@ -34,6 +34,13 @@
 - [Troubleshooting and FAQ](#troubleshooting-and-faq)
 - [Reporting a problem](#reporting-a-problem)
 - [Support](#support)
+
+## New in 0.7.1
+
+- **3D headphone audio** (Audio page, experimental, off by default): real 3D sound for headphones, in VR and on a monitor. See [Audio](#audio).
+- **Cleaner generated frames** (Frame generation page, Image quality > **Fine-tune**, experimental, NVIDIA only, all off by default, not flown yet): five ways to clean up generated frames. See [Frame generation](#frame-generation).
+- **Multi-threading without driver support** is on by default with AMD graphics (GitHub #27); NVIDIA PCs keep their choice.
+- **Ultraleap hand tracking** no longer crashes DCS at start with Quad Views and frame generation (GitHub #35). See the [release notes](RELEASE_NOTES.md).
 
 ## New in 0.7
 
@@ -99,7 +106,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-**With the setup (recommended):** download `DcsControl-0.7.0-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+**With the setup (recommended):** download `DcsControl-0.7.1-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
 
 - the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
 - whether DCS Control goes in the **Start menu** and on the **desktop**.
@@ -108,7 +115,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
 
-**Portable, from the ZIP:** download `DcsControl-0.7.0-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
+**Portable, from the ZIP:** download `DcsControl-0.7.1-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
 - **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
@@ -427,7 +434,7 @@ The **Image quality** card holds how generated frames look:
 - **Latency trade-off, measured on an earlier build:** about 55 ms in 2× and about 88 ms in 3× from the start of a DCS frame to its display. If 3× feels laggy, see the [FAQ](#framegen-3-feels-laggy).
 - **DCS's cockpit outline, depth and motion**: generated frames also use them, so the cockpit stays still and moving scenery shows fewer artifacts. This costs no FPS. The engine module hands them over; since 0.7 it is installed for this with frame generation in VR also when Engine Optimizations are off (in its Perception-only mode: none of the optimizations run).
 - **VectorXR** (if installed) is turned off when DCS Control starts DCS for VR, so its frame generation and Quad Views don't stack on the profile's own. Your other games keep it.
-- **Fine-tune** (folded; NVIDIA only, all off by default) — ways to clean up generated frames, each in one plain line on the page: **Clean edges against the sky** (no faint copy trailing an aircraft over the sky), **Keep the HUD steady over the sky** (no smeared HUD or dark aircraft over the night sky), **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (less smear just behind and ahead of another aircraft): **Off**, **With Sharp HUD** (only while Sharp HUD takes the HUD out, so the HUD never moves; it needs Sharp HUD on, and the page says so under the choice when it is off) or **Always** (also over the HUD, which can shift a little where an aircraft passes behind it). Measured on the GPU at 5424 px per eye: the fill (Always) about 0.3 ms per frame pair at 2X and 1.1 ms at 3X; the four other options together about 0.1 ms at 2X and 0.7 ms at 3X. All of them change in flight.
+- **Fine-tune** (EXPERIMENTAL, folded; NVIDIA only, all off by default, not flown yet: feedback welcome) — ways to clean up generated frames, each in one plain line on the page: **Clean edges against the sky** (no faint copy trailing an aircraft over the sky), **Keep the HUD steady over the sky** (no smeared HUD or dark aircraft over the night sky), **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (less smear just behind and ahead of another aircraft): **Off**, **Only with Sharp HUD** (only while Sharp HUD takes the HUD out, so the HUD never moves; it needs Sharp HUD on, and the page says so under the choice when it is off) or **Always** (also over the HUD, which can shift a little where an aircraft passes behind it). Measured on the GPU at 5424 px per eye: the fill (Always) about 0.3 ms per frame pair at 2X and 1.1 ms at 3X; the four other options together about 0.1 ms at 2X and 0.7 ms at 3X. All of them change in flight.
 - **Optical flow** (folded; NVIDIA only) — **Optical flow resolution**, **Optical flow quality** and **Bidirectional flow**: higher costs more GPU. With foveated frame generation the resolution sets the focus area's; the rest of the view always uses its own full resolution.
 - **Diagnostics** (folded) — **FPS counter**, **Frame generation log**, **Per-frame records** (the log can grow to 1 GB) and **Prepare in the background** (gets ready on another thread when a new view starts, for example when you leave the F10 map). Keep the defaults unless you are tracking down a problem.
 - **Before you fly:** turn off other limiters and smoothing that fight frame generation — NVIDIA *Max Frame Rate* / *Background Application Max Frame Rate*, RTSS, Pimax Smart Smoothing, SteamVR motion smoothing. The app does not change these; Checks reminds you.
@@ -483,7 +490,7 @@ How the image looks in the headset, on its own page. Everything is **off by defa
 
 **3D headphone audio** (EXPERIMENTAL, off by default). DCS pans its sounds only left and right: front and back sound the same and there is no height. With this on, the mono 3D sounds of the world and the cockpit get real 3D sound for headphones: engines, wingmen, rotors, missiles and switches come from front, back, above or close beside you, and stay in place when you turn your head. Radio and intercom stay as DCS plays them, and distance, doppler and the canopy stay DCS's own. It works in VR and on a monitor (with head tracking), with or without Engine Optimizations: Launch DCS installs the engine module for it, in its Perception-only mode when the optimizations are off. It uses a little CPU on DCS's sound thread and no GPU. Use headphones.
 
-- **3D headphone audio** — the switch. Its key on the Keys & headset panel page (default **Alt+Shift+F6**) switches it off and on in flight, so you can compare with DCS's own sound; so does **Switch off or on now** in the Status card.
+- **Turn on** — the switch. Its key on the Keys & headset panel page (default **Alt+Shift+F6**) switches it off and on in flight, so you can compare with DCS's own sound; so does **Switch 3D audio off** (or **on**) in the Status card.
 - **Head size** — the distance around your head, in cm: put a tape measure (or a piece of string) around your head just above the eyebrows and ears. **Small · 54 cm**, **Medium · 57 cm** (the average, and the default) and **Large · 60 cm** set it in one click. It sets how far apart your ears sound, so left and right are placed right for you. With your own SOFA set, leave it at 57 cm: your set already has your own head's timing.
 - **Ears (HRTF)** — how your head and ears change a sound from each direction. **Generic (KU100)** is selected out of the box and suits most people: a measured dummy head (Neumann KU100, from the SADIE II database of the University of York). If you have your own measurement as a **SOFA** file (from an ear scan or a lab measurement), **Import SOFA…** converts it once and selects it. The app shows what it found (directions, sample rate, how much of the sphere is covered, how far apart in time a sound reaches the two ears) and warns about anything unusual; a file it cannot use is refused and nothing changes. If you already have a set with that name, it asks for another. **Remove** deletes the selected set. The SOFA file itself is never copied or sent anywhere: only the converted set, kept in DCS Control's own folder, goes to DCS when you launch.
 - **Follow the head between frames** (on) — sounds stay in place when you turn your head fast: the headset's head position is read at audio rate, between DCS frames, from the pupil shift layer, which Launch DCS installs for it. VR only.
