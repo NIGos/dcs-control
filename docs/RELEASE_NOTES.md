@@ -1,7 +1,3 @@
-# Unreleased
-
-**One image of distant lights (experimental, NVIDIA frame generation).** A new setting under Frame generation > Image quality > **Fine-tune**, off by default and changeable in flight. At night a far aircraft seen only as its lights showed two copies of each light in every generated frame. With it, a small bright light on a dark sky is followed from one real frame to the next and drawn once, where it is in between; a light it cannot follow is shown from the nearer real frame only. Stars, runway lights, the HUD and anything by day are left as they are. Not flown yet: please tell us on GitHub what you see.
-
 # 0.7.1 preview
 
 **3D headphone audio (experimental).** A new **Audio** page, off by default. DCS's left/right panning is replaced by real 3D sound for headphones: engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head.
@@ -10,12 +6,14 @@
 - **Alt+Shift+F6** in flight (or **Switch 3D audio off** on the page) compares it with DCS's own sound. Every setting applies in flight.
 - Feedback on GitHub is very welcome.
 
-**Cleaner generated frames (experimental, NVIDIA frame generation).** Four new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges** and **Cleaner world beside the cockpit**.
-- They were measured offline only and have not been flown yet: please tell us on GitHub what you see.
-- GPU cost: the four together about 0.1 ms per frame at 2X and 0.7 ms at 3X. With all of them off, frame generation is exactly as in 0.7.0.
+**Cleaner generated frames (experimental, NVIDIA frame generation).** Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight.
+- **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges** and **Cleaner world beside the cockpit** give cleaner edges around your aircraft in the external view (F2). In test flights circling the aircraft they took away about a third of the halo around it at dusk, and a quarter on its leading edge by day. In the cockpit view they change little, and by day they can move the faint trailing copy of a crossing aircraft ahead of it.
+- **One image of distant lights**: at night a far aircraft seen only as its lights showed two copies of each light in every generated frame. With it, a small bright light on a dark sky is followed from one real frame to the next and drawn once, where it is in between; a light it cannot follow is shown from the nearer real frame only. Stars, runway lights, the HUD and anything by day are left as they are. Measured offline only so far.
+- GPU cost: the four edge settings a few microseconds per frame in those flights (at most about 0.1 ms at 2X and 0.7 ms at 3X in the offline worst case); One image of distant lights about 0.12 ms at 2X and 0.16 ms at 3X. With all of them off, frame generation is exactly as in 0.7.0.
 - Turning one on in flight no longer stalls the headset for a moment: what they need is prepared in the background, the first time one is turned on.
+- Please tell us on GitHub what you see.
 
-**Multi-threading without driver support is now on by default with AMD graphics** (AMD Radeon, GitHub #27): about 7 % more FPS on a Radeon RX 7900 XTX. Profiles from 0.7.0 get it once. On NVIDIA nothing changes: where DCS gets no command lists there (MFAA on, the integrated GPU, a hooking program) it stays off as before, the Engine Optimizations page says what gives the full gain, and you can still turn it on yourself.
+**Multi-threading without driver support is now automatic: on for PCs with AMD graphics only** (AMD Radeon, GitHub #27): about 7 % more FPS on a Radeon RX 7900 XTX. Profiles from 0.7.0 switch to automatic once. On NVIDIA nothing changes: where DCS gets no command lists there (MFAA on, the integrated GPU, a hooking program) it stays off as before, the Engine Optimizations page says what gives the full gain, and you can still turn it on yourself.
 
 **Ultraleap hand tracking (GitHub #35).** DCS no longer crashes at start with Quad Views, frame generation and Ultraleap hand tracking installed. Turning Ultraleap's layer on or off in Windows (for example with OpenXR API Layers GUI) is now a change Launch DCS applies; Checks says when it waits for the next launch.
 
@@ -24,6 +22,7 @@
 **Fixes:**
 - Pupil shift: when the headset software refuses the eye-tracking extension, the head pose keeps its exact display time.
 - The Engine Optimizations page counts 3D audio among the features that need the engine module.
+- The README shows the User Manual's cover again and links the 0.7 manual.
 - The diagnostic package names your own HRTF sets "personal set 1" and so on, and leaves out 3D audio's file when it never ran.
 # 0.7.0 preview
 
