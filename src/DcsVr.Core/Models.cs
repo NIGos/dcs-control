@@ -153,6 +153,27 @@ public sealed record VrProfile
     /// one eye no longer waits for the other: about 1 ms sooner, the same pixels (the fork's byte-for-byte test on NVIDIA).
     /// Not flown yet; off by default. "Both eyes at once" on the Framegen page.</summary>
     public bool FrameGenParallelEyes { get; init; }
+    // Generated-frame quality options (OFXR patch 0104, NVIDIA Optical Flow only), one [ofxr] key each. All off by
+    // default until a flight A/B (docs/FRAME_PACING.md, Generated-frame quality options, has what each one measured offline).
+    /// <summary>OFXR dcs_motion_sky_occlusion: where something passed in front of the sky between two frames, DCS's motion
+    /// vectors take one frame's sample instead of blending both (the half-bright copy trailing an aircraft at night).</summary>
+    public bool FrameGenSkyOcclusion { get; init; }
+    /// <summary>OFXR perceptual_checks: the colour checks compare sRGB-encoded values on an sRGB swapchain, as they already
+    /// do on Quad Views' focus layer, so dark scenes are judged like bright ones.</summary>
+    public bool FrameGenPerceptualChecks { get; init; }
+    /// <summary>OFXR flow_input_srgb: the optical flow's input sRGB-encoded on an sRGB swapchain (more dark levels).</summary>
+    public bool FrameGenFlowInputSrgb { get; init; }
+    /// <summary>OFXR low_confidence_current: where the flow is not trusted, the current frame instead of a blend of both.</summary>
+    public bool FrameGenCurrentFallback { get; init; }
+    /// <summary>OFXR nvidia_edge_choice: at motion edges, the flow vector whose two ends agree best.</summary>
+    public bool FrameGenEdgeChoice { get; init; }
+    /// <summary>OFXR nvidia_temporal_hints: the optical flow starts from the previous pair's vectors.</summary>
+    public bool FrameGenTemporalHints { get; init; }
+    /// <summary>OFXR dcs_motion_mask_band: DCS's motion vectors also for the world just beside the cockpit.</summary>
+    public bool FrameGenMaskBand { get; init; }
+    /// <summary>OFXR foveated_fade_flow: with foveated frame generation, the focus area's fade moves with the periphery's
+    /// vectors.</summary>
+    public bool FrameGenFadeFlow { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored

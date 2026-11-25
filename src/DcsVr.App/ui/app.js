@@ -820,6 +820,18 @@ function buildFields() {
   c = card('pacingControls','Image quality','How generated frames look.');
   field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['HUD and helmet symbols stay crisper in fast motion. The difference is small.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off');
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
+  // Generated-frame quality options (OFXR 0104), NVIDIA only, all off until flown: one fold, a toggle each.
+  { const nvidia = p => p.frameGen === 'Nvidia', ones = ['frameGenSkyOcclusion','frameGenEdgeChoice','frameGenFlowInputSrgb','frameGenMaskBand','frameGenPerceptualChecks','frameGenCurrentFallback','frameGenTemporalHints','frameGenFadeFlow'];
+    more = disclosure(c,'Fine-tune','Ways to clean up generated frames. NVIDIA only; all off by default.',p => { const n = ones.filter(k => p[k]).length; return n ? ${n} on : 'All off'; });
+    toggles = toggleList(more);
+    field(toggles,'frameGenSkyOcclusion','Clean edges against the sky',['No faint copy trailing an aircraft over the sky, most visible at night.','Where something crossed the sky between two frames, one frame is used instead of a blend of both.'],'toggle',null,nvidia);
+    field(toggles,'frameGenEdgeChoice','Sharper moving edges','Picks the motion that fits best where two motions meet.','toggle',null,nvidia);
+    field(toggles,'frameGenFlowInputSrgb','Better motion in the dark','Motion is estimated on brightness as you see it, with more steps in dark areas.','toggle',null,nvidia);
+    field(toggles,'frameGenMaskBand','Cleaner world beside the cockpit','Uses DCS\'s own motion right up to the cockpit frame.','toggle',null,nvidia);
+    field(toggles,'frameGenPerceptualChecks','Judge dark colours like bright ones','Colour checks compare brightness as you see it.','toggle',null,nvidia);
+    field(toggles,'frameGenCurrentFallback','No double image where motion is unsure','Shows the newer frame there instead of a blend of two.','toggle',null,nvidia);
+    field(toggles,'frameGenTemporalHints','Reuse the last motion','Motion estimation starts from the previous frame\'s.','toggle',null,nvidia);
+    field(toggles,'frameGenFadeFlow','Match the focus edge','With Foveated frame generation, the focus area\'s edge moves like the view around it.','toggle',null,p => nvidia(p) && p.frameGenFoveated); }
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
   more = disclosure(c,'Optical flow','How motion is estimated. NVIDIA only.',() => `${shown('nvidiaFlowScale')} · ${shown('flowPreset')}${profile.bidirectionalFlow ? ' · Both ways' : ''}`); more.dataset.hide = 'flow';

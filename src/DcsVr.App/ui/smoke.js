@@ -11,7 +11,7 @@ window.runWebSmoke = async function() {
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
     'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
-    'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
+    'frameGenHudSymbology','smoothCursor','frameGenSkyOcclusion','frameGenEdgeChoice','frameGenFlowInputSrgb','frameGenMaskBand','frameGenPerceptualChecks','frameGenCurrentFallback','frameGenTemporalHints','frameGenFadeFlow','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
@@ -28,7 +28,7 @@ window.runWebSmoke = async function() {
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
-  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','nvidiaFlowScale','showOverlay',
+  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','frameGenSkyOcclusion','nvidiaFlowScale','showOverlay',
     'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
     'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
