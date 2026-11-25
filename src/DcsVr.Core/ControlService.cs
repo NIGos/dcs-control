@@ -595,7 +595,6 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var nvidiaFlow = applied.Profile.ForLaunch().FrameGen == FrameGeneration.Nvidia;
         var audio = LiveSettings.AudioInstalled(journal); var hrtfSets = LiveSettings.InstalledHrtfSets(journal);
         var fgQuality = LiveSettings.FgQualityInstalled(journal);
-        var lightSingle = LiveSettings.LightSingleInstalled(journal);
         // 3D audio turned on in flight starts at once only when nothing else it needs is read at launch: in VR with
         // Follow the head the head pose (PupilShift.ini [HeadPose], read when DCS starts VR), and DCS's speaker layout
         // unless options.lua already has Stereo (none is Auto: Launch DCS writes Stereo into DCS's sound settings, which
@@ -640,7 +639,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
             if (!LiveSettings.Reloads(name, applied.Profile, journal)
-                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow, audio, hrtfSets, audioOnLive, fgQuality, lightSingle))) { blocked.Add(name); continue; }
+                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow, audio, hrtfSets, audioOnLive, fgQuality))) { blocked.Add(name); continue; }
             if (!selfWritten) { updates.Add(new(entry.Path, wanted.Content, entry.InstalledSha256)); continue; }
             // Only the changed keys, in the file as it is now (Cheeky's learned calibration and formatting stay).
             var values = changed.Where(after.ContainsKey).ToDictionary(k => k, k => after[k], StringComparer.OrdinalIgnoreCase);

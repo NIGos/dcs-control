@@ -96,8 +96,6 @@ public static class LiveSettings
         // OFXR 0104 and 0123: the generated-frame quality options (set on each frame generator without a rebuild, no
         // hitch), taken by the same watcher; only where the installed OFXR has that live contract (FgQualityInstalled).
         F("frameGenSkyOcclusion"), F("frameGenHudGuard"), F("frameGenEdgeChoice"), F("frameGenMaskBand"),
-        // OFXR 0126: one image of a distant light, the same way, where the installed OFXR has contract 3 (LightSingleInstalled).
-        F("frameGenLightSingle"),
         N("neuralIntensity"), N("neuralLocalTone"), N("neuralLocalStructure"), N("neuralSkinStructure"), N("neuralStyle"), N("neuralAutomaticMask"),
         N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralBrightnessMatch"), N("neuralDepth"),
         N("neuralMotionScaleX"), N("neuralMotionScaleY"),
@@ -140,20 +138,12 @@ public static class LiveSettings
     public static IReadOnlySet<string> FgQualityFields { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "frameGenSkyOcclusion", "frameGenHudGuard", "frameGenEdgeChoice", "frameGenMaskBand",
-        "frameGenLightSingle",
     };
     /// <summary>The OFXR layer the applied profile installed takes the generated-frame quality keys
     /// in live with the contract this app writes them for (<see cref="OfxrReadsFgQuality"/>). Not a version check: this app
     /// version can be the one that installed an OFXR without them (0.7.0), whose live watcher would ignore them.</summary>
     public static bool FgQualityInstalled(TransactionJournal? journal) =>
         journal?.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(OfxrLayerFile, StringComparison.OrdinalIgnoreCase)) is { } layer && OfxrReadsFgQuality(layer.Path);
-    /// <summary>The installed OFXR layer also reads light_single_image (contract <see cref="FgLiveContractLight"/>, fork patch
-    /// 0126); one with contract 2 takes the other quality keys in live and ignores this one.</summary>
-    public static bool LightSingleInstalled(TransactionJournal? journal) =>
-        journal?.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(OfxrLayerFile, StringComparison.OrdinalIgnoreCase)) is { } layer && OfxrLiveContract(layer.Path) >= FgLiveContractLight;
-    /// <summary>The setting of the key only an OFXR with contract <see cref="FgLiveContractLight"/> reads.</summary>
-    public const string LightSingleField = "frameGenLightSingle";
-    private const string LightSingleKey = "ofxr.light_single_image";
     public const string OfxrLayerFile = "XR_APILAYER_XRFrameBridge_diagnostic.dll";
     /// <summary>The live contract marker an OFXR layer carries (fork patch 0123, src/common/embedded_control.cpp,
     /// <c>OFXR_LiveFgContract</c>): this text, then the contract's number in ASCII digits. 2 (0123): the quality keys are
@@ -162,45 +152,38 @@ public static class LiveSettings
     /// keeps the text; any number from <see cref="FgLiveContract"/> up counts.</summary>
     public const string FgLiveContractMarker = "DCSC-OFXR-LIVE-FG/";
     public const int FgLiveContract = 2;
-    /// <summary>3 (fork patch 0126): also light_single_image.</summary>
-    public const int FgLiveContractLight = 3;
     private static readonly byte[] FgLiveContractBytes = System.Text.Encoding.ASCII.GetBytes(FgLiveContractMarker);
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Length, DateTime Written, int Contract)> OfxrCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Length, DateTime Written, bool Has)> OfxrCache = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>The OFXR layer at <paramref name="layerPath"/> carries the live contract marker with a number from
     /// <see cref="FgLiveContract"/> up (<see cref="FgLiveContractMarker"/>). Cached by size and time: the interface asks on
     /// every state refresh.</summary>
-    public static bool OfxrReadsFgQuality(string? layerPath) => OfxrLiveContract(layerPath) >= FgLiveContract;
-    /// <summary>The highest live contract number the OFXR layer at <paramref name="layerPath"/> carries (0: none).</summary>
-    public static int OfxrLiveContract(string? layerPath)
+    public static bool OfxrReadsFgQuality(string? layerPath)
     {
-        if (layerPath is null) return 0;
+        if (layerPath is null) return false;
         try
         {
             var info = new FileInfo(layerPath);
-            if (!info.Exists || info.Length > 256L * 1024 * 1024) return 0;
-            if (OfxrCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return cached.Contract;
+            if (!info.Exists || info.Length > 256L * 1024 * 1024) return false;
+            if (OfxrCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return cached.Has;
             var bytes = File.ReadAllBytes(info.FullName);
-            var contract = LiveContract(bytes);
-            OfxrCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, contract);
-            return contract;
+            var has = HasLiveContract(bytes);
+            OfxrCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, has);
+            return has;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return 0; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
     /// <summary>Whether <paramref name="bytes"/> hold <see cref="FgLiveContractMarker"/> followed by a number from
     /// <see cref="FgLiveContract"/> up (every occurrence is looked at).</summary>
-    public static bool HasLiveContract(ReadOnlySpan<byte> bytes) => LiveContract(bytes) >= FgLiveContract;
-    /// <summary>The highest number after <see cref="FgLiveContractMarker"/> in <paramref name="bytes"/> (0: none).</summary>
-    public static int LiveContract(ReadOnlySpan<byte> bytes)
+    public static bool HasLiveContract(ReadOnlySpan<byte> bytes)
     {
-        var best = 0;
         for (int at; (at = bytes.IndexOf(FgLiveContractBytes)) >= 0; bytes = bytes[(at + 1)..])
         {
             var rest = bytes[(at + FgLiveContractBytes.Length)..];
             int digits = 0, value = 0;
             while (digits < rest.Length && digits < 6 && rest[digits] is >= (byte)'0' and <= (byte)'9') value = value * 10 + (rest[digits++] - '0');
-            if (digits > 0) best = Math.Max(best, value);
+            if (digits > 0 && value >= FgLiveContract) return true;
         }
-        return best;
+        return false;
     }
     private static bool InstalledSince(TransactionJournal? journal, string version) =>
         ReleaseVersion.Parse(journal?.AppVersion) is { } installed && installed.CompareTo(ReleaseVersion.Parse(version)) >= 0;
@@ -229,7 +212,6 @@ public static class LiveSettings
         var current07 = Current07(journal);
         var audio = AudioInstalled(journal);
         var fgQuality = FgQualityInstalled(journal);
-        var lightSingle = LightSingleInstalled(journal);
         return [.. Fields.Where(f => f.In.All(file => installed.Contains(file) && Reloads(file, applied, journal)) && (current07 || !Live07.Contains(f.Name)) && f.Kind switch
         {
             Kind.Audio => audio,
@@ -238,7 +220,7 @@ public static class LiveSettings
             // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is
             // filled (foveated_uncovered_fill), which OFXR reads at start: the whole file waits.
             // The quality options only with an OFXR that reads them.
-            Kind.Flow => launch.FrameGen == FrameGeneration.Nvidia && (f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen) && (fgQuality || !FgQualityFields.Contains(f.Name)) && (lightSingle || f.Name != LightSingleField),
+            Kind.Flow => launch.FrameGen == FrameGeneration.Nvidia && (f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen) && (fgQuality || !FgQualityFields.Contains(f.Name)),
             Kind.Panel => launch.UsesHeadsetPanel,
             // With Soft focus edge on, Hide the focus edge also switches dcsvr_edge_match, which Quad Views reads at start.
             Kind.Quad => f.Name != "quadHideFocusEdge" || !launch.QuadEdgeMatch,
@@ -309,7 +291,6 @@ public static class LiveSettings
     private static readonly HashSet<string> FgQualityKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "ofxr.dcs_motion_sky_occlusion", "ofxr.dcs_motion_hud_guard", "ofxr.nvidia_edge_choice", "ofxr.dcs_motion_mask_band",
-        LightSingleKey,
     };
     // CheekyFoveatedDLSS.ini keys Cheeky applies while it runs (patches/cheeky/dcs_live_reload.hpp, dcs_live_keys). The first
     // nine without a hitch; the rest recreate the DLSS-NR feature (a short hitch).
@@ -332,9 +313,8 @@ public static class LiveSettings
     /// <paramref name="audio"/>: the installed engine payload has the audio part (<see cref="AudioInstalled"/>), for [Audio].
     /// <paramref name="hrtfSets"/>: the personal HRTF sets installed next to the module (<see cref="InstalledHrtfSets"/>);
     /// [Audio] Hrtf naming another one waits, since its file comes only with the next launch. Null: not checked.
-    /// <paramref name="fgQuality"/>: the installed OFXR reads the quality keys (<see cref="FgQualityInstalled"/>);
-    /// <paramref name="lightSingle"/>: and light_single_image (<see cref="LightSingleInstalled"/>).
-    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null, bool audioOnLive = true, bool fgQuality = true, bool lightSingle = true)
+    /// <paramref name="fgQuality"/>: the installed OFXR reads the quality keys (<see cref="FgQualityInstalled"/>).
+    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null, bool audioOnLive = true, bool fgQuality = true)
     {
         if (file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase) && IsAudioKey(key))
             return audio && !(key.Equals("Audio.Hrtf", StringComparison.OrdinalIgnoreCase) && hrtfSets is not null && value is not null
@@ -347,7 +327,7 @@ public static class LiveSettings
             var name = key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key;
             return current && (QuadKeys.Contains(name) || current07 && Quad07Keys.Contains(name));
         }
-        if (file.Equals(FlowFile, StringComparison.OrdinalIgnoreCase)) return current && (nvidiaFlow && (FlowKeys.Contains(key) || fgQuality && FgQualityKeys.Contains(key) && (lightSingle || !key.Equals(LightSingleKey, StringComparison.OrdinalIgnoreCase))) || current07 && PanelKeys.Contains(key));
+        if (file.Equals(FlowFile, StringComparison.OrdinalIgnoreCase)) return current && (nvidiaFlow && (FlowKeys.Contains(key) || fgQuality && FgQualityKeys.Contains(key)) || current07 && PanelKeys.Contains(key));
         if (file.Equals(NeuralFile, StringComparison.OrdinalIgnoreCase)) return current && NeuralKeys.Contains(key);
         var engine = file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase);
         var keys = engine ? EngineKeys : file.Equals(PupilFile, StringComparison.OrdinalIgnoreCase) ? PupilKeys : null;

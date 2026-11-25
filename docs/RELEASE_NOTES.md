@@ -6,10 +6,9 @@
 - **Alt+Shift+F6** in flight (or **Switch 3D audio off** on the page) compares it with DCS's own sound. Every setting applies in flight.
 - Feedback on GitHub is very welcome.
 
-**Cleaner generated frames (experimental, NVIDIA frame generation).** Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight.
+**Cleaner generated frames (experimental, NVIDIA frame generation).** Four new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight.
 - **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges** and **Cleaner world beside the cockpit** give cleaner edges around your aircraft in the external view (F2). In test flights circling the aircraft they took away about a third of the halo around it at dusk, and a quarter on its leading edge by day. In the cockpit view they change little, and by day they can move the faint trailing copy of a crossing aircraft ahead of it.
-- **One image of distant lights**: at night a far aircraft seen only as its lights showed two copies of each light in every generated frame. With it, a small bright light on a dark sky is followed from one real frame to the next and drawn once, where it is in between; a light it cannot follow is shown from the nearer real frame only. Stars, runway lights, the HUD and anything by day are left as they are. Measured offline only so far.
-- GPU cost: the four edge settings a few microseconds per frame in those flights (at most about 0.1 ms at 2X and 0.7 ms at 3X in the offline worst case); One image of distant lights about 0.12 ms at 2X and 0.16 ms at 3X. With all of them off, frame generation is exactly as in 0.7.0.
+- GPU cost: a few microseconds per frame in those flights (at most about 0.1 ms at 2X and 0.7 ms at 3X in the offline worst case). With all of them off, frame generation is exactly as in 0.7.0.
 - Turning one on in flight no longer stalls the headset for a moment: what they need is prepared in the background, the first time one is turned on.
 - Please tell us on GitHub what you see.
 

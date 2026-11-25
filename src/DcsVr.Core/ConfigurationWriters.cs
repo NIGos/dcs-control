@@ -451,8 +451,6 @@ public static class ConfigurationWriters
         nvidia_edge_choice={NvidiaOption(p, p.FrameGenEdgeChoice)}
         dcs_motion_mask_band={NvidiaOption(p, p.FrameGenMaskBand)}
         dcs_motion_hud_guard={NvidiaOption(p, p.FrameGenHudGuard)}
-        ; A distant light at night shown once in generated frames, not twice (patch 0126; off until flown).
-        light_single_image={NvidiaOption(p, p.FrameGenLightSingle)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}

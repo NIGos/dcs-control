@@ -359,7 +359,6 @@ Ofxr	ofxr	foveated_periphery_flow_scale
 Ofxr	ofxr	foveated_uncovered_fill
 Ofxr	ofxr	hud_symbology
 Ofxr	ofxr	lazy_runtime_reclaim_ms
-Ofxr	ofxr	light_single_image
 Ofxr	ofxr	motion_vectors
 Ofxr	ofxr	nvidia_bidirectional
 Ofxr	ofxr	nvidia_edge_choice
