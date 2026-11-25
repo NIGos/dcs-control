@@ -9,7 +9,7 @@ there is no height, and the direction only updates at DCS's frame rate. This fea
 
 Everything else stays DCS's own: distance, doppler, propagation delay, filters, canopy damping, radio and intercom.
 
-This page is the contract between the four build tasks (section 9). The exact hook points are in
+This page is the contract between the four parts (section 9). The exact hook points are in
 [BINAURAL_AUDIO_HOOKS.md](BINAURAL_AUDIO_HOOKS.md). The research behind it is
 `artifacts/research/hrtf-audio-design-2026-11-24.md`; this page overrides it where they differ (no Steam Audio stage,
 no WorldGeneral hooks, scope of v1).
@@ -53,16 +53,16 @@ no WorldGeneral hooks, scope of v1).
 
 Components and where they live:
 
-| Component | Location | Task |
+| Component | Location | Part |
 |---|---|---|
 | Interface headers | `native/binaural/include/` (`binaural_core.h`, `hrtf_format.h`, `head_pose_shm.h`, `binaural_config.h`) | contract |
-| BinauralCore (static lib, no DCS dependency) | `native/binaural/src/` | A |
-| Offline harness | `native/binaural/test/` | A |
-| Generic HRTF data (generated `.dcshrtf`) | `native/binaural/data/` | A |
-| SOFA → `.dcshrtf` converter (C#) | `src/DcsVr.Core/Hrtf/` + a CLI command | A |
-| Audio module (hooks, ownership, mixing back) | `native/dcsqvcull/src/audio_*.h`, wired into the payload | B |
-| Head pose publisher | `native/pupil_shift/` | C |
-| App: settings, page, ini, Live, Checks, diagnostics, docs | `src/DcsVr.Core`, `src/DcsVr.App`, `docs/` | D |
+| BinauralCore (static lib, no DCS dependency) | `native/binaural/src/` | core |
+| Offline harness | `native/binaural/test/` | core |
+| Generic HRTF data (generated `.dcshrtf`) | `native/binaural/data/` | core |
+| SOFA → `.dcshrtf` converter (C#) | `src/DcsVr.Core/Hrtf/` + a CLI command | core |
+| Audio module (hooks, ownership, mixing back) | `native/dcsqvcull/src/audio_*.h`, wired into the payload | audio module |
+| Head pose publisher | `native/pupil_shift/` | head pose |
+| App: settings, page, ini, Live, Checks, diagnostics, docs | `src/DcsVr.Core`, `src/DcsVr.App`, `docs/` | app |
 
 **Loading:** the audio module is part of the existing engine payload (`DcsQvCullPayload.dll`). It is loaded the
 existing way:
@@ -111,7 +111,7 @@ off or in perception-only mode, since audio is not an engine optimization.
   - CIPIC: licence unclear for redistribution;
   - HUTUBS and FABIAN: CC BY 4.0, fine, but human or simulated heads with sparser grids. They stay possible as
     additional bundled profiles.
-  - SADIE II D2 (KEMAR) is in the same database and licence. Task A may add it as a second bundled set when the harness
+  - SADIE II D2 (KEMAR) is in the same database and licence. The core may add it as a second bundled set when the harness
     and the listening test justify it.
 - **Pinning:** `scripts/fetch-hrtf.ps1` downloads the ZIP only from the Zenodo record above (or reuses the copy in
   `.cache/hrtf`) and checks its size, MD5 and SHA-256 and the 48 kHz SOFA's SHA-256 (all in `docs/THIRD_PARTY.md`); the
@@ -247,7 +247,7 @@ All of these run offline without DCS, through ctest or `dotnet test`. The live c
 
 Pass: `0 failure(s)`.
 
-### 8.2 BinauralCore harness (task A, `native/binaural/test`, ctest)
+### 8.2 BinauralCore harness (the core, `native/binaural/test`, ctest)
 
 | # | Test | Pass criterion |
 |---|---|---|
@@ -289,7 +289,7 @@ Pass: `0 failure(s)`.
   reason.
 - **Personal grid:** a synthetic irregular grid converts and validates.
 
-**Task A as built** (`native/binaural`, `binaural_core_test`; numbers from the run in the commit message):
+**The core as built** (`native/binaural`, `binaural_core_test`; numbers from the run in the commit message):
 - The harness runs on a synthetic spherical-head set (an icosphere of 2,562 directions, Brown-Duda head shadow per ear,
   a back shelf, Woodworth delays), so A1-A13 need no downloaded data. A14 runs as its own ctest (`--default-data`) on
   the committed `native/binaural/data/sadie2_ku100.dcshrtf` (it would print `SKIP A14` without the file).
@@ -344,7 +344,7 @@ Pass: `0 failure(s)`.
   - A14 adds, on the real set at 48, 57 and 66 cm: the near-field off -> on crossfade (A10 limit), a live head-size
     change from 57 cm (A10 limit) and the parallax angles from the real ear positions (A7, +-0.5 degrees).
 
-### 8.3 Audio module (task B, `native/dcsqvcull/test`)
+### 8.3 Audio module (`native/dcsqvcull/test`)
 1. **Fake ed_sound:**
    - a test DLL whose code section carries the four call-site byte sequences of the hook spec and small stand-in
      panner, voice render (an adding kernel) and mix functions using the same struct offsets;
@@ -370,7 +370,7 @@ Pass: `0 failure(s)`.
 7. **Config:** every `[Audio]` key, its clamps and Live reload. `ini_keys_test.h` and `log_phrases_test.h` are updated.
 8. **Offline/spatial paths:** P4 calls outside an armed P5 block pass through.
 
-### 8.4 Head pose (task C, `native/pupil_shift`)
+### 8.4 Head pose (`native/pupil_shift`)
 1. **Writer:**
    - with the fake runtime, each new display time publishes exactly one entry: VIEW-in-base pose, velocities and flags;
    - `[HeadPose] Publish=0` publishes nothing and creates no mapping;
@@ -381,7 +381,7 @@ Pass: `0 failure(s)`.
    - torn reads are never accepted in a 10 s writer/reader stress (orientation norm checked on every read).
 3. **Cost:** added time per xrLocateViews < 20 µs (p99) in the harness.
 
-### 8.5 App (task D)
+### 8.5 App
 1. **Settings model:**
    - every key round-trips through the profile → ini writer → reader;
    - `written-keys.txt`, `contracts.json`, `ini_keys_test.h` (engine side) list exactly the written keys;
@@ -445,13 +445,13 @@ and the time of the moment.
 Then the user's blind A/B: stock vs Windows Sonic vs binaural, with six cues (wingman behind, rotor overhead, switch
 clicks left/right/overhead, gun, missile launch).
 
-## 9. Tasks
+## 9. Parts
 
-Each task branches from `feat/hrtf-contract` (`git switch -c feat/hrtf-<part> feat/hrtf-contract`) in its own
-worktree. Files are split so the four can merge without conflicts. Where two tasks touch one file, the owner is named;
+Each part was built on a branch from `feat/hrtf-contract` (`git switch -c feat/hrtf-<part> feat/hrtf-contract`) in its own
+worktree. Files are split so the four could merge without conflicts. Where two parts touch one file, the owner is named;
 others only append.
 
-### (A) BinauralCore, data, converter, harness: `feat/hrtf-core`
+### BinauralCore, data, converter, harness: `feat/hrtf-core`
 - **Core:**
   - `native/binaural/src/`: implement `binaural_core.h` exactly (no API change without updating this page and the
     header in the same commit);
@@ -472,9 +472,9 @@ others only append.
   - `scripts/package-sources.py` must include the data and notice.
 - **Build:** `scripts/build-binaural.ps1`, in the style of `build-pupil-shift.ps1`: msvc.cmd, build-jobs, test cache,
   BelowNormal.
-- **Hand-off:** the core library target name and its include path for task B.
+- **Hand-off:** the core library target name and its include path for the audio module.
 
-### (B) DCS audio module: `feat/hrtf-module`
+### DCS audio module: `feat/hrtf-module`
 - **Module:**
   - `native/dcsqvcull/src/audio_hooks.h` (sites, patcher, validation), `audio_voice.h` (PanWrap, ownership, mono gain,
     VoiceMeta), `audio_render.h` (MixWrap/RenderWrap, binding, budget), `audio_config.h` (reads `[Audio]` with
@@ -496,7 +496,7 @@ others only append.
 - **Pose reading:** with `head_pose_shm.h`. The q_used tag comes from the engine's own `DcsVrMotion_v1` pose display
   time.
 
-### (C) Head pose publisher: `feat/hrtf-pose`
+### Head pose publisher: `feat/hrtf-pose`
 - **`native/pupil_shift/pupil_shift_layer.cpp`:**
   - create a VIEW reference space per session;
   - at each xrLocateViews with a new display time, `xrLocateSpace(view, info->space, displayTime)` with
@@ -519,7 +519,7 @@ others only append.
   - a reader test using only the header (the module's reader path).
 - **Constraint:** no change to how the layer moves DCS's views (pose publishing is read-only).
 
-### (D) App: `feat/hrtf-app`
+### App: `feat/hrtf-app`
 - **Page:** a new **Audio** page (rail label "Audio", id `page-audio`), in the VR group but **not** hidden with
   Optimizations only, because binaural audio also helps on a monitor with head tracking. Why not the Perception page:
   that page is about eye distance and depth (vision); page names must match their content, and the audio settings
@@ -552,7 +552,7 @@ others only append.
 - **Other places:**
   - Last flight: "3D audio: on/off/fallback (reason), p99 cost";
   - diagnostics package entries;
-  - SOFA import UI calling task A's converter, with the conversion report;
+  - SOFA import UI calling the converter, with the conversion report;
   - Feature guide entry;
   - `docs/USER_GUIDE.md` section;
   - `docs/INTERFACE.md` Pages list;
@@ -581,12 +581,12 @@ has the audio module", not "this payload has the set".
 Review fixes (`fix/hrtf-audio-review`, on `feat/hrtf-audio`):
 - **No set, nothing deployed.** `Binaural.PayloadHasDefaultHrtf` reads the payload's PE resource table (`PeResource`):
   the RCDATA `HRTF_DEFAULT` with data. Without it and without a personal set (`Binaural.Usable`), Launch DCS deploys no
-  part of 3D audio (no `[Audio]`, no head pose, no Stereo layout; profile.json keeps the choice), Checks says
-  `audio-unavailable`, and the Audio page greys the switch out with the reason; the module patches ed_sound only when a
+  part of 3D audio (no `[Audio]`, no head pose, no Stereo layout; profile.json keeps the choice), and since 0.7.1 (a release always has the
+  generic set) no Checks line or greyed switch is left for it; the module patches ed_sound only when a
   set loads (`HrtfReady`). `scripts/build-release.ps1` refuses a release without the set, its Apache-2.0 text and its
   NOTICE (a `-LocalOnly` package warns), and copies both into `licenses/`.
-- **SOFA import offered only with a converter:** `CliHrtfConverter.IsAvailable` asks `DcsVr.Cli hrtf-convert --check`
-  once per run (exit 0 = the converter is there; part of the CLI contract below).
+- **SOFA import:** every build ships the converter, so since 0.7.1 the app no longer runs `DcsVr.Cli hrtf-convert --check`;
+  `CliHrtfConverter.IsAvailable` stays for the tests (exit 0 = the converter is there; part of the CLI contract below).
 - **Head size** is relative to the set's own head: the renderer gets `PilotItdRadiusM(set's fitted radius,
   circumference)` = fit x C / 57 cm (binaural_config.h), so 57 cm plays the set's own timing, whatever head it was
   measured on, and a set picked live gets its own fit again. (C / 2 pi against a Woodworth fit scaled the reference head's
@@ -597,10 +597,10 @@ Review fixes (`fix/hrtf-audio-review`, on `feat/hrtf-audio`):
   busy settings slot keeping the last good copy, and a control thread that does not stop within 3 s leaving every
   binding in place: docs/BINAURAL_AUDIO_HOOKS.md section 9.
 
-## 10. The app side (task D): what the app writes, reads and calls
+## 10. The app side: what the app writes, reads and calls
 
 Implemented on `feat/hrtf-app` (`src/DcsVr.Core/BinauralAudio.cs`, `HrtfLibrary.cs`; the Audio page in `src/DcsVr.App/ui`).
-Tasks A and B match these when they merge; the integrator checks them against the merged code.
+The core and the audio module match these; the tests check them against the code.
 
 **Profile** (`VrProfile`): `binauralAudio`, `binauralHrtf`, `headCircumferenceCm`, `binauralLateHeadTracking`,
 `binauralNearField`, `binauralMaxObjects`, `binauralLevelTrimDb`, `binauralCpuBudgetPercent`, `binauralExcludeContexts`
@@ -620,7 +620,7 @@ Tasks A and B match these when they merge; the integrator checks them against th
 - Runtime files removed by Back to stock: `toggle_audio.flag`, `audio_*.csv` (the module writes LogVoices to `audio_voices.csv`).
 
 **Live:** every field above but `binauralExcludeContexts`, file `DcsQvCull.ini`, only while the installed payload has the
-audio part: the app looks for the UTF-16 resource name `HRTF_DEFAULT` in the installed `DcsQvCullPayload.dll` (task B
+audio part: the app looks for the UTF-16 resource name `HRTF_DEFAULT` in the installed `DcsQvCullPayload.dll` (the audio module
 embeds the generic set under that name). `Audio.Hrtf` naming a set not installed at launch waits. `HeadPose.Publish` is
 not a live key (read when DCS starts VR), so turning 3D audio on in VR waits: `Audio.Binaural` 0 -> 1 is held back
 (the whole `DcsQvCull.ini` write waits) when DCS started with it off and either the head pose is needed (VR with
@@ -651,7 +651,7 @@ redacted in the diagnostic package).
 These are the module's own lines (`native/dcsqvcull/src/main/audio.inc`); the module's `Phrases` test keeps them in the
 source and the app's status test parses them verbatim.
 
-**SOFA converter** (task A, `src/DcsVr.Core/Hrtf/SofaConversion.cs`), called through the CLI contract
+**SOFA converter** (`src/DcsVr.Core/Hrtf/SofaConversion.cs`), called through the CLI contract
 `DcsVr.Cli hrtf-convert <in.sofa> <out.dcshrtf> --name <name>` (`CliHrtfConverter`, hidden, below-normal priority,
 two-minute limit; a conversion takes about 2 s): exit 0 with the file written is a conversion (written beside the
 target, then moved over it; the target needs no `.dcshrtf` extension, the app passes a `.tmp`); stdout lines
@@ -660,8 +660,8 @@ spread directions with a measurement within 15 degrees). Any other exit is a ref
 line: 2 for a file the reader or converter refuses, 1 for wrong arguments or a file that cannot be read or written.
 `--source` defaults to the database, subject and organisation the file names (never its path), `--name` to the file's
 name; without `--generic` the set is marked personal. `DcsVr.Cli hrtf-convert --check` exits 0 when the converter is there
-(the app greys Import SOFA out otherwise). The app validates the result again with a port of
-`hrtf_format.h Validate()` (`HrtfFile.Validate`) and keeps nothing it refuses. `IHrtfConverter` is the seam: task A may
+(for the tests; the app does not probe it, since every build ships the converter). The app validates the result again with a port of
+`hrtf_format.h Validate()` (`HrtfFile.Validate`) and keeps nothing it refuses. `IHrtfConverter` is the seam: a later version may
 replace `CliHrtfConverter` with an in-process call. The SOFA file and its folder are never kept; the library keeps the
 `.dcshrtf`, and a sidecar with the SOFA file's name, the import time, the warnings and the coverage.
 

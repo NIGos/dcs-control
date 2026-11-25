@@ -207,7 +207,7 @@ static void TestConfig() {
 }
 
 static void TestCoreDeclarations() {
-    // The core is implemented in task A; here only its declarations are checked to be usable.
+    // The core is implemented in src/; here only its declarations are checked to be usable.
     binaural::Config c;
     CHECK(c.sampleRate == 48000 && c.maxSources <= binaural::kMaxSources && c.nearField);
     binaural::SourceUpdate s{{1, 0, 0}, 1.0f, binaural::source_flags::kReset};

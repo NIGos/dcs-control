@@ -1,6 +1,6 @@
-// DCS Control binaural audio: BinauralCore, the HRTF renderer (task A in docs/BINAURAL_AUDIO.md).
+// DCS Control binaural audio: BinauralCore, the HRTF renderer (docs/BINAURAL_AUDIO.md).
 //
-// A static library with no DCS dependency. The DCS audio module (task B) feeds it one mono source at a time from inside
+// A static library with no DCS dependency. The DCS audio module feeds it one mono source at a time from inside
 // ed_sound's render callback (docs/BINAURAL_AUDIO_HOOKS.md section 5.2); the offline harness feeds it the same way.
 //
 // DSP (why: docs/BINAURAL_AUDIO.md, "DSP approach"):

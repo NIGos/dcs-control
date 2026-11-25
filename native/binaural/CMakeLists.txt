@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(DcsVrBinaural LANGUAGES CXX)
 
-# Binaural (HRTF) audio for DCS: the interface headers (include/), BinauralCore and its offline harness (task A in
+# Binaural (HRTF) audio for DCS: the interface headers (include/), BinauralCore and its offline harness (the core in
 # docs/BINAURAL_AUDIO.md). The audio module in native/dcsqvcull and the pose publisher in native/pupil_shift include
 # include/ from here (no copies).
 set(CMAKE_CXX_STANDARD 17)

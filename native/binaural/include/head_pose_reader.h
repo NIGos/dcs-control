@@ -1,4 +1,4 @@
-// DCS Control: the reader side of Local\DcsVrHeadPose_v1 (head_pose_shm.h), for the binaural audio module (task B).
+// DCS Control: the reader side of Local\DcsVrHeadPose_v1 (head_pose_shm.h), for the binaural audio module.
 //
 // Real-time safe: no allocation, locks, waits, system calls or logging; bounded work (a few entry copies). The caller
 // passes the clocks (QueryPerformanceCounter) and opens the mapping outside the audio callback (head_pose_shm.h

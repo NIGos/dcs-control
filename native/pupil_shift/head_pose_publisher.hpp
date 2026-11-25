@@ -1,5 +1,5 @@
 // The writer side of Local\DcsVrHeadPose_v1 (native/binaural/include/head_pose_shm.h) for the pupil shift layer: the
-// head pose of each display time DCS locates, for binaural audio's late head rotation (docs/BINAURAL_AUDIO.md, task C).
+// head pose of each display time DCS locates, for binaural audio's late head rotation (docs/BINAURAL_AUDIO.md).
 //
 // Pure and header-only (no OpenXR types, no Windows calls) so the unit tests use exactly what the layer runs:
 //   - Publisher::claim: once per display time, across threads (DCS may locate the same display time again);

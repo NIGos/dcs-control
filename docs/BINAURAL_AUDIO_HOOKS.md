@@ -1,6 +1,6 @@
 # Binaural audio: hook specification for DCS's ed_sound.dll
 
-This is the contract for the DCS audio module (task B in [BINAURAL_AUDIO.md](BINAURAL_AUDIO.md)). It turns §1 of the
+This is the contract for the DCS audio module ([BINAURAL_AUDIO.md](BINAURAL_AUDIO.md)). It turns §1 of the
 design (`artifacts/research/hrtf-audio-design-2026-11-24.md`) into exact hook points, checks and struct layouts.
 
 Everything here comes from static reading of the DCS binaries (Python `pefile` + `capstone`, linear sweep over the
@@ -442,7 +442,7 @@ Any failure → nothing is patched (or everything is restored in reverse order),
 | New voices panned before the first block | Yes, at `0x1ba00`; hooked as P3b [V §1.2] |
 | Mono gain rule (design's S2 question) | DCS's own gain for a frontal source, solved from DCS's two gains [§5.1] |
 
-## 9. As implemented (task B, `native/dcsqvcull`)
+## 9. As implemented (`native/dcsqvcull`)
 
 Files: `src/audio_sigs.h` (generated), `src/audio_hooks.h` (sites, checks, thunks, patching), `src/audio_voice.h`
 (layouts, mono gain rule, VoiceMeta), `src/audio_sim.h` (ownership, tag), `src/audio_render.h` (output rule, re-pan,

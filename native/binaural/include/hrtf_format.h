@@ -17,7 +17,7 @@
 // From SOFA spherical coordinates (azimuth degrees counter-clockwise from the front, i.e. positive to the left;
 // elevation degrees up):  x = cos(el) cos(az),  y = sin(el),  z = -cos(el) sin(az).
 //
-// The converter (C#, src/DcsVr.Core, task A) produces:
+// The converter (C#, src/DcsVr.Core/Hrtf) produces:
 //   - minimum-phase IRs (real cepstrum), truncated to `taps` with a half-Hann tail window;
 //   - onset delays from the original HRIRs: per ear, the slope of the excess phase (phase of the measured HRIR minus
 //     that of the stored minimum-phase IR) fitted by least squares over 200-1500 Hz (HrtfDsp.ExcessPhaseDelay), so the

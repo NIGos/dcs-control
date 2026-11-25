@@ -1,5 +1,5 @@
 // BinauralCore internals shared by the implementation files and the offline harness (native/binaural/test). Not part
-// of the interface: the audio module (task B) uses only include/binaural_core.h.
+// of the interface: the audio module uses only include/binaural_core.h.
 #pragma once
 
 #include <cstddef>

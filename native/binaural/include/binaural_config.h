@@ -1,6 +1,6 @@
 // DCS Control binaural audio: the [Audio] section of DcsQvCull.ini, its defaults, ranges and Live rules.
 //
-// The app (task D) writes these keys; the audio module (task B) reads them at start and at every ini reload (Live).
+// The app writes these keys; the audio module reads them at start and at every ini reload (Live).
 // [Audio] is not an engine section (native/dcsqvcull/src/ini_diff.h): a Live write of it never resets the engine kill
 // switch, and the engine kill switch never affects audio. Every key below is Live: the module applies a change at the
 // next device block (Hrtf: after the control thread has loaded and resampled the new set; the swap is a per-source

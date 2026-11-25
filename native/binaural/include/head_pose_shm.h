@@ -1,9 +1,9 @@
 // DCS Control: Local\DcsVrHeadPose_v1, the head pose at audio rate for binaural audio (docs/BINAURAL_AUDIO.md).
 //
-//   Writer: the pupil shift OpenXR layer (native/pupil_shift, task C), at each xrLocateViews with a new display time:
+//   Writer: the pupil shift OpenXR layer (native/pupil_shift), at each xrLocateViews with a new display time:
 //           xrLocateSpace(VIEW space, info->space, displayTime) with XrSpaceVelocity chained. One entry per display
 //           time. Only while PupilShift.ini [HeadPose] Publish=1 (binaural_config.h kPosePublishSection/Key).
-//   Reader: the DCS audio module (task B): on the simulation thread once per SND_process (the pose DCS used for the
+//   Reader: the DCS audio module: on the simulation thread once per SND_process (the pose DCS used for the
 //           listener, by display time) and on the render thread once per device block (the newest pose, predicted to
 //           the block's output time). Both only read.
 //
