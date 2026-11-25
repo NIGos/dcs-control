@@ -4,7 +4,7 @@
 
 **Cleaner generated frames** (NVIDIA frame generation). Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (Off, With Sharp HUD or Always), which takes away most of the smear just behind and ahead of another aircraft.
 
-**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: about 7 % more FPS on a Radeon RX 7900 XTX (GitHub #27). Earlier profiles get it turned on once. NVIDIA cards are not affected; where DCS gets no command lists there (MFAA on, integrated graphics, a program hooked into DCS), the Engine Optimizations page says what gives the full gain.
+**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: about 7 % more FPS on a Radeon RX 7900 XTX (GitHub #27). Earlier profiles get it turned on once. On NVIDIA cards, which have their own command lists, nothing changes; where DCS gets none there (MFAA on, the integrated GPU, a hooking program), the recorders run on emulated lists and the Engine Optimizations page says what gives the full gain.
 
 # 0.7.0 preview
 

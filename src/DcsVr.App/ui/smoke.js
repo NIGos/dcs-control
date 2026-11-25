@@ -258,6 +258,14 @@ window.runWebSmoke = async function() {
         && $('seg-fpsLimit').querySelector('[data-value=MatchRefresh]').classList.contains('is-default') && !$('seg-fpsLimit').querySelector('[data-value=Custom]').classList.contains('is-default'));
       check('With DLSS 5 on, Pimax native is a disabled segment that says why',ui.profile.neuralRendering && $('seg-quadViews').querySelector('[data-value=PimaxNative]').disabled && $('seg-quadViews').querySelector('[data-value=PimaxNative]').title.includes('not with DLSS 5')
         && !$('segnote-quadViews').hidden && $('segnote-quadViews').textContent.includes('not with DLSS 5') && $('seg-quadViews').getAttribute('aria-describedby').split(' ').includes('segnote-quadViews'));
+      // Fill around moving aircraft: With Sharp HUD while Sharp HUD is off stays pickable and says what it needs.
+      { const keep = ['frameGen','frameGenOcclusionFill','frameGenHudSymbology'].map(k => [k,ui.profile[k]]), note = $('segnote-frameGenOcclusionFill');
+        Object.assign(ui.profile,{frameGen:'Nvidia',frameGenOcclusionFill:'WithSharpHud',frameGenHudSymbology:false}); ui.invalidate();
+        const needs = !note.hidden && note.textContent === 'Needs Sharp HUD.' && !$('seg-frameGenOcclusionFill').querySelector('[data-value=WithSharpHud]').disabled;
+        ui.profile.frameGenHudSymbology = true; ui.invalidate(); const withHud = note.hidden;
+        ui.profile.frameGenHudSymbology = false; ui.profile.frameGenOcclusionFill = 'Always'; ui.invalidate(); const always = note.hidden;
+        keep.forEach(([k,v]) => { if (v === undefined) delete ui.profile[k]; else ui.profile[k] = v; }); ui.invalidate();
+        check('Fill around moving aircraft: "Needs Sharp HUD." under With Sharp HUD while Sharp HUD is off, nowhere else',needs && withHud && always); }
       // Home and End pick the first and last choice that can be picked; arrows skip a disabled one (Pimax native with DLSS 5 on).
       { const provider = ui.profile.quadViews, at = v => $('seg-quadViews').querySelector(`[data-value=${v}]`), key = (b,k) => b.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true,cancelable:true}));
         ui.navigate('foveation'); const from = radios('quadViews').find(b => b.getAttribute('aria-checked') === 'true'); from.focus();

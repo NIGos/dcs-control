@@ -2419,6 +2419,24 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     Require((withPupil.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? []).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "with Pupil shift the layer still takes over DCS's IPD");
     Require(!planner.Build(vr with { GVision = true, GVisionUseGaze = false }, inventory, Path.Combine(root, "publish/managed-g")).Files.Any(f => f.Path.Contains("pupilshift")), "G vision straight ahead needs no layer");
 });
+Test("The occlusion fill of feat/fg-engine-data dev builds (a bool, and frameGenOcclusionFillOverHud) loads as its mode", () =>
+{
+    foreach (var (json, want) in new (string, OcclusionFill)[] {
+        ("{\"frameGenOcclusionFill\":true}", OcclusionFill.WithSharpHud),
+        ("{\"frameGenOcclusionFill\":true,\"frameGenOcclusionFillOverHud\":true}", OcclusionFill.Always),
+        ("{\"FrameGenOcclusionFillOverHud\":true,\"FRAMEGENOCCLUSIONFILL\":true}", OcclusionFill.Always),
+        ("{\"frameGenOcclusionFill\":true,\"frameGenOcclusionFillOverHud\":false}", OcclusionFill.WithSharpHud),
+        ("{\"frameGenOcclusionFill\":false,\"frameGenOcclusionFillOverHud\":true}", OcclusionFill.Off),
+        ("{\"frameGenOcclusionFillOverHud\":true}", OcclusionFill.Off),
+        ("{\"frameGenOcclusionFill\":\"Always\",\"frameGenOcclusionFillOverHud\":false}", OcclusionFill.Always),
+        ("{\"frameGenOcclusionFill\":\"WithSharpHud\"}", OcclusionFill.WithSharpHud) })
+    {
+        var loaded = JsonData.Deserialize<VrProfile>(json);
+        var saved = JsonData.Serialize(loaded);
+        Require(loaded.FrameGenOcclusionFill == want && !saved.Contains("OverHud", StringComparison.OrdinalIgnoreCase)
+            && JsonData.Deserialize<VrProfile>(saved).FrameGenOcclusionFill == want, json + " -> " + loaded.FrameGenOcclusionFill);
+    }
+});
 Test("Free unused DLSS memory is gone (0.7): an older profile with it loads, and [DLSS] ReleaseIdleSets is never written", () =>
 {
     string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
@@ -7582,12 +7600,17 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     var old = LiveSettings.AvailableFields(nvidia, Journal(null, all));
     Require(old.Contains("engineBeeps") && old.Contains("engineModelAllocator") && !old.Contains("quadSharpening") && !old.Contains("flowPreset") && !old.Contains("neuralIntensity") && !old.Contains("engineDiagnosticHooks"), string.Join(", ", old));
     Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("nvidiaFlowScale"), "FidelityFX: the flow keys mean nothing");
-    // The quality options and the occlusion fill: only with an OFXR whose DLL has their key names (0.7.0's has not).
+    // The quality options and the occlusion fill: only with an OFXR whose DLL has their live contract (0123's marker,
+    // DCSC-OFXR-LIVE-FG/2 or a later number). 0.7.0's has not; nor has an OFXR with only 0104/0122's key names (its fill
+    // was a rebuild with a hitch).
     Require(LiveSettings.FgQualityFields.All(n => LiveSettings.Find(n) is { Kind: LiveSettings.Kind.Flow }) && !LiveSettings.FgQualityFields.Any(tags.Contains), "no OFXR layer in the journal: " + string.Join(", ", tags));
     var newLayer = Path.Combine(root, "fgq-new", LiveSettings.OfxrLayerFile); var oldLayer = Path.Combine(root, "fgq-old", LiveSettings.OfxrLayerFile);
     Directory.CreateDirectory(Path.GetDirectoryName(newLayer)!); Directory.CreateDirectory(Path.GetDirectoryName(oldLayer)!);
-    File.WriteAllBytes(newLayer, [.. "MZ"u8, .. System.Text.Encoding.Unicode.GetBytes("x dcs_motion_hud_guard y dcs_motion_occlusion_fill z")]);
-    File.WriteAllBytes(oldLayer, [.. "MZ"u8, .. System.Text.Encoding.Unicode.GetBytes("x nvidia_occlusion_aware y")]);
+    File.WriteAllBytes(newLayer, [.. "MZ"u8, .. "x DCSC-OFXR-LIVE-FG/2\0 y"u8]);
+    File.WriteAllBytes(oldLayer, [.. "MZ"u8, .. System.Text.Encoding.Unicode.GetBytes("x nvidia_occlusion_aware y dcs_motion_hud_guard z dcs_motion_occlusion_fill")]);
+    Require(LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/2"u8) && LiveSettings.HasLiveContract("a DCSC-OFXR-LIVE-FG/1 b DCSC-OFXR-LIVE-FG/12\0"u8)
+        && !LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/1\0"u8) && !LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/"u8) && !LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/x2"u8),
+        "the live contract marker: its number from 2 up, every occurrence looked at");
     TransactionJournal WithLayer(string layer) => Journal(ProductInfo.Version, all) with { Entries = [.. Journal(ProductInfo.Version, all).Entries, new JournalEntry { Path = layer, InstalledSha256 = "0" }] };
     var withNew = LiveSettings.AvailableFields(nvidia, WithLayer(newLayer));
     Require(LiveSettings.FgQualityInstalled(WithLayer(newLayer)) && !LiveSettings.FgQualityInstalled(WithLayer(oldLayer)) && LiveSettings.FgQualityFields.All(withNew.Contains)
@@ -7745,15 +7768,15 @@ Test("Live: the generated-frame quality options and the occlusion fill are writt
     var f = E2e("live-ofxr-quality"); var draft = LiveCheekyDraft(); var inventory = E2eInventory(f);
     Require(draft.FrameGen == FrameGeneration.Nvidia && f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied);
     var applied = f.Service.ReadAppliedProfile()!;
-    // The fixture's OFXR layer is a stand-in without the key names: as installed by 0.7.0, every one waits.
+    // The fixture's OFXR layer is a stand-in without the live contract: as installed by 0.7.0, every one waits.
     var layer = applied.Journal.Entries.Single(e => Path.GetFileName(e.Path).Equals(LiveSettings.OfxrLayerFile, StringComparison.OrdinalIgnoreCase)).Path;
     Require(!LiveSettings.FgQualityInstalled(applied.Journal) && !LiveSettings.FgQualityFields.Any(LiveSettings.AvailableFields(applied.Profile, applied.Journal).Contains), "a layer without them");
     var waits = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FrameGenHudGuard = true }, inventory));
     Require(waits.Written.Count == 0 && waits.Waiting.SequenceEqual(["frameGenHudGuard"]), waits.Message);
-    // This version's OFXR has them (0104's quality keys and 0122's fill, as UTF-16 names in the DLL).
-    File.WriteAllBytes(layer, [.. "MZ"u8, .. System.Text.Encoding.Unicode.GetBytes("dcs_motion_hud_guard dcs_motion_occlusion_fill")]);
+    // This version's OFXR has them (0123's live contract marker in the DLL).
+    File.WriteAllBytes(layer, [.. "MZ"u8, .. "DCSC-OFXR-LIVE-FG/2\0"u8]);
     Require(LiveSettings.FgQualityInstalled(applied.Journal) && LiveSettings.FgQualityFields.All(LiveSettings.AvailableFields(applied.Profile, applied.Journal).Contains), "this build's OFXR reads them");
-    Require(LiveSettings.OfxrReadsFgQuality(DeferredOfxr) || !File.Exists(DeferredOfxr), "the built OFXR layer has the key names");
+    Require(LiveSettings.OfxrReadsFgQuality(DeferredOfxr) || !File.Exists(DeferredOfxr), "the built OFXR layer has the live contract marker");
     var ofxr = LiveEntry(f, LiveSettings.FlowFile).Path;
     var on = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FrameGenOcclusionFill = OcclusionFill.WithSharpHud, FrameGenHudGuard = true, FrameGenSkyOcclusion = true }, inventory));
     Require(on.Written.SequenceEqual([ofxr]) && on.Applied.Order().SequenceEqual(new[] { "frameGenHudGuard", "frameGenOcclusionFill", "frameGenSkyOcclusion" }) && on.Waiting.Count == 0, on.Message);

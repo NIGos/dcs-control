@@ -93,9 +93,9 @@ public static class LiveSettings
         // R148: the flow quality preset is not here: OFXR re-initialises its NVIDIA flow for it (5.5 s), and DCS froze for
         // 6.8 s. Resolution and bidirectional flow cost a single frame of about 0.5 s.
         F("nvidiaFlowScale"), F("bidirectionalFlow"),
-        // OFXR 0104 and 0122: the generated-frame quality options (shader bits, no hitch) and the occlusion fill (a rebuild of
-        // the frame generator, a short hitch), taken by the same watcher; only where the installed OFXR reads them
-        // (FgQualityInstalled).
+        // OFXR 0104, 0122 and 0123: the generated-frame quality options and the occlusion fill (both set on each frame
+        // generator without a rebuild, no hitch), taken by the same watcher; only where the installed OFXR has that live
+        // contract (FgQualityInstalled).
         F("frameGenSkyOcclusion"), F("frameGenHudGuard"), F("frameGenEdgeChoice"), F("frameGenMaskBand"), F("frameGenOcclusionFill"),
         N("neuralIntensity"), N("neuralLocalTone"), N("neuralLocalStructure"), N("neuralSkinStructure"), N("neuralStyle"), N("neuralAutomaticMask"),
         N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralBrightnessMatch"), N("neuralDepth"),
@@ -135,21 +135,29 @@ public static class LiveSettings
         (journal?.Entries ?? []).Where(e => e.Path.EndsWith(Binaural.HrtfExtension, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(Path.GetFileName(Path.GetDirectoryName(e.Path)), Binaural.HrtfFolder, StringComparison.OrdinalIgnoreCase))
             .Select(e => Path.GetFileNameWithoutExtension(e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    /// <summary>The settings OFXR 0104 and 0122 take in live (<see cref="FgQualityInstalled"/>).</summary>
+    /// <summary>The settings OFXR 0104, 0122 and 0123 take in live (<see cref="FgQualityInstalled"/>).</summary>
     public static IReadOnlySet<string> FgQualityFields { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "frameGenSkyOcclusion", "frameGenHudGuard", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenOcclusionFill",
     };
-    /// <summary>The OFXR layer the applied profile installed reads the generated-frame quality keys and the occlusion fill
-    /// (fork patches 0104 and 0122: their key names are in the DLL). Not a version check: this app version can be the one
-    /// that installed an OFXR without them (0.7.0), whose live watcher would ignore them.</summary>
+    /// <summary>The OFXR layer the applied profile installed takes the generated-frame quality keys and the occlusion fill
+    /// in live with the contract this app writes them for (<see cref="OfxrReadsFgQuality"/>). Not a version check: this app
+    /// version can be the one that installed an OFXR without them (0.7.0), whose live watcher would ignore them.</summary>
     public static bool FgQualityInstalled(TransactionJournal? journal) =>
         journal?.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(OfxrLayerFile, StringComparison.OrdinalIgnoreCase)) is { } layer && OfxrReadsFgQuality(layer.Path);
     public const string OfxrLayerFile = "XR_APILAYER_XRFrameBridge_diagnostic.dll";
-    private static readonly byte[][] FgQualityMarkers = [System.Text.Encoding.Unicode.GetBytes("dcs_motion_hud_guard"), System.Text.Encoding.Unicode.GetBytes("dcs_motion_occlusion_fill")];
+    /// <summary>The live contract marker an OFXR layer carries (fork patch 0123, src/common/embedded_control.cpp,
+    /// <c>OFXR_LiveFgContract</c>): this text, then the contract's number in ASCII digits. 2 (0123): the quality keys and
+    /// the occlusion fill are set on each frame generator without a rebuild. A layer without it (0104/0122 only, whose
+    /// fill was a rebuild with a hitch, or 0.7.0 without either) does not count. A later contract raises the number and
+    /// keeps the text; any number from <see cref="FgLiveContract"/> up counts.</summary>
+    public const string FgLiveContractMarker = "DCSC-OFXR-LIVE-FG/";
+    public const int FgLiveContract = 2;
+    private static readonly byte[] FgLiveContractBytes = System.Text.Encoding.ASCII.GetBytes(FgLiveContractMarker);
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Length, DateTime Written, bool Has)> OfxrCache = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>The OFXR layer at <paramref name="layerPath"/> holds the key names of 0104 and 0122 (UTF-16, as it reads
-    /// them). Cached by size and time: the interface asks on every state refresh.</summary>
+    /// <summary>The OFXR layer at <paramref name="layerPath"/> carries the live contract marker with a number from
+    /// <see cref="FgLiveContract"/> up (<see cref="FgLiveContractMarker"/>). Cached by size and time: the interface asks on
+    /// every state refresh.</summary>
     public static bool OfxrReadsFgQuality(string? layerPath)
     {
         if (layerPath is null) return false;
@@ -159,11 +167,24 @@ public static class LiveSettings
             if (!info.Exists || info.Length > 256L * 1024 * 1024) return false;
             if (OfxrCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return cached.Has;
             var bytes = File.ReadAllBytes(info.FullName);
-            var has = FgQualityMarkers.All(m => bytes.AsSpan().IndexOf(m) >= 0);
+            var has = HasLiveContract(bytes);
             OfxrCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, has);
             return has;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+    /// <summary>Whether <paramref name="bytes"/> hold <see cref="FgLiveContractMarker"/> followed by a number from
+    /// <see cref="FgLiveContract"/> up (every occurrence is looked at).</summary>
+    public static bool HasLiveContract(ReadOnlySpan<byte> bytes)
+    {
+        for (int at; (at = bytes.IndexOf(FgLiveContractBytes)) >= 0; bytes = bytes[(at + 1)..])
+        {
+            var rest = bytes[(at + FgLiveContractBytes.Length)..];
+            int digits = 0, value = 0;
+            while (digits < rest.Length && digits < 6 && rest[digits] is >= (byte)'0' and <= (byte)'9') value = value * 10 + (rest[digits++] - '0');
+            if (digits > 0 && value >= FgLiveContract) return true;
+        }
+        return false;
     }
     private static bool InstalledSince(TransactionJournal? journal, string version) =>
         ReleaseVersion.Parse(journal?.AppVersion) is { } installed && installed.CompareTo(ReleaseVersion.Parse(version)) >= 0;

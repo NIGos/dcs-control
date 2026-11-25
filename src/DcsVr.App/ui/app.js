@@ -487,6 +487,8 @@ function syncSegment(f) {
   buttons.forEach(b => b.tabIndex = b === stop ? 0 : -1); group.setAttribute('aria-disabled',String(select.disabled));
   // While the setting itself can change, a choice that cannot be picked shows the reason its option text gives ("· not with DLSS 5").
   const why = select.disabled ? [] : buttons.filter((b,i) => b.disabled && select.options[i].textContent.includes(' · ')).map(b => `${b.textContent}: ${b.title.split(' · ').slice(1).join(' · ')}.`);
+  // A choice that can be picked but needs another setting says so too (f.segmentNote: the profile -> a short line, or '').
+  if (!select.disabled && f.segmentNote && profile) { const extra = f.segmentNote(profile); if (extra) why.push(extra); }
   const text = why.join(' '); if (f.segments.note.textContent !== text) f.segments.note.textContent = text; f.segments.note.hidden = !text;
 }
 /** A list field's one-line summary ("None", or "N programs: a, b, c +K") above its folded textarea. */
@@ -838,9 +840,11 @@ function buildFields() {
     field(toggles,'frameGenMaskBand','Cleaner world beside the cockpit','Uses DCS\'s own motion right up to the cockpit frame.','toggle',null,nvidia,'',fidelityFg);
     // OFXR dcs_motion_occlusion_fill 0/1/2. With Sharp HUD (1) fills only frames Sharp HUD took the HUD out of, so the HUD
     // never moves; Always (2) also with the HUD in the image. Saved only when on (0.7.0 refuses keys it does not know).
-    segmented(field(more,'frameGenOcclusionFill','Fill around moving aircraft',['Less smear just behind and ahead of a moving aircraft.','There the background is taken from the one frame that shows it. With Sharp HUD: only while Sharp HUD keeps the HUD out of the image, so the HUD never moves; without Sharp HUD it does nothing. Always: also with the HUD in the image, which can then shift a little where an aircraft passes behind it. About 0.1 ms of GPU.'],
+    // With Sharp HUD picked while Sharp HUD is off: a line under the choice says what it needs (it stays pickable).
+    const fill = segmented(field(more,'frameGenOcclusionFill','Fill around moving aircraft',['Less smear just behind and ahead of a moving aircraft.','With Sharp HUD: only while Sharp HUD takes the HUD out, so the HUD never moves. Always: also over the HUD, which can shift a little where an aircraft passes behind it. About 0.1 ms of GPU.'],
       'select',[['Off','Off · default'],['WithSharpHud','With Sharp HUD'],['Always','Always']],nvidia,'',fidelityFg,
-      {prop:'frameGenOcclusionFill',get:p => p.frameGenOcclusionFill || 'Off',set:(p,v) => p.frameGenOcclusionFill = v}),{Off:'Off',WithSharpHud:'With Sharp HUD',Always:'Always'}); }
+      {prop:'frameGenOcclusionFill',get:p => p.frameGenOcclusionFill || 'Off',set:(p,v) => p.frameGenOcclusionFill = v}),{Off:'Off',WithSharpHud:'With Sharp HUD',Always:'Always'});
+    fill.segmentNote = p => p.frameGenOcclusionFill === 'WithSharpHud' && !p.frameGenHudSymbology ? 'Needs Sharp HUD.' : ''; }
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
   more = disclosure(c,'Optical flow','How motion is estimated. NVIDIA only.',() => `${shown('nvidiaFlowScale')} · ${shown('flowPreset')}${profile.bidirectionalFlow ? ' · Both ways' : ''}`); more.dataset.hide = 'flow';
@@ -1053,7 +1057,7 @@ function buildFields() {
     form.addEventListener('submit',e => { e.preventDefault(); importHrtf($('hrtfNameInput').value.trim()); });
     $('hrtfNameCancel').addEventListener('click',() => { form.hidden = true; }); }
   field(c,'binauralLateHeadTracking','Follow the head between frames',['Sounds stay in place when you turn your head fast.','The headset\'s head position is read at audio rate, from the pupil shift layer, which Launch DCS installs for it. VR only.'],'toggle',null,p => audioOn(p) && !p.desktop && state?.headPoseLayer !== false);
-  more = disclosure(c,'Advanced','The defaults suit most pilots.',() => `${shown('binauralMaxObjects')} sounds · ${shown('binauralLevelTrimDb')} · CPU ${shown('binauralCpuBudgetPercent')}`);
+  more = disclosure(c,'Advanced','The defaults suit most pilots.',() => `${shown('binauralMaxObjects')} sounds · Level ${shown('binauralLevelTrimDb')} · CPU ${shown('binauralCpuBudgetPercent')}`);
   field(more,'binauralNearField','Close sounds per ear','Switches and voices in the cockpit sound close, each ear on its own.','toggle',null,audioOn);
   field(more,'binauralMaxObjects','Most 3D sounds','The loudest sounds at once in 3D. The rest keep DCS\'s panning.','number',[8,64,1],audioOn,'');
   field(more,'binauralLevelTrimDb','3D sound level','Louder or softer 3D sounds against the rest of DCS\'s sound. 0 = as DCS.','number',[-12,6,.5],audioOn,'dB');
@@ -1863,7 +1867,7 @@ function updateWorkflow() {
 let liveOn = true, liveTimer = null, liveBase = null, liveBusy = null, liveAgain = false, liveStatus = '';
 const liveMode = () => Boolean(state?.dcsRunning && state.launchReady && liveOn);
 const liveSet = () => new Set(state?.liveFields || []);
-const LIVE_HITCH = new Set(['neuralIntensity','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralStyle','neuralAutomaticMask','neuralUiCorrection','nvidiaFlowScale','bidirectionalFlow','frameGenOcclusionFill']);
+const LIVE_HITCH = new Set(['neuralIntensity','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralStyle','neuralAutomaticMask','neuralUiCorrection','nvidiaFlowScale','bidirectionalFlow']);
 function renderLive() {
   const on = liveMode(), set = liveSet();
   document.body.classList.toggle('live-mode', on);
