@@ -160,10 +160,12 @@ off or in perception-only mode, since audio is not an engine optimization.
   measurements. PureHDF's default chunk cache is replaced by one that decodes each chunk once (SADIE II's file: a minute
   -> 0.1 s); a whole conversion takes about 2 s. The result is written to
   `Saved Games\DCS\Scripts\DcsQvCull\hrtf\<name>.dcshrtf`, through the deployment planner so that Back to stock removes it.
-- **Measurement distance:** a set measured closer than 1 m already holds some near-field effect; the converter warns
-  ("Measured at 0.5 m: ..."). The renderer does not read the file's `measurementDistanceM` yet: its parallax and
-  near-field shelf assume a far-field set (about 1.2 m, like SADIE II), so such a set gets a little too much near field
-  for close sources. Native follow-up: start the parallax and the shelf from the set's own distance.
+- **Measurement distance:** a set measured closer than 1 m already holds some near-field effect; the converter notes
+  it in the report ("Measured at 0.5 m: ..."). The renderer starts its near-field model from the file's `measurementDistanceM` D when
+  D is under 1 m (clamped to 0.25-1 m): the ILD shelf adds only the difference between the source's distance and D
+  (nothing at and beyond D), and each ear looks up the point at D on its own ray through the source, so a source at D
+  plays the set's own filters (no parallax or ILD added twice). Sets measured at 1 m or farther, SADIE II's 1.2 m
+  among them, get the model as before, bit for bit (A7b).
 - **Repeated directions** (closer than 0.05 degrees) are merged with their impulse responses and `Data.Delay` averaged.
 - **Before it is offered:** the app shows the conversion report (directions, rate, grid coverage, the largest time
   difference between the ears that the fitted radius stands for, warnings). A file the converter rejects is never
@@ -255,6 +257,7 @@ Pass: `0 failure(s)`.
 | A5 | Energy, front | white noise from the front: output per ear 0 dB ± 0.5 dB (front-normalised set; a measured set over 200 Hz-8 kHz, the converter's band) |
 | A6 | Front/back | KU100 front vs back, 2-8 kHz band level difference ≥ 3 dB, as in the source set ±1 dB |
 | A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; parallax: a source 0.3 m at 45° right gets each ear's own direction (the near, right ear sees it at < 45°, the left ear at > 45°) |
+| A7b | Near field from the set's distance | sets measured at 1.0, 1.2, 1.5 and 5 m render bit-identically (near field on, 0.1-1.8 m); a set measured at 0.5 m: a source at 0.5 m equals near field off (< 1e-4 RMS), ILD 0.25 m minus 0.5 m matches the shelf model from 0.5 m ±1 dB, 0.8 m minus 0.5 m 0 ± 0.5 dB, parallax from the 0.5 m sphere ± 0.5° |
 | A8 | Latency | impulse from the front appears at sample `round(onset delay)` ± 1 with no block delay, for block sizes 1, 7, 480, 1056, 4096 |
 | A9 | Block-size invariance | the same input rendered with blocks of 480 and with random sizes 1-2048: identical within 1e-5 |
 | A10 | Crossfades | HRTF swap, head-radius change, ownership fade (w 0→1 and 1→0), kReset: no step above −60 dBFS on a 0 dBFS sine |
@@ -301,7 +304,12 @@ Pass: `0 failure(s)`.
     (before and after) by at most 1e-3. Also checked: near field off -> on.
   - A12: thread CPU time per block (what preemption by other programs does not inflate), each statistic the best
     of 5 runs of 1,000 blocks. Three scenes: 64 static sources; 64 sources with the head turning 90°/s (the limits
-    apply to both); 64 sources all sweeping ~190°/s (stress, p99 < 1 ms). SSE2 budget 2x.
+    apply to both); 64 sources all sweeping ~190°/s (stress, p99 < 1 ms). SSE2 budget 2x. `binaural_core_test
+    --real-time` runs A12 alone. A delay change glides over at least 64 frames (`kMinGlideFrames`), so very short
+    calls stay smooth; a floor of a whole sub-block (256) carried 1/8 of the 224-frame tail of every 480-frame call
+    into the next one, sent 48 % more sub-blocks to the per-sample interpolator and cost 5 % at 64 moving sources
+    (p50 0.289 against 0.274 ms, measured interleaved with the earlier renderer); with 64 frames the 7-frame-call
+    sweep of A10 is as smooth as before.
 - Design changes from section 3, all measured: the FIR runs before the per-ear delay (both ears and both filters of a
   crossfade share one pass over the mono input); the fractional delay is a 24-tap Kaiser-windowed sinc (flat to
   0.42 x the rate; a 4-tap Lagrange loses 3 dB at 16 kHz); a direction crossfade lasts the first 64 frames of the
@@ -382,7 +390,46 @@ Pass: `0 failure(s)`.
    file names, never the user's SOFA file or path.
 
 ### 8.6 Live (only with the user's go; never run by an agent unasked)
-Rig flight, parked with the engine running:
+
+**The pilot's first flight.** About 15 minutes, headphones on.
+
+**Set in the app before Launch DCS:**
+- Audio page:
+  - 3D headphone audio on; Ears (HRTF) Generic;
+  - Head size: your own measurement, or Medium (57 cm);
+  - Follow the head between frames on;
+  - Advanced at the defaults: Close sounds per ear on, Most 3D sounds 48, 3D sound level 0 dB, CPU budget 25 %;
+  - Diagnostics: Sound log on, for this flight only.
+- DCS's output: the headphones. Launch DCS sets the speaker layout to Stereo.
+- Keys & headset panel: the 3D audio key is Alt+Shift+F6 (the default).
+- Live (top bar) on.
+
+**Where to fly:** a mission with the engine running on the ground or parked in the air, with AI traffic or a
+wingman passing around, then a short flight with ATC/wingman radio.
+
+**Where to look:** every `audio:` line is in `DcsQvCull.log` (Saved Games, `Scripts\DcsQvCull`). The sound log
+`audio_voices.csv` is in the same folder: one row per 3D voice per second, columns
+`time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR`, listener frame (x forward, y up, z right, metres).
+
+| # | What to do | What to listen for (pass) | Log proof (pass) |
+|---|---|---|---|
+| 1 | Start the mission | DCS sounds as usual, nothing missing or doubled | `audio: hooks in (ed_sound.dll ...)`; `audio: output <p> bound (...)`; `audio: on (48000 Hz stereo, HRTF default: 8703 directions, head radius 9.4 cm, near field on, at most 48 sounds)` (head radius 9.43 cm x size / 57); one `audio: ctx <i> 2d=<0/1> cockpitGain=<0/1> output=<n> crosstalk=...` line per context; no `audio: off (` line |
+| 2 | Front/back: an aircraft or vehicle passes in front, then behind (or turn your head 180 degrees from a running engine) | Clearly in front, then clearly behind; no flip between the two | CSV: that voice `owned=1`, `x > 0` while in front, `x < 0` behind |
+| 3 | Sides: a sound passes from left to right | Fully on each side at 90 degrees, a smooth move between, no jump at the centre | CSV: `z < 0` left, `z > 0` right, `owned=1` throughout |
+| 4 | Elevation: an aircraft or helicopter overhead | Above you, not just in the middle of the head | CSV: `y > 0` for that voice |
+| 5 | Head turns: turn the head left and right (about 90 degrees per second) for 10 s, a few times | Outside sounds stay where they are in the world; no lag, wobble or zipper noise | `audio: running, ...; head pose on`; `audio: listener-vs-pose: ...` (once a minute; check the line after the turns): best match at 0 or ±1 frame(s), correlation 0.8 or higher while the head turned |
+| 6 | Radio: ATC and wingman calls, intercom | In the middle of the head, unchanged when turning the head | The radio context's `ctx` line has `2d=1`; CSV: no `owned=1` row with that context id |
+| 7 | Cockpit switches: flip switches on the left console, then the right, then overhead | Each from its own side, close to that ear; overhead from above. With Close sounds per ear off (Live) they sound farther and less to one side | CSV: those voices `dist < 1`, `owned=1`, their context's `ctx` line `cockpitGain=1` |
+| 8 | Whole flight | No clicks or pops: sounds starting and stopping, head turns, settings changes | Every `audio: running` line: `refused 0`, `overruns 0`, p99 under the budget (under 2.5 ms at 25 %); no `audio: CPU budget: at most` line; no `audio: off (` line; no `render time exceeded` in `dcs.log` |
+| 9 | Kill switch: Alt+Shift+F6, listen 10 s, Alt+Shift+F6 again | Back to DCS's own left/right sound within a moment, then 3D again; no click either way | `audio: kill switch ([Hotkeys] AudioToggle): binaural OFF (DCS's own panning)`, then `... binaural ON` |
+| 10 | Live on: Head size 57 -> 60 -> 57 cm; Close sounds per ear off -> on; 3D sound level -6 -> 0 dB; 3D headphone audio off -> on | Each change heard within about a second, no click; off = DCS's own sound | One `audio: config: Binaural=... HeadCircumferenceCm=60.0 ...` line per change; off: `audio: off (binaural is off in the settings)`; on again: `audio: on (re-enabled in the settings, HRTF default: 8703 directions)` |
+| 11 | Live off: change Head size | Nothing changes until the next launch | No new `audio: config:` line |
+| 12 | Close DCS | - | `audio: hooks out (ed_sound.dll's call sites restored...)` |
+
+Afterwards turn the Sound log off (the file stops at 8 MB). A failed row: keep `DcsQvCull.log`, `audio_voices.csv`
+and the time of the moment.
+
+**Rig flight** (with the user's go, parked with the engine running):
 - loopback recording of a yaw sweep: ILD/ITD monotonic, front/back asymmetry, lag ≤ 1 block;
 - zero `render time exceeded` lines;
 - toggling mid-flight gives no click above −40 dBFS;
