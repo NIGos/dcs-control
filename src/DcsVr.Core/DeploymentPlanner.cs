@@ -324,12 +324,16 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // registered layer and loaded again directly below Quad Views. Not last: OFXR (frame generation) asks the layer
         // below it for a global function before that layer has an instance, and Ultraleap crashes on that (GitHub #35),
         // so it stays above OFXR and every layer the bundle adds below Quad Views. Other games keep it as it is.
-        if (profile.QuadViews == QuadProvider.QuadViewsFoveated && HandTrackingLayer.Find(inventory) is { } hands)
+        // Every registration of it is turned off for this DCS, also one turned off in Windows: turned on again there while
+        // this profile stays applied, it would otherwise load above Quad Views (#20) next to, or instead of, the copy below.
+        // Launch DCS sees that change and applies the profile again (ControlService.RegisteredLayerChange).
+        if (profile.QuadViews == QuadProvider.QuadViewsFoveated)
         {
-            var handsText = File.ReadAllText(hands.ManifestPath);
-            // Without a disable_environment it cannot be turned off for one process: it stays where it is.
-            if (GazeBridge.DisableVariable(handsText) is { } handsOff)
+            var handsPlan = HandTrackingLayer.Plan(inventory);
+            foreach (var off in handsPlan.DisableVariables) environment[off] = "1";
+            if (handsPlan.Load is { } hands && !layerNames.Contains(hands.Name!, StringComparer.OrdinalIgnoreCase))
             {
+                var handsText = File.ReadAllText(hands.ManifestPath);
                 var handsManifest = ConfigurationWriters.ExplicitManifest(handsText, hands.ManifestPath);
                 AddText(PathPolicy.UnderRoot(layersRoot, "hand-tracking.json"), handsManifest, "Profile hand tracking manifest (below Quad Views)");
                 using (var parsed = JsonDocument.Parse(handsManifest))
@@ -338,7 +342,6 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                     dependencies[handsDll] = Hashing.FileSha256(handsDll);
                 }
                 dependencies[Path.GetFullPath(hands.ManifestPath)] = Hashing.FileSha256(hands.ManifestPath);
-                environment[handsOff] = "1";
                 layerNames.Insert(layerNames.IndexOf("XR_APILAYER_MBUCCHIA_quad_views_foveated") + 1, hands.Name!);
             }
         }
@@ -411,6 +414,25 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         }
     }
 
+    /// <summary>The registered (implicit) layers <see cref="Build"/> loads again in its own place for this profile, by name:
+    /// the eye-tracker bridge and Ultraleap hand tracking. Read from the inventory alone, as Build decides it.</summary>
+    public static IReadOnlyList<string> RegisteredLayersLoaded(VrProfile profile, InventorySnapshot inventory)
+    {
+        var names = new List<string>();
+        if (GazeBridge.Required(profile) && GazeBridge.Find(inventory) is { Name: { } gaze } bridge)
+        {
+            try { if (GazeBridge.DisableVariable(File.ReadAllText(bridge.ManifestPath)) is not null) names.Add(gaze); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+        }
+        if (profile.QuadViews == QuadProvider.QuadViewsFoveated && HandTrackingLayer.Plan(inventory).Load is { Name: { } hands }) names.Add(hands);
+        return names;
+    }
+
+    /// <summary>What the pilot calls a registered layer <see cref="Build"/> moves; null for any other layer name.</summary>
+    public static string? RegisteredLayerTitle(string layerName) =>
+        layerName.Equals(HandTrackingLayer.LayerName, StringComparison.OrdinalIgnoreCase) ? "Ultraleap hand tracking"
+        : GazeBridge.IsGazeLayerName(layerName) ? "the eye-tracker bridge (" + layerName + ")" : null;
+
     internal static string RequireDirectory(string? path, string error) => path is not null && Directory.Exists(path) ? Path.GetFullPath(path) : throw new InvalidDataException(error);
     private static bool IsLayer(string path, string name)
     {
@@ -425,8 +447,10 @@ public static class GazeBridge
     public static bool Required(VrProfile profile) =>
         profile.Runtime == RuntimeKind.SboysSteamVr && profile.Gaze == GazeMode.EyeTracked && (profile.QuadViews != QuadProvider.None || profile.UsesCheeky);
 
-    public static bool IsGazeLayer(LayerFact layer) =>
-        layer.Name?.Contains("eye_trackers", StringComparison.OrdinalIgnoreCase) == true || layer.Name?.Contains("eyetrackers", StringComparison.OrdinalIgnoreCase) == true;
+    public static bool IsGazeLayer(LayerFact layer) => layer.Name is { } name && IsGazeLayerName(name);
+
+    public static bool IsGazeLayerName(string name) =>
+        name.Contains("eye_trackers", StringComparison.OrdinalIgnoreCase) || name.Contains("eyetrackers", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Sboys 1.3 creates a SteamVR eye-tracking component, and SteamVR/OpenXR then reports
@@ -465,6 +489,31 @@ public static class HandTrackingLayer
     public const string LayerName = "XR_APILAYER_ULTRALEAP_hand_tracking";
     public static LayerFact? Find(InventorySnapshot inventory) =>
         inventory.Layers.FirstOrDefault(l => l.Enabled && l.LibraryExists && string.Equals(l.Name, LayerName, StringComparison.OrdinalIgnoreCase));
+
+    /// <param name="Load">The registration loaded below Quad Views; null when none is on in Windows, or when one that is on
+    /// has no disable_environment (it loads above Quad Views whatever this DCS is told, and a second copy below would load
+    /// it twice).</param>
+    /// <param name="DisableVariables">The disable_environment of every registration (HKLM and HKCU, on or off in Windows),
+    /// set for this DCS so no registered copy loads above Quad Views.</param>
+    public sealed record HandsPlan(LayerFact? Load, IReadOnlyList<string> DisableVariables);
+
+    /// <summary>What the bundled Quad Views does with Ultraleap's registrations for DCS.</summary>
+    public static HandsPlan Plan(InventorySnapshot inventory)
+    {
+        var registrations = inventory.Layers.Where(l => string.Equals(l.Name, LayerName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var variables = new List<string>();
+        var stuck = false;
+        foreach (var layer in registrations)
+        {
+            string? variable = null;
+            try { variable = GazeBridge.DisableVariable(File.ReadAllText(layer.ManifestPath)); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+            if (variable is not null) { if (!variables.Contains(variable, StringComparer.OrdinalIgnoreCase)) variables.Add(variable); }
+            // The loader cannot skip it for one process: it loads where it is.
+            else if (layer.Enabled && layer.LibraryExists) stuck = true;
+        }
+        return new(stuck ? null : registrations.FirstOrDefault(l => l.Enabled && l.LibraryExists), variables);
+    }
 }
 
 /// <summary>VectorXR (DienerTech), an implicit OpenXR layer with its own frame generation, Quadviews and Depth: turned

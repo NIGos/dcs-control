@@ -511,8 +511,12 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             // limit, and that is not the headset's doing. The component settings never depend on the refresh rate.
             // Settings written live and then set back in the draft also differ from the recorded files: said as such, not
             // as an app update.
-            else if (WritersChanged(draft, inventory, applied.Journal, out planned, out var writers))
+            else if (WritersChanged(draft, inventory, applied.Journal, out planned, out var writers, out var preview))
                 reason = LiveChangesInEffect(applied) ? "settings changed live are set back" : writers;
+            // An OpenXR layer registered in Windows (Ultraleap hand tracking, the eye-tracker bridge) was turned on or off
+            // since the last launch: the layers DCS loads, and their order, follow it only when the profile is applied
+            // again (GitHub #35: turned on afterwards, Ultraleap loaded above Quad Views as in #20).
+            else if (preview is not null && LayerChange(InstalledEnvironment(applied.Journal), preview.LaunchEnvironment) is { } layers) { planned = preview; reason = layers; }
             else if (FrameCapChanged(draft, applied.Journal, inventory)) reason = "the headset's refresh rate changed";
             else
             {
@@ -678,6 +682,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var written = updates.Select(u => u.Path).ToArray();
         var message = (written.Length > 0 ? "Applied live: " + string.Join(" and ", written.Select(Path.GetFileName)) + " updated." : inEffect.Length > 0 ? "Already in effect." : "Nothing applied live.")
             + (waiting.Length > 0 ? $" {waiting.Length} {(waiting.Length == 1 ? "setting waits" : "settings wait")} for the next launch." : "");
+        // Not a setting of the draft: a registered OpenXR layer turned on or off in Windows while DCS runs.
+        if (RegisteredLayerChange(inventory) is { } layers) message += " " + layers;
         return new(inEffect, waiting, written, message, rechecks);
     }
 
@@ -846,11 +852,12 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// with the same settings), the earlier version's files would otherwise stay in use until a setting changed.
     /// <paramref name="reason"/> says which of the two it was.
     /// </summary>
-    private bool WritersChanged(VrProfile draft, InventorySnapshot inventory, TransactionJournal journal, out ApplyPlan? plan, out string? reason)
+    /// <param name="preview">The plan built for the check, also when nothing differs; null when it could not be built.</param>
+    private bool WritersChanged(VrProfile draft, InventorySnapshot inventory, TransactionJournal journal, out ApplyPlan? plan, out string? reason, out ApplyPlan? preview)
     {
-        plan = null; reason = null;
+        plan = null; reason = null; preview = null;
         ApplyPlan next;
-        try { next = Preview(draft, inventory); }
+        try { next = preview = Preview(draft, inventory); }
         // A plan that cannot be built now (a component missing) is not this check's to report: the intact applied profile
         // still launches, as before.
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { return false; }
@@ -884,6 +891,65 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     {
         try { VerifyInstalled(journal, ignoreLuaValues: true); return true; }
         catch (Exception e) when (e is IOException or InvalidDataException or System.Text.Json.JsonException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>The DCS environment the applied launch.json holds; null when it cannot be read.</summary>
+    private static IReadOnlyDictionary<string, string>? InstalledEnvironment(TransactionJournal journal)
+    {
+        try
+        {
+            return journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals("launch.json", StringComparison.OrdinalIgnoreCase)) is { } entry && File.Exists(entry.Path)
+                ? new Dictionary<string, string>(JsonData.Deserialize<LaunchConfiguration>(File.ReadAllText(entry.Path)).Environment, StringComparer.OrdinalIgnoreCase) : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { return null; }
+    }
+
+    private static string[] LayerList(IReadOnlyDictionary<string, string>? environment) =>
+        environment?.GetValueOrDefault("XR_ENABLE_API_LAYERS") is { Length: > 0 } list ? list.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : [];
+
+    /// <summary>
+    /// Why the OpenXR layers DCS would load differ from the applied launch: which layers, their order, and which registered
+    /// layers are turned off for DCS (XR_ENABLE_API_LAYERS, XR_API_LAYER_PATH and every DISABLE_ variable). Null when they
+    /// are the same. A registered layer turned on or off in Windows is named; anything else reads as a changed layer list.
+    /// </summary>
+    internal static string? LayerChange(IReadOnlyDictionary<string, string>? installed, IReadOnlyDictionary<string, string> wanted)
+    {
+        static string Value(IReadOnlyDictionary<string, string>? environment, string key) => environment?.GetValueOrDefault(key) ?? "";
+        var keys = (installed?.Keys ?? []).Concat(wanted.Keys)
+            .Where(k => k.Equals("XR_ENABLE_API_LAYERS", StringComparison.OrdinalIgnoreCase) || k.Equals("XR_API_LAYER_PATH", StringComparison.OrdinalIgnoreCase) || k.StartsWith("DISABLE_", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        if (keys.All(k => Value(installed, k) == Value(wanted, k))) return null;
+        var before = LayerList(installed); var after = LayerList(wanted);
+        return DescribeRegisteredChange(after.Except(before, StringComparer.OrdinalIgnoreCase), before.Except(after, StringComparer.OrdinalIgnoreCase))
+            ?? "the OpenXR layers registered in Windows changed";
+    }
+
+    /// <summary>"Ultraleap hand tracking was turned on in Windows" for the registered layers among <paramref name="on"/> and
+    /// <paramref name="off"/> (<see cref="DeploymentPlanner.RegisteredLayerTitle"/>); null when none is one.</summary>
+    private static string? DescribeRegisteredChange(IEnumerable<string> on, IEnumerable<string> off)
+    {
+        var parts = on.Select(DeploymentPlanner.RegisteredLayerTitle).OfType<string>().Select(t => t + " was turned on in Windows")
+            .Concat(off.Select(DeploymentPlanner.RegisteredLayerTitle).OfType<string>().Select(t => t + " was turned off in Windows")).ToArray();
+        return parts.Length == 0 ? null : string.Join(" and ", parts);
+    }
+
+    /// <summary>
+    /// For the Checks and Live mode: a registered OpenXR layer the applied profile moves (Ultraleap hand tracking below Quad
+    /// Views, the eye-tracker bridge below the add-ons) was turned on or off in Windows after the last launch, so the
+    /// applied launch no longer matches it. Cheap (no plan is built): only the registered layers count; Launch DCS compares
+    /// the whole layer environment (<see cref="LayerChange"/>). Null when nothing changed or no profile is applied.
+    /// </summary>
+    public string? RegisteredLayerChange(InventorySnapshot inventory)
+    {
+        if (ReadAppliedProfile() is not { } applied || InstalledEnvironment(applied.Journal) is not { } installed) return null;
+        var recorded = LayerList(installed).Where(n => DeploymentPlanner.RegisteredLayerTitle(n) is not null).ToArray();
+        var wanted = DeploymentPlanner.RegisteredLayersLoaded(applied.Profile.ForLaunch(), inventory);
+        var change = DescribeRegisteredChange(wanted.Except(recorded, StringComparer.OrdinalIgnoreCase), recorded.Except(wanted, StringComparer.OrdinalIgnoreCase));
+        if (change is null) return null;
+        change = char.ToUpperInvariant(change[0]) + change[1..];
+        return inventory.DcsRunning
+            ? change + " after DCS was started. DCS reads its OpenXR layers only when it starts: this takes effect at the next Launch DCS."
+            : change + " after the last launch. Launch DCS applies the profile again with it.";
     }
 
     private static bool SamePaths(InventorySnapshot inventory, AppliedProfile applied) =>

@@ -94,7 +94,15 @@ public static class Readiness
         }
         if (!profile.Desktop && inventory.Layers.Any(l => l.Enabled && VectorXr.Is(l)))
             Add("vectorxr", CheckState.Pass, "VectorXR", "Installed. Launch DCS keeps it off in DCS so it doesn't stack with these settings. Started from Steam or a shortcut, DCS still loads it; other games keep it.");
-        var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
+        // Ultraleap with the bundled Quad Views is moved below it (GitHub #20, #35): not one of the add-ons that load first.
+        var handsMoved = !profile.Desktop && profile.QuadViews == QuadProvider.QuadViewsFoveated && HandTrackingLayer.Plan(inventory).Load is not null;
+        if (handsMoved)
+            Add("hand-tracking", CheckState.Pass, "Ultraleap hand tracking", "Installed. Launch DCS loads it below Quad Views, so DCS keeps its quad views. Other games keep it as it is.");
+        // Turned on or off in Windows after the last launch: the applied launch does not have it yet.
+        if (service.RegisteredLayerChange(inventory) is { } layersChanged)
+            Add("layers-changed", inventory.DcsRunning ? CheckState.Warning : CheckState.Manual, "OpenXR layers changed", layersChanged);
+        var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)
+            && !(handsMoved && string.Equals(l.Name, HandTrackingLayer.LayerName, StringComparison.OrdinalIgnoreCase))).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
         if (foreign.Length > 0 && !profile.Desktop)
             Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "Other OpenXR add-ons are installed: " + string.Join(", ", foreign) + ". They load before this profile's add-ons and can change the image, eye tracking or frame timing. If something looks wrong, turn them off (for example with OpenXR API Layers GUI).");
         var manifest = HeadsetRoute.Manifest(profile, inventory);

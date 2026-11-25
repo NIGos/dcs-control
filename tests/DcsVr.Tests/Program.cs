@@ -3797,7 +3797,21 @@ Test("Ultraleap hand tracking loads below the bundled Quad Views, only for this 
     var written = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("hand-tracking.json")).Content);
     Require(written.Contains("UltraleapHandTracking.dll") && written.Contains("XR_EXT_hand_tracking"), "its own manifest, with the extensions it offers");
     var off = Planner().Build(p, Inventory(manifest, false), Path.Combine(root, "hands-order/managed-off"));
-    Require(!off.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Contains("ULTRALEAP") && !off.LaunchEnvironment.ContainsKey("DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"), "a layer the user turned off stays off");
+    // Turned off in Windows: not loaded, and its registration stays off for this DCS even if it is turned on again while the
+    // profile is applied (it would load above Quad Views, #20).
+    Require(!off.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Contains("ULTRALEAP") && off.LaunchEnvironment["DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"] == "1"
+        && !off.Files.Any(f => f.Path.EndsWith("hand-tracking.json")), "a layer the user turned off stays off");
+    // Registered twice (HKLM and HKCU, another disable_environment): every copy is off for DCS and one is loaded, once.
+    var second = Make("hands-order/ultraleap-user/UltraleapHandTracking.json", Manifest(true).Replace("DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking", "DISABLE_ULTRALEAP_USER")); Make("hands-order/ultraleap-user/UltraleapHandTracking.dll", "fixture");
+    var twice = Planner().Build(p, Inventory(manifest, true) with { Layers = [new("LocalMachine", manifest, true, "XR_APILAYER_ULTRALEAP_hand_tracking", dll, true), new("CurrentUser", second, true, "XR_APILAYER_ULTRALEAP_hand_tracking", dll, true)] }, Path.Combine(root, "hands-order/managed-twice"));
+    Require(twice.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking", "loaded once: " + twice.LaunchEnvironment["XR_ENABLE_API_LAYERS"]);
+    Require(twice.LaunchEnvironment["DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"] == "1" && twice.LaunchEnvironment["DISABLE_ULTRALEAP_USER"] == "1", "both registrations off for DCS");
+    // One copy on in Windows that cannot be turned off for one process loads above Quad Views anyway: no second copy below.
+    var stuckManifest = Make("hands-order/ultraleap-stuck/UltraleapHandTracking.json", Manifest(false)); Make("hands-order/ultraleap-stuck/UltraleapHandTracking.dll", "fixture");
+    var stuck = Planner().Build(p, Inventory(manifest, true) with { Layers = [new("LocalMachine", manifest, true, "XR_APILAYER_ULTRALEAP_hand_tracking", dll, true), new("CurrentUser", stuckManifest, true, "XR_APILAYER_ULTRALEAP_hand_tracking", dll, true)] }, Path.Combine(root, "hands-order/managed-stuck"));
+    Require(stuck.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated", "not loaded twice: " + stuck.LaunchEnvironment["XR_ENABLE_API_LAYERS"]);
+    Require(DeploymentPlanner.RegisteredLayersLoaded(p, Inventory(manifest, true)).SequenceEqual(["XR_APILAYER_ULTRALEAP_hand_tracking"]) && DeploymentPlanner.RegisteredLayersLoaded(p, Inventory(manifest, false)).Count == 0
+        && DeploymentPlanner.RegisteredLayersLoaded(p with { QuadViews = QuadProvider.PimaxNative }, Inventory(manifest, true)).Count == 0, "the cheap check decides as Build");
     var native = Planner().Build(p with { QuadViews = QuadProvider.PimaxNative }, Inventory(manifest, true), Path.Combine(root, "hands-order/managed-native"));
     Require(!native.LaunchEnvironment.ContainsKey("DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"), "without the bundled Quad Views it is left as it is");
     var fixedManifest = Make("hands-order/ultraleap-fixed/UltraleapHandTracking.json", Manifest(false)); Make("hands-order/ultraleap-fixed/UltraleapHandTracking.dll", "fixture");
@@ -6721,6 +6735,46 @@ Test("E2E: after an app update that changed only component files, Launch DCS ins
         Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, component + ": nor does the app's draft");
     }
     Require(f.Service.RestoreOriginals().Complete);
+});
+Test("E2E: Ultraleap turned on or off in Windows after a launch is a change Launch DCS applies; the Checks and Live mode say it waits for the next launch (GitHub #35)", () =>
+{
+    var f = E2e("hands-state");
+    var dll = Make("e2e/hands-state/ultraleap/UltraleapHandTracking.dll", "fixture");
+    var manifest = Make("e2e/hands-state/ultraleap/UltraleapHandTracking.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_ULTRALEAP_hand_tracking\",\"library_path\":\"UltraleapHandTracking.dll\",\"api_version\":\"1.0\",\"implementation_version\":\"1\",\"description\":\"fixture\",\"disable_environment\":\"DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking\"}}");
+    InventorySnapshot With(bool on, bool running = false) => E2eInventory(f) with { Layers = [new("LocalMachine", manifest, on, "XR_APILAYER_ULTRALEAP_hand_tracking", dll, true)], DcsRunning = running };
+    string Layers() => JsonData.Deserialize<LaunchConfiguration>(File.ReadAllText(f.Service.Originals.ReadCurrent()!.Entries.Single(e => Path.GetFileName(e.Path) == "launch.json").Path)).Environment["XR_ENABLE_API_LAYERS"];
+    // r2dseu's order: launched with Ultraleap off in Windows, Quad Views and frame generation on, then Ultraleap turned on.
+    var profile = E2eB(null);
+    Require(f.Service.SyncApplied(profile, With(false)).Kind == LaunchSyncKind.Applied && !Layers().Contains("ULTRALEAP"));
+    Require(f.Service.SyncApplied(profile, With(false)).Kind == LaunchSyncKind.Unchanged, "nothing changed yet");
+    Require(f.Service.RegisteredLayerChange(With(false)) is null, "the Checks see nothing yet");
+    var running = f.Service.RegisteredLayerChange(With(true, running: true));
+    Require(running is not null && running.StartsWith("Ultraleap hand tracking was turned on in Windows") && running.Contains("next Launch DCS"), "while DCS runs: at the next launch: " + running);
+    Require(f.Service.RegisteredLayerChange(With(true))!.Contains("Launch DCS applies the profile again"), "DCS closed");
+    // The Checks list it (and no longer call Ultraleap an add-on that loads first).
+    var report = Readiness.Check(profile, With(true, running: true), f.Service);
+    Require(report.Checks.Single(c => c.Id == "layers-changed").State == CheckState.Warning, "the Checks: " + string.Join(" | ", report.Checks.Select(c => c.Id)));
+    Require(report.Checks.Any(c => c.Id == "hand-tracking" && c.State == CheckState.Pass) && !report.Checks.Any(c => c.Id == "implicit-layers" && c.Detail.Contains("ULTRALEAP")), "Ultraleap is moved, not foreign");
+    var on = f.Service.SyncApplied(null, With(true));
+    Require(on.Kind == LaunchSyncKind.Applied && on.Message.Contains("(Ultraleap hand tracking was turned on in Windows)"), on.Message);
+    Require(Layers().Contains("XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking;XR_APILAYER_XRFrameBridge_diagnostic"), "below Quad Views, above OFXR: " + Layers());
+    f.Service.PrepareLaunchApplied();
+    Require(f.Service.SyncApplied(profile, With(true)).Kind == LaunchSyncKind.Unchanged && f.Service.RegisteredLayerChange(With(true)) is null, "applied once");
+    // Turned off again: the copy below Quad Views goes too (it would load although the pilot turned it off).
+    var off = f.Service.SyncApplied(profile, With(false));
+    Require(off.Kind == LaunchSyncKind.Applied && off.Message.Contains("(Ultraleap hand tracking was turned off in Windows)") && !Layers().Contains("ULTRALEAP"), off.Message);
+    Require(f.Service.SyncApplied(profile, With(false)).Kind == LaunchSyncKind.Unchanged);
+    Require(f.Service.RestoreOriginals().Complete);
+});
+Test("Launch DCS's layer comparison: same layers unchanged, a moved order or another disabled registration is a change", () =>
+{
+    Dictionary<string, string> Env(string layers, params string[] disabled) { var e = new Dictionary<string, string> { ["XR_ENABLE_API_LAYERS"] = layers, ["XR_API_LAYER_PATH"] = "x", ["DCSVR_QUAD_FOCUS"] = "0" }; foreach (var d in disabled) e[d] = "1"; return e; }
+    Require(ControlService.LayerChange(Env("a;b", "DISABLE_A"), Env("a;b", "DISABLE_A")) is null);
+    var focus = Env("a;b"); focus["DCSVR_QUAD_FOCUS"] = "1";
+    Require(ControlService.LayerChange(Env("a;b"), focus) is null, "other variables are not layers");
+    Require(ControlService.LayerChange(Env("q;o;XR_APILAYER_ULTRALEAP_hand_tracking"), Env("q;XR_APILAYER_ULTRALEAP_hand_tracking;o")) == "the OpenXR layers registered in Windows changed", "0.7.0's order");
+    Require(ControlService.LayerChange(Env("q"), Env("q", "DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking")) is not null, "a registration now turned off for DCS");
+    Require(ControlService.LayerChange(null, Env("q")) is not null, "no record");
 });
 Test("E2E: the CLI's apply, launch-check and restore write exactly what the app writes", () =>
 {
