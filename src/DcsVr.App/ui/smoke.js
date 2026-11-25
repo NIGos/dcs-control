@@ -11,7 +11,7 @@ window.runWebSmoke = async function() {
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
     'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
-    'frameGenHudSymbology','smoothCursor','frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand','frameGenOcclusionFill','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
+    'frameGenHudSymbology','smoothCursor','frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
@@ -251,21 +251,13 @@ window.runWebSmoke = async function() {
     check('Dependency notes are short and only where they apply',[...document.querySelectorAll('#featureList .feature-note span')].every(n => n.textContent.length <= 40) && $('featureNotes-framegen').textContent === '' && $('featureNotes-boost').textContent === '');
     // Compact settings: segmented choices, short help with More, fold values, folded program lists, toggle lists, density.
     { const SEGMENTED_S1 = ['quadViews','gaze','foveaSource','frameGen','frameGenFactor','frameGenPassThrough','fpsLimit','nvidiaFlowScale','flowPreset','boostDcsPriority'];
-      const SEGMENTED = [...SEGMENTED_S1,'neuralStyle','neuralDepth','boostPrefetch','eyeDistance','depthBoostMode','farDepthPreset','colorMode','panelGamut','gVisionMode','engineShaderCompileWorkers','frameGenOcclusionFill'];
+      const SEGMENTED = [...SEGMENTED_S1,'neuralStyle','neuralDepth','boostPrefetch','eyeDistance','depthBoostMode','farDepthPreset','colorMode','panelGamut','gVisionMode','engineShaderCompileWorkers'];
       const radios = p => [...$('seg-'+p).querySelectorAll('[role=radio]')], segDiff = listDiff(SEGMENTED,ui.fields.filter(f => f.segments).map(f => f.path));
       check('Short choices are segmented buttons over their select, one per option in the same order'+segDiff,!segDiff && SEGMENTED.every(p => { const f = ui.fields.find(x => x.path === p), g = $('seg-'+p);
         return f.type === 'select' && f.input.tagName === 'SELECT' && g?.getAttribute('role') === 'radiogroup' && radios(p).map(b => b.dataset.value).join('|') === [...f.input.options].map(o => o.value).join('|'); })
         && $('seg-fpsLimit').querySelector('[data-value=MatchRefresh]').classList.contains('is-default') && !$('seg-fpsLimit').querySelector('[data-value=Custom]').classList.contains('is-default'));
       check('With DLSS 5 on, Pimax native is a disabled segment that says why',ui.profile.neuralRendering && $('seg-quadViews').querySelector('[data-value=PimaxNative]').disabled && $('seg-quadViews').querySelector('[data-value=PimaxNative]').title.includes('not with DLSS 5')
         && !$('segnote-quadViews').hidden && $('segnote-quadViews').textContent.includes('not with DLSS 5') && $('seg-quadViews').getAttribute('aria-describedby').split(' ').includes('segnote-quadViews'));
-      // Fill around moving aircraft: Only with Sharp HUD while Sharp HUD is off stays pickable and says what it needs.
-      { const keep = ['frameGen','frameGenOcclusionFill','frameGenHudSymbology'].map(k => [k,ui.profile[k]]), note = $('segnote-frameGenOcclusionFill');
-        Object.assign(ui.profile,{frameGen:'Nvidia',frameGenOcclusionFill:'WithSharpHud',frameGenHudSymbology:false}); ui.invalidate();
-        const needs = !note.hidden && note.textContent === 'Needs Sharp HUD.' && !$('seg-frameGenOcclusionFill').querySelector('[data-value=WithSharpHud]').disabled;
-        ui.profile.frameGenHudSymbology = true; ui.invalidate(); const withHud = note.hidden;
-        ui.profile.frameGenHudSymbology = false; ui.profile.frameGenOcclusionFill = 'Always'; ui.invalidate(); const always = note.hidden;
-        keep.forEach(([k,v]) => { if (v === undefined) delete ui.profile[k]; else ui.profile[k] = v; }); ui.invalidate();
-        check('Fill around moving aircraft: "Needs Sharp HUD." under Only with Sharp HUD while Sharp HUD is off, nowhere else',needs && withHud && always); }
       // Home and End pick the first and last choice that can be picked; arrows skip a disabled one (Pimax native with DLSS 5 on).
       { const provider = ui.profile.quadViews, at = v => $('seg-quadViews').querySelector(`[data-value=${v}]`), key = (b,k) => b.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true,cancelable:true}));
         ui.navigate('foveation'); const from = radios('quadViews').find(b => b.getAttribute('aria-checked') === 'true'); from.focus();

@@ -1,46 +1,44 @@
-Validation round 08 fixes (DCS Control, 2026-11-25): frame-generation settings live without a rebuild, and no
-generation for swapchains no projection layer uses.
+Validation round 08 fixes (DCS Control, 2026-11-25): frame-generation quality keys live without arming unused
+swapchains, and keys off as fast as 0.7.0.
 - apply_embedded_control no longer arms swapchains still flagged generation_eligible_pending. Each control revision
   armed DCS's early swapchains (enumerated, never named by a projection layer): four synthesizers that never composed a
   frame, the first live change stalling the frame thread 1.62 s and each later one about 0.63 s. A swapchain a
-  projection layer uses is armed by the frame path, as at the start. Tested: live-ini with an unused swapchain (fake
-  runtime, D3D12 / D3D11 / flight) makes no private swapchain and logs no ready record or history for it.
-- [ofxr] dcs_motion_occlusion_fill set live per synthesizer (D3D12FrameSynthesizer::set_occlusion_fill), like the
-  quality keys (set_fg_quality): the fill's pass is made with dcs_motion whatever the mode and the mode is read per
-  pair (mode 1's Sharp HUD gate stays per pair). A fill-only change is no longer a rebuild in apply_embedded_control or
-  at an arming thread's take-in, and a settings-only change keeps the arming thread's work. Tested: 0 -> 2 -> 1 -> 0 on
-  a synthesizer made with the mode before gives the image of one made with the new mode, byte for byte.
-- Flight log: cockpit_mask result=12 c bits 16-31 carry the fill's pixels (units of 65536); live_settings result=5,
-  one record per synthesizer each time its settings are set (made, set live, rebuilt): quality keys, fill mode, why,
-  whether its pairs can carry the fill, the composition's quality bits; b= the swapchain.
-- OFXR_LiveFgContract ("DCSC-OFXR-LIVE-FG/2"), exported, so DCS Control can tell this live contract from 0104/0122's by
-  the DLL's bytes.
+  projection layer uses is armed by the frame path, as at the start. A quality-key-only change, generation on before
+  and after, keeps an arming thread's work (its take-in sets the keys without a rebuild). Tested: live-ini with an
+  unused swapchain (fake runtime, D3D12 / D3D11 / flight) makes no private swapchain and logs no ready record or
+  history for it.
+- Flight log: live_settings result=5, one record per synthesizer each time its settings are set (made, quality keys
+  set live, rebuilt): quality keys, why, the composition's quality bits; b= the swapchain.
+- OFXR_LiveFgContract ("DCSC-OFXR-LIVE-FG/2"), exported, so DCS Control can tell this live contract (the quality keys
+  set live with no swapchain armed by the change) from 0104's by the DLL's bytes.
 - Keys off costs what 0.7.0 cost (validation round 08: comp+pack per pair in the 30-fps regime 214 -> 385 us with every
-  new key off). The quality options' and the fill's code, never taken with the keys off, made every NVIDIA composition
-  about twice the instructions (3X masked-MV composition 5244 -> 9403) and 3X's composition about 30 % slower on
-  hardware (fg_triple_bench, 5424 x 5356 x 2, RTX: 2073 -> 2721 us; 2X 1240 -> 1345 us). frame_synthesis.hlsl now
-  compiles them only with XRFG_FG_EXTRAS=1: every existing composition is the same bytecode as 0103's (checked with
-  fxc), and an _extras twin of each of the 40 NVIDIA compositions (plain, masked, depth, MV, depth+MV) carries them.
-  The synthesizer registers a twin for each composition it makes, binds it only for a pair with a quality bit or the
-  fill's bit (pair_extras), and makes its pipeline on first use (at creation when the options already have a key on).
-  Measured after the fix, keys off: 3X 2075 us, 2X 1229 us (0103: 2074 / 1229-1238). Keys on, 3X (2X): all quality
-  keys 2746 (1349) us, fill 2 3206 (1499) us, both 3241 (1501) us. The DLL grows by about 4.8 MB.
+  new key off). The quality options' code, never taken with the keys off, made every NVIDIA composition about twice
+  the instructions and 3X's composition slower on hardware (fg_triple_bench, 5424 x 5356 x 2, RTX: 0103 2073 us).
+  frame_synthesis.hlsl now compiles them only with XRFG_FG_EXTRAS=1: every existing composition is the same bytecode
+  as 0103's (checked with fxc), and an _extras twin of each of the 40 NVIDIA compositions (plain, masked, depth, MV,
+  depth+MV) carries them. The synthesizer registers a twin for each composition it makes, binds it only for a pair
+  with a quality bit (pair_extras), and makes its pipeline on first use (at creation when the options already have a
+  key on). Measured, keys off: 3X 2075 us, 2X 1229 us (0103: 2074 / 1229-1238); all quality keys on, 3X 2746 us, 2X
+  1349 us. The DLL grows by about 4.8 MB.
 - tests/fg_triple_bench.inc (XRFG_TEST_FG_TRIPLE_BENCH, label bench): the composition with DCS's mask and MVs in 2X and
-  3X, keys from XRFG_TEST_FG_TRIPLE_QUALITY / _FILL; written so it builds against 0001-0103 too.
+  3X, keys from XRFG_TEST_FG_TRIPLE_QUALITY; written so it builds against 0001-0103 too.
+(The 0.7.1 development series also had an occlusion fill around moving aircraft, [ofxr] dcs_motion_occlusion_fill, and
+its engine-data fixtures; both were removed before release: in flight the fill never fired in the cockpit view, and in
+the external view it made the halo around an aircraft worse by day.)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 14c9098..9b14458 100644
+index bdabc6c..642ee29 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -324,6 +324,55 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+@@ -310,6 +310,55 @@ if(WIN32 AND XRFG_BUILD_LAYER)
              VERBATIM)
          list(APPEND XRFG_DCS_MOTION_HEADERS ${XRFG_SUFFIX_HEADERS})
      endforeach()
 +    # DCS Control (0123): every NVIDIA composition once more with the quality
-+    # options and the occlusion fill compiled in (XRFG_FG_EXTRAS=1, suffix
-+    # _extras). The compositions above have them compiled out (the same bytes
-+    # as before 0104): the synthesizer binds an _extras twin only for a pair
-+    # with a quality bit or the fill's bit (D3D12FrameSynthesizer, pair_extras).
++    # options compiled in (XRFG_FG_EXTRAS=1, suffix _extras). The compositions
++    # above have them compiled out (the same bytes as before 0104): the
++    # synthesizer binds an _extras twin only for a pair with a quality bit
++    # (D3D12FrameSynthesizer, pair_extras).
 +    set(XRFG_FG_EXTRAS_HEADERS)
 +    foreach(XRFG_EXTRAS_GROUP "" _masked _masked_depth _masked_motion _masked_depth_motion)
 +        set(XRFG_EXTRAS_MASK 0)
@@ -88,7 +86,7 @@ index 14c9098..9b14458 100644
      # DCS Control (0049): the HUD symbology's passes (hud_symbology.hlsl),
      # run only with [ofxr] hud_symbology for a pair whose frames carry it.
      set(XRFG_HUD_SYMBOLOGY_HEADERS
-@@ -583,6 +632,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+@@ -569,6 +618,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
          ${XRFG_COCKPIT_MASK_HEADERS}
          ${XRFG_COCKPIT_DEPTH_HEADERS}
          ${XRFG_DCS_MOTION_HEADERS} # DCS Control (0036)
@@ -97,23 +95,10 @@ index 14c9098..9b14458 100644
          ${XRFG_FOVEATED_COMPOSE_HEADERS}) # DCS Control (0099)
      target_include_directories(xrfg_d3d12_history
 diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
-index ba7ccb9..38588a9 100644
+index ba7ccb9..53e62f4 100644
 --- a/include/xrfg/bridge_flight_logger.hpp
 +++ b/include/xrfg/bridge_flight_logger.hpp
-@@ -572,8 +572,10 @@ enum class BridgeFlightOperation : std::uint32_t {
-     //     frames with one eye's MVs only (partial, 16-31), frames with no
-     //     motion slot of their own (F10, 32-47), other misses (48-63); c=
-     //     pairs whose MVs were held off because over a fifth of the pixels
--    //     had fallen back to the flow just before (0-15), the motion
--    //     generations opened (32-63).
-+    //     had fallen back to the flow just before (0-15), DCS Control (0123):
-+    //     the pixels the occlusion fill gave over those 10 s in units of
-+    //     65536 (16-31, saturating; sampled as a= and b=, and not in them),
-+    //     the motion generations opened (32-63).
-     //   result=13 (0036), the motion textures opened: a= the generation, b=
-     //     the MV atlas width (0-31) and height (32-63), c= the header flags.
-     //   result=14 (0036), a motion handle did not open (once per
-@@ -834,10 +836,13 @@ enum class BridgeFlightOperation : std::uint32_t {
+@@ -834,10 +834,12 @@ enum class BridgeFlightOperation : std::uint32_t {
      //     nvidia_input_scale, 4 nvidia_bidirectional, 8
      //     nvidia_occlusion_aware; DCS Control (0104): 16 the quality keys,
      //     implicit_layer::kFgQualityKeys, whose bits a= and b= carry in bits
@@ -121,125 +106,79 @@ index ba7ccb9..38588a9 100644
 -    //     session then rebuilds its synthesis on its next xrEndFrame
 -    //     (apply_embedded_control): an embedded_configuration record with
 -    //     a= that revision follows, its result the rebuild's.
-+    //     32-39; DCS Control (0122): 32 dcs_motion_occlusion_fill; its mode
-+    //     in bits 40-41 of a and b) and the control revision from bit 32.
++    //     32-39) and the control revision from bit 32.
 +    //     Each session then applies it on its next xrEndFrame (a rebuild
-+    //     for the flow keys; the quality keys and the fill are set live,
-+    //     result=5) (apply_embedded_control): an embedded_configuration
++    //     for the flow keys; DCS Control (0123): the quality keys are set
++    //     live, result=5) (apply_embedded_control): an embedded_configuration
 +    //     record with a= that revision follows, its result the
 +    //     configuration's.
      //   result=2, start-only keys differ from what the session started with
      //     (or are back to it, c=0): c= implicit_layer::kOfxrStartOnlyKeys,
      //     bit i (1 enabled, 2 backend, 4 motion_vectors, 8 d3d11_bridge, 16
-@@ -854,6 +859,14 @@ enum class BridgeFlightOperation : std::uint32_t {
+@@ -854,6 +856,13 @@ enum class BridgeFlightOperation : std::uint32_t {
      //   result=4 (0099), `[ofxr] foveated_single_layer` changed and taken in
      //     live: a= the new value (0 or 1), b= the old. Each session's presenter
      //     follows it from its next fresh submission.
 +    //   result=5 (DCS Control 0123), what one synthesizer composes with, each
 +    //     time that is set: a= the quality keys it holds (bits 0-7,
-+    //     kFgQuality*), the occlusion fill's mode (8-15, 0-2), why (16-23: 1
-+    //     made, 2 a quality key or the fill's mode set live without a
-+    //     rebuild, 3 rebuilt), 1 in bit 24 when its pairs can carry the fill
-+    //     (NVIDIA with dcs_motion), the composition's quality bits those keys
-+    //     give it (32-63, 0 off the NVIDIA backend); b= the application's
++    //     kFgQuality*), why (16-23: 1 made, 2 a quality key set live without
++    //     a rebuild, 3 rebuilt), the composition's quality bits those keys
++    //     give it (32-63, 0 off the NVIDIA backend; bits 8-15 and 24-31 are
++    //     0); b= the application's
 +    //     swapchain; c= 1 a foveated periphery layer's swapchain, else 0.
      live_settings,
      // Foveated frame generation (`[ofxr] foveated_layers`): the session's
      // state, one record each time it changes (the application's xrEndFrame).
 diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
-index a694cee..8e20160 100644
+index 95031bc..099c55a 100644
 --- a/include/xrfg/d3d12_frame_synthesizer.hpp
 +++ b/include/xrfg/d3d12_frame_synthesizer.hpp
-@@ -377,9 +377,11 @@ struct D3D12NvidiaOpticalFlowOptions {
-     // DCS Control (0122): a mode. 0 off; 1 only on pairs whose HUD / helmet
-     // symbology was taken out (hud_symbology: a HUD left in the image, even
-     // semi-transparent, with an aircraft passing behind it, is moved by the
--    // one-frame sample); 2 on every pair. Taken in live (a rebuild). Only
-+    // one-frame sample); 2 on every pair. Taken in live. Only
-     // where the pair's previous frame carries its class atlas and both frames
--    // their stencil composition.
-+    // their stencil composition. DCS Control (0123): taken in live without a
-+    // rebuild (D3D12FrameSynthesizer::set_occlusion_fill): the fill's pass is
-+    // made with dcs_motion whatever the mode, and the mode is read per pair.
-     std::uint32_t dcs_motion_occlusion_fill{};
- };
- 
-@@ -970,6 +972,23 @@ public:
+@@ -955,6 +955,15 @@ public:
      // DCS Control (0104): D3D12NvidiaOpticalFlowOptions::fg_quality changed
      // without a rebuild (every option is a shader bit read per pair).
      void set_fg_quality(std::uint32_t fg_quality) noexcept;
-+    // DCS Control (0123): D3D12NvidiaOpticalFlowOptions::
-+    // dcs_motion_occlusion_fill changed without a rebuild (0-2, above 2 reads
-+    // 2): the next pair takes it, as a synthesizer made with that mode would.
-+    void set_occlusion_fill(std::uint32_t mode) noexcept;
 +    // DCS Control (0123): what the next pair composes with, for the flight
 +    // log's live_settings result=5. quality= the fg_quality keys held,
 +    // shader_bits= the composition's quality bits they give here (0 off the
-+    // NVIDIA backend), fill= the fill's mode held, fill_active= whether a
-+    // pair can carry it here (the NVIDIA backend with dcs_motion and the
-+    // fill's pass made).
++    // NVIDIA backend).
 +    struct FgSettings {
 +        std::uint32_t quality{};
 +        std::uint32_t shader_bits{};
-+        std::uint32_t fill{};
-+        bool fill_active{};
 +    };
 +    [[nodiscard]] FgSettings fg_settings() const noexcept;
      // Foveated layers: the session's ledger of queued Waits (see
      // D3D12QueueWaitLedger), or null: every Wait queued as before. As
      // set_foveated_focus, set again by the layer before every submission.
 diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
-index 7f6af18..8eb0f3d 100644
+index 3c750a0..a64d840 100644
 --- a/src/common/embedded_control.cpp
 +++ b/src/common/embedded_control.cpp
-@@ -306,6 +306,14 @@ extern "C" __declspec(dllexport) int OFXR_LiveDiagVramV1() noexcept {
+@@ -297,6 +297,15 @@ extern "C" __declspec(dllexport) int OFXR_LiveDiagVramV1() noexcept {
      return xrfg::embedded::live_diag_vram();
  }
  
 +// DCS Control (0123): the live contract of the generated-frame settings, which
 +// DCS Control finds in the DLL's bytes (LiveSettings.OfxrReadsFgQuality) to
-+// know which keys this layer takes in while the game runs. 1 (0104/0122, no
-+// marker): the quality keys set live, the occlusion fill a rebuild; 2 (0123):
-+// both set live on each synthesizer, no rebuild. A later change of that
-+// contract raises the number; the text before it stays.
++// know which keys this layer takes in while the game runs. 1 (0104, no
++// marker): the quality keys set live, and each change armed swapchains no
++// projection layer uses (a stall of the frame thread); 2 (0123): the quality
++// keys set live on each synthesizer, no swapchain armed by the change. A later
++// change of that contract raises the number; the text before it stays.
 +extern "C" __declspec(dllexport) const char OFXR_LiveFgContract[] = "DCSC-OFXR-LIVE-FG/2";
 +
  // Private, versioned POD ABI for the combined-module host regression harness.
  extern "C" __declspec(dllexport) int OFXR_EmbeddedRequestV1(int enabled, int backend, int preset, int scale, int backward) noexcept {
      try { return xrfg::embedded::request({enabled != 0, backend, preset, scale, backward != 0, 0, 0}) ? 1 : 0; }
-diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
-index dd36f86..c4d0891 100644
---- a/src/d3d12/cockpit_mask.cpp
-+++ b/src/d3d12/cockpit_mask.cpp
-@@ -2273,6 +2273,9 @@ struct CockpitMaskConsumer::Impl {
-                         const std::uint64_t pairs = pair_counters->motion_pairs.exchange(0);
-                         const std::uint64_t mismatches = pair_counters->motion_previous_mismatch.exchange(0);
-                         const std::uint64_t backoffs = pair_counters->motion_backoff_pairs.exchange(0);
-+                        // DCS Control (0123): the occlusion fill's pixels, in
-+                        // units of 65536 (c bits 16-31, saturating).
-+                        const std::uint64_t filled = pair_counters->motion_filled_pixels.exchange(0);
-                         const auto saturate24 = [](std::uint64_t value) {
-                             return std::min<std::uint64_t>(value, 0xffffffU);
-                         };
-@@ -2289,7 +2292,7 @@ struct CockpitMaskConsumer::Impl {
-                                 (saturate16(stats.motion_partial - stats_at_log.motion_partial) << 16U) |
-                                 (saturate16(stats.motion_unpaired - stats_at_log.motion_unpaired) << 32U) |
-                                 (saturate16(stats.motion_other - stats_at_log.motion_other) << 48U),
--                            saturate16(backoffs) |
-+                            saturate16(backoffs) | (saturate16(filled >> 16U) << 16U) |
-                                 (std::min<std::uint64_t>(stats.motion_generations_opened, 0xffffffffULL) << 32U));
-                     }
-                     // DCS Control (0049): the HUD symbology: what the frames
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
-index b5adbf6..663eced 100644
+index cb24066..1477a19 100644
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
-@@ -76,6 +76,48 @@
+@@ -75,6 +75,48 @@
+ #include "dcs_motion_resample_shader.hpp"
  #include "dcs_motion_scatter_shader.hpp"
- #include "dcs_motion_previous_shader.hpp" // DCS Control (0121)
  #include "nvidia_synthesize_midpoint_pixel_shader_masked_motion.hpp"
-+// DCS Control (0123): the NVIDIA compositions with the quality options and the
-+// occlusion fill compiled in (XRFG_FG_EXTRAS=1).
++// DCS Control (0123): the NVIDIA compositions with the quality options
++// compiled in (XRFG_FG_EXTRAS=1).
 +#include "nvidia_synthesize_midpoint_pixel_shader_extras.hpp"
 +#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_extras.hpp"
 +#include "nvidia_fast_synthesize_midpoint_pixel_shader_extras.hpp"
@@ -283,12 +222,12 @@ index b5adbf6..663eced 100644
  #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_motion.hpp"
  #include "nvidia_fast_synthesize_midpoint_pixel_shader_masked_motion.hpp"
  #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion.hpp"
-@@ -184,6 +226,63 @@ constexpr UINT kDcsMotionBlock = kMaxReprojectionViews + 2U;
- // after the MVs' one: the previous frame's class pass (t1 that frame's class
- // copy, u0 the resampled motion).
- constexpr UINT kDcsMotionFillBlock = kMaxReprojectionViews + 3U;
+@@ -179,6 +221,63 @@ constexpr UINT kDescriptorCount =
+ // reserved one: the MVs' resample and scatter (t0 the MV copy, t1 the class
+ // copy, t2 the resampled motion; u0 the resampled motion, u1 the scatter).
+ constexpr UINT kDcsMotionBlock = kMaxReprojectionViews + 2U;
 +// DCS Control (0123): each NVIDIA composition and its _extras twin (the same
-+// entry point with the quality options and the occlusion fill compiled in).
++// entry point with the quality options compiled in).
 +struct ExtrasShader {
 +    const void* plain;
 +    const void* extras;
@@ -347,30 +286,14 @@ index b5adbf6..663eced 100644
  constexpr UINT kNvidiaTimestampCount = 5;
  constexpr UINT kNvidiaTimestampPackBegin = 0;
  constexpr UINT kNvidiaTimestampPackEnd = 1;
-@@ -1861,8 +1960,14 @@ struct D3D12FrameSynthesizer::Impl {
-     UINT dcs_motion_cell{4};
-     UINT dcs_motion_cell_code{};
-     UINT dcs_motion_test_bits{};
--    UINT dcs_motion_feature_bits{}; // DCS Control (0121)
-     ComPtr<ID3D12PipelineState> dcs_motion_previous_pipeline; // DCS Control (0121)
-+    // DCS Control (0121): the occlusion fill's bit in every MV pair's bits.
-+    // DCS Control (0123): read per pair, so set_occlusion_fill needs no
-+    // rebuild (the fill's pass is made with dcs_motion whatever the mode).
-+    [[nodiscard]] UINT fill_feature_bits() const noexcept {
-+        return nvidia_options.dcs_motion_occlusion_fill != 0U && dcs_motion_previous_pipeline != nullptr
-+            ? kDcsMotionFillBit : 0U;
-+    }
-     bool pair_previous_class_read{}; // DCS Control (0121)
-     bool pair_motion_bound{};
-     std::array<UINT, kMaxReprojectionViews> pair_motion_bits{};
-@@ -1935,25 +2040,86 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -1916,25 +2015,80 @@ struct D3D12FrameSynthesizer::Impl {
              parameters.game_motion_rect = pair_depth_constants[view_index];
          }
      }
 +    // DCS Control (0123): the _extras twins of the compositions made
 +    // (create_composition_pipeline registers one per composition whose shader
 +    // has a twin). A twin's pipeline is made on its first use (pair_extras:
-+    // the first pair after a quality key or the fill is turned on; made at
++    // the first pair after a quality key is turned on; made at
 +    // creation when the options already have one), so a synthesizer with
 +    // every key off makes none and composes exactly as before 0104.
 +    struct ExtrasTwin {
@@ -395,15 +318,9 @@ index b5adbf6..663eced 100644
 +        return result;
 +    }
 +    // Whether the pair being recorded needs the _extras compositions: a
-+    // quality bit (quality_bits: NVIDIA only) or the fill's bit on a view.
++    // quality bit (quality_bits: NVIDIA only).
 +    [[nodiscard]] bool pair_extras() const noexcept {
-+        if (quality_bits() != 0U) return true;
-+        if (pair_motion_bound) {
-+            for (const UINT bits : pair_motion_bits) {
-+                if ((bits & kDcsMotionFillBit) != 0U) return true;
-+            }
-+        }
-+        return false;
++        return quality_bits() != 0U;
 +    }
 +    [[nodiscard]] ID3D12PipelineState* extras_twin(ID3D12PipelineState* pipeline) noexcept {
 +        if (pipeline == nullptr) return nullptr;
@@ -454,16 +371,7 @@ index b5adbf6..663eced 100644
      }
      UINT cockpit_mask_cell{4};
      UINT cockpit_mask_cell_code{};
-@@ -2597,7 +2763,7 @@ struct D3D12FrameSynthesizer::Impl {
-         }
-         // DCS Control (0121): the previous frame's class pass (without it no
-         // pair carries the fill's bit). DCS Control (0122): made with
--        // dcs_motion whatever the key, so a live change (a rebuild) only flips
-+        // dcs_motion whatever the key, so a live change (0123: set_occlusion_fill, no rebuild) only flips
-         // the bit.
-         if (dcs_motion_enabled()) {
-             compute_description.CS = {g_xrfg_dcs_motion_previous_shader, sizeof(g_xrfg_dcs_motion_previous_shader)};
-@@ -2659,7 +2825,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2629,7 +2783,7 @@ struct D3D12FrameSynthesizer::Impl {
          graphics_description.SampleDesc.Count = 1;
          graphics_description.SampleDesc.Quality = 0;
          graphics_description.NodeMask = node_mask;
@@ -472,7 +380,7 @@ index b5adbf6..663eced 100644
              &graphics_description,
              IID_PPV_ARGS(graphics_pipeline.GetAddressOf()));
          if (FAILED(result)) {
-@@ -2691,19 +2857,19 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2661,19 +2815,19 @@ struct D3D12FrameSynthesizer::Impl {
                      return;
                  }
                  graphics_description.PS = shader;
@@ -495,7 +403,7 @@ index b5adbf6..663eced 100644
                              &graphics_description, IID_PPV_ARGS(depth.ReleaseAndGetAddressOf())))) {
                          make_motion(depth_motion_shader, depth_motion); // DCS Control (0036)
                      } else {
-@@ -2728,7 +2894,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2698,7 +2852,7 @@ struct D3D12FrameSynthesizer::Impl {
              g_xrfg_game_motion_synthesize_midpoint_pixel_shader,
              sizeof(g_xrfg_game_motion_synthesize_midpoint_pixel_shader),
          };
@@ -504,7 +412,7 @@ index b5adbf6..663eced 100644
              &graphics_description,
              IID_PPV_ARGS(game_motion_graphics_pipeline.GetAddressOf()));
          if (FAILED(result)) {
-@@ -2745,7 +2911,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2715,7 +2869,7 @@ struct D3D12FrameSynthesizer::Impl {
                  sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader),
              };
          }
@@ -513,7 +421,7 @@ index b5adbf6..663eced 100644
              &graphics_description,
              IID_PPV_ARGS(nvidia_graphics_pipeline.GetAddressOf()));
          if (FAILED(result)) {
-@@ -2782,7 +2948,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2752,7 +2906,7 @@ struct D3D12FrameSynthesizer::Impl {
                  sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader),
              };
          }
@@ -522,7 +430,7 @@ index b5adbf6..663eced 100644
              &graphics_description,
              IID_PPV_ARGS(
                  nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
-@@ -2823,7 +2989,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2793,7 +2947,7 @@ struct D3D12FrameSynthesizer::Impl {
                    sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader)}
              : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader,
                    sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader)};
@@ -531,7 +439,7 @@ index b5adbf6..663eced 100644
                  IID_PPV_ARGS(nvidia_triple_graphics_pipeline.GetAddressOf())))) {
              nvidia_triple_graphics_pipeline.Reset();
          } else if (FAILED(make_masked(fast
-@@ -2853,7 +3019,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2823,7 +2977,7 @@ struct D3D12FrameSynthesizer::Impl {
                    sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader)}
              : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader,
                    sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader)};
@@ -540,37 +448,7 @@ index b5adbf6..663eced 100644
                  IID_PPV_ARGS(nvidia_triple_bidirectional_graphics_pipeline.GetAddressOf())))) {
              nvidia_triple_bidirectional_graphics_pipeline.Reset();
          } else if (FAILED(make_masked(fast
-@@ -5315,9 +5481,8 @@ struct D3D12FrameSynthesizer::Impl {
-             ++dcs_motion_cell_code;
-         }
-         apply_test_dcs_motion_cell(); // DCS Control (0120)
--        // DCS Control (0121): the occlusion fill rides in every MV pair's bits.
--        dcs_motion_feature_bits =
--            nvidia_options.dcs_motion_occlusion_fill != 0U && dcs_motion_previous_pipeline != nullptr ? kDcsMotionFillBit : 0U;
-+        // DCS Control (0121): the occlusion fill rides in every MV pair's bits
-+        // (DCS Control (0123): fill_feature_bits, read per pair).
-         // Tests only: the sky's MVs on (1) or off (0), and the MVs without
-         // any check (XRFG_TEST_DCS_MOTION_ONLY), to measure what each gives.
-         std::array<char, 4> sky{};
-@@ -5468,7 +5633,7 @@ struct D3D12FrameSynthesizer::Impl {
-             if (parameters.output_width == 0 || parameters.output_height == 0) {
-                 continue;
-             }
--            pair_motion_bits[index] = kDcsMotionBoundBit | dcs_motion_test_bits | dcs_motion_feature_bits |
-+            pair_motion_bits[index] = kDcsMotionBoundBit | dcs_motion_test_bits | fill_feature_bits() |
-                 (dcs_motion_cell_code << kDcsMotionCellShift);
-             any = true;
-         }
-@@ -5682,7 +5847,7 @@ struct D3D12FrameSynthesizer::Impl {
-         pair_previous_class_read = false;
-         D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
-         if (!pair_motion_bound || dcs_motion_previous_pipeline == nullptr ||
--            (dcs_motion_feature_bits & kDcsMotionFillBit) == 0U || previous_frame == nullptr ||
-+            (fill_feature_bits() & kDcsMotionFillBit) == 0U || previous_frame == nullptr ||
-             // DCS Control (0122): mode 1, only where the symbology was taken out.
-             (nvidia_options.dcs_motion_occlusion_fill == 1U && !hud_pair.active) ||
-             !previous_frame->motion || !previous_frame->motion_class || previous_frame->motion_texture == nullptr ||
-@@ -7655,10 +7820,16 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -7448,10 +7602,16 @@ struct D3D12FrameSynthesizer::Impl {
              step_started = now;
          };
  
@@ -580,14 +458,14 @@ index b5adbf6..663eced 100644
              return result;
          }
 +        // DCS Control (0123): the _extras compositions now when the options
-+        // already have a quality key or the fill (else on first use).
-+        if (quality_bits() != 0U || (nvidia_options.dcs_motion_occlusion_fill != 0U && dcs_motion_enabled())) {
++        // already have a quality key (else on first use).
++        if (quality_bits() != 0U) {
 +            make_extras_twins();
 +        }
          step_done(1);
          result = device->CreateFence(
              0,
-@@ -9019,7 +9190,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -8810,7 +8970,7 @@ struct D3D12FrameSynthesizer::Impl {
              : pair_mask_bound                                                ? masked_pipeline(triple_plain)
                                                                               : triple_plain;
          if (synthetic_output_count() == 2U && triple_pipeline != nullptr) {
@@ -596,7 +474,7 @@ index b5adbf6..663eced 100644
              const UINT first_rtvs[2] = {
                  synthetic_output_destination(0, synthetic_destination_index) *
                      image_description.DepthOrArraySize,
-@@ -9714,12 +9885,12 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -9505,12 +9665,12 @@ struct D3D12FrameSynthesizer::Impl {
          ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
          slot.command_list->SetDescriptorHeaps(1, heaps);
          slot.command_list->SetGraphicsRootSignature(root_signature.Get());
@@ -611,24 +489,10 @@ index b5adbf6..663eced 100644
          slot.command_list->IASetPrimitiveTopology(
              D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
  
-@@ -11090,6 +11261,36 @@ void D3D12FrameSynthesizer::set_fg_quality(std::uint32_t fg_quality) noexcept {
+@@ -10862,6 +11022,19 @@ void D3D12FrameSynthesizer::set_fg_quality(std::uint32_t fg_quality) noexcept {
      }
  }
  
-+// DCS Control (0123): the occlusion fill's mode without a rebuild. Its pass is
-+// made with dcs_motion whatever the mode (0122), and the mode is read per pair
-+// (fill_feature_bits, record_dcs_motion_previous_class): the next pair takes
-+// it.
-+void D3D12FrameSynthesizer::set_occlusion_fill(std::uint32_t mode) noexcept {
-+    try {
-+        std::scoped_lock lock(mutex_);
-+        if (impl_ != nullptr) {
-+            impl_->nvidia_options.dcs_motion_occlusion_fill = std::min(mode, 2U);
-+        }
-+    } catch (...) {
-+    }
-+}
-+
 +D3D12FrameSynthesizer::FgSettings D3D12FrameSynthesizer::fg_settings() const noexcept {
 +    FgSettings settings{};
 +    try {
@@ -636,9 +500,6 @@ index b5adbf6..663eced 100644
 +        if (impl_ != nullptr) {
 +            settings.quality = impl_->nvidia_options.fg_quality;
 +            settings.shader_bits = impl_->quality_bits();
-+            settings.fill = impl_->nvidia_options.dcs_motion_occlusion_fill;
-+            settings.fill_active =
-+                impl_->dcs_motion_enabled() && impl_->dcs_motion_previous_pipeline != nullptr;
 +        }
 +    } catch (...) {
 +    }
@@ -649,20 +510,20 @@ index b5adbf6..663eced 100644
  void D3D12FrameSynthesizer::set_foveated_premultiplied(bool premultiplied) noexcept {
      try {
 diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
-index 3621b3a..d5bbdaf 100644
+index 29c0991..3f1c865 100644
 --- a/src/d3d12/frame_synthesis.hlsl
 +++ b/src/d3d12/frame_synthesis.hlsl
 @@ -104,8 +104,23 @@ static const uint kQualityEdgeChoice = 1u << 18;   // nvidia_edge_choice
  static const uint kQualityMaskBand = 1u << 19;     // dcs_motion_mask_band
  static const uint kQualityHudGuard = 1u << 20;     // dcs_motion_hud_guard
  
-+// DCS Control (0123): the quality options and the occlusion fill are compiled
-+// only into the compositions built with XRFG_FG_EXTRAS=1 (the "_extras"
-+// variants, which the synthesizer binds for a pair that has a quality bit or
-+// the fill's bit). Without it every one of them is compiled out: in one
-+// shader their code, even never taken, cost 3X's composition about 30 % on
-+// hardware (validation round 08, 0.7.0 2073 us against 2721 us at 5424 px),
-+// so the compositions with every key off are again 0.7.0's.
++// DCS Control (0123): the quality options are compiled only into the
++// compositions built with XRFG_FG_EXTRAS=1 (the "_extras" variants, which the
++// synthesizer binds for a pair that has a quality bit). Without it every one
++// of them is compiled out: in one shader their code, even never taken, cost
++// 3X's composition about 30 % on hardware (validation round 08, 0.7.0 2073 us
++// against 2721 us at 5424 px), so the compositions with every key off are
++// again 0.7.0's.
 +#ifndef XRFG_FG_EXTRAS
 +#define XRFG_FG_EXTRAS 0
 +#endif
@@ -676,32 +537,16 @@ index 3621b3a..d5bbdaf 100644
  }
  
  // The sRGB transfer function, and its inverse.
-@@ -1799,6 +1814,7 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
-         // DCS Control (0121): the occluded side left out where the MVs did not
-         // hold. DCS Control (0122): after the count above (the backoff judges
-         // the MVs alone), its own count at byte 128 (one pixel in 256 as above).
-+#if XRFG_FG_EXTRAS // DCS Control (0123): only in the _extras compositions
-         [branch] if ((UseGameMotion & kDcsMotionFillBit) != 0u && weight < 0.999 && cockpit_mask_at(pixel) < 0.75) {
-             float4 fill;
-             if (dcs_motion_occlusion_fill(pixel, t, output, fill)) {
-@@ -1810,6 +1826,7 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
-                 }
-             }
-         }
-+#endif
-     }
-     return weight;
- }
 diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
-index 44a9b18..1b8ab95 100644
+index dee2202..ca25009 100644
 --- a/src/layer/openxr_layer.cpp
 +++ b/src/layer/openxr_layer.cpp
-@@ -3257,6 +3257,25 @@ void log_swapchain_eligibility(
+@@ -3257,6 +3257,23 @@ void log_swapchain_eligibility(
          auxiliary);
  }
  
 +// DCS Control (0123): what a synthesizer composes with, once it is made
-+// (why 1), its quality keys or occlusion fill set live (2) or rebuilt (3):
++// (why 1), its quality keys set live (2) or rebuilt (3):
 +// live_settings result=5 (bridge_flight_logger.hpp), so an A/B analysis can
 +// prove the state of every block of a flight.
 +void log_synthesizer_settings(
@@ -711,9 +556,7 @@ index 44a9b18..1b8ab95 100644
 +        xrfg::BridgeFlightOperation::live_settings,
 +        5,
 +        (static_cast<std::uint64_t>(settings.quality & 0xffU)) |
-+            (static_cast<std::uint64_t>(settings.fill & 0xffU) << 8U) |
 +            (static_cast<std::uint64_t>(why & 0xffU) << 16U) |
-+            (static_cast<std::uint64_t>(settings.fill_active ? 1U : 0U) << 24U) |
 +            (static_cast<std::uint64_t>(settings.shader_bits) << 32U),
 +        handle_value(state.handle),
 +        state.foveated_periphery.load(std::memory_order_relaxed) ? 1U : 0U);
@@ -722,7 +565,7 @@ index 44a9b18..1b8ab95 100644
  std::mutex g_state_mutex;
  std::unordered_map<XrInstance, std::shared_ptr<Dispatch>> g_instances;
  std::unordered_map<XrSession, std::shared_ptr<SessionState>> g_sessions;
-@@ -4423,6 +4442,7 @@ create_d3d12_frame_generation_swapchains(
+@@ -4423,6 +4440,7 @@ create_d3d12_frame_generation_swapchains(
                  state->session->foveated_layers && // round 8
                      state->foveated_periphery.load(std::memory_order_relaxed));
          }
@@ -730,7 +573,7 @@ index 44a9b18..1b8ab95 100644
          generation->synthesizer = std::move(synthesizer);
          if (failure_reason != nullptr) {
              *failure_reason = SwapchainEligibilityReason::ready;
-@@ -4627,6 +4647,7 @@ create_d3d11_frame_generation_swapchains(
+@@ -4627,6 +4645,7 @@ create_d3d11_frame_generation_swapchains(
                  state->session->foveated_layers && // round 8
                      state->foveated_periphery.load(std::memory_order_relaxed));
          }
@@ -738,7 +581,7 @@ index 44a9b18..1b8ab95 100644
          generation->synthesizer = std::move(synthesizer);
          generation->interop = std::move(interop);
          {
-@@ -4906,6 +4927,7 @@ create_vulkan_frame_generation_swapchains(
+@@ -4906,6 +4925,7 @@ create_vulkan_frame_generation_swapchains(
                  state->session->foveated_layers && // round 8
                      state->foveated_periphery.load(std::memory_order_relaxed));
          }
@@ -746,31 +589,19 @@ index 44a9b18..1b8ab95 100644
          generation->synthesizer = std::move(synthesizer);
          generation->interop = std::move(interop);
          {
-@@ -5403,14 +5425,19 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
-                     wanted_options.bidirectional ||
-                 // DCS Control (0066): and the live one.
-                 inputs.nvidia_options.occlusion_aware !=
--                    wanted_options.occlusion_aware ||
--                // DCS Control (0122): the occlusion fill.
--                inputs.nvidia_options.dcs_motion_occlusion_fill != wanted_options.dcs_motion_occlusion_fill) {
-+                    wanted_options.occlusion_aware) {
+@@ -5406,9 +5426,11 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+                     wanted_options.occlusion_aware) {
                  taken = SUCCEEDED(generation->synthesizer->reconfigure(
                      wanted, wanted_options));
--            } else if (inputs.nvidia_options.fg_quality != wanted_options.fg_quality) {
 +                if (taken) log_synthesizer_settings(*state, *generation->synthesizer, 3U); // DCS Control (0123)
-+            } else if (inputs.nvidia_options.fg_quality != wanted_options.fg_quality ||
-+                       inputs.nvidia_options.dcs_motion_occlusion_fill !=
-+                           wanted_options.dcs_motion_occlusion_fill) {
+             } else if (inputs.nvidia_options.fg_quality != wanted_options.fg_quality) {
                  // DCS Control (0104): the quality keys, without a rebuild.
-+                // DCS Control (0123): and the occlusion fill's mode (0122
-+                // rebuilt for it).
                  generation->synthesizer->set_fg_quality(wanted_options.fg_quality);
-+                generation->synthesizer->set_occlusion_fill(wanted_options.dcs_motion_occlusion_fill);
-+                log_synthesizer_settings(*state, *generation->synthesizer, 2U);
++                log_synthesizer_settings(*state, *generation->synthesizer, 2U); // DCS Control (0123)
              }
              if (taken) {
                  configure_smooth_cursor(*session, *generation->synthesizer, // 0010
-@@ -17435,6 +17462,9 @@ void consume_application_frame(
+@@ -17429,6 +17451,9 @@ void consume_application_frame(
  void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
      const auto control = xrfg::embedded::snapshot();
      if (state->control_revision == control.revision) return;
@@ -780,28 +611,17 @@ index 44a9b18..1b8ab95 100644
      state->menu_enabled = false;
      {
          std::scoped_lock lock(state->presenter_mutex);
-@@ -17481,11 +17511,18 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
-         options.preset != state->nvidia_options.preset ||
-         options.input_scale != state->nvidia_options.input_scale ||
-         options.bidirectional != state->nvidia_options.bidirectional ||
--        options.occlusion_aware != state->nvidia_options.occlusion_aware || // DCS Control (0066)
--        options.dcs_motion_occlusion_fill != state->nvidia_options.dcs_motion_occlusion_fill; // DCS Control (0122)
-+        options.occlusion_aware != state->nvidia_options.occlusion_aware; // DCS Control (0066)
+@@ -17473,6 +17498,9 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
      // DCS Control (0104): the quality keys alone are shader bits, taken by each
      // synthesizer without a rebuild (D3D12FrameSynthesizer::set_fg_quality).
      const bool quality_changed = options.fg_quality != state->nvidia_options.fg_quality;
-+    // DCS Control (0123): and so is the occlusion fill's mode (its pass is made
-+    // with dcs_motion whatever the mode: D3D12FrameSynthesizer::
-+    // set_occlusion_fill), no longer a rebuild as in 0122.
-+    const bool fill_changed =
-+        options.dcs_motion_occlusion_fill != state->nvidia_options.dcs_motion_occlusion_fill;
 +    // DCS Control (0123): a change of those alone, generation on before and
 +    // after: an arming thread's work is kept (its take-in applies them).
 +    const bool settings_only = !changed && was_enabled && control.desired.enabled;
      // Enumeration is excluded by frame_call_mutex, so newly created contexts
      // also see this tuple. A partial failure remains bypass, never mixed flow.
      state->optical_flow_backend = backend;
-@@ -17502,77 +17539,24 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+@@ -17489,77 +17517,24 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
      }
      const decltype(swapchains) none;
      for (const auto& chain : restart_needed ? none : swapchains) {
@@ -811,8 +631,8 @@ index 44a9b18..1b8ab95 100644
 +        // DCS Control (0050): an arming thread's work is dropped; the frame
 +        // path arms the swapchain again with the new configuration (0123:
 +        // not here). DCS Control (0123): kept for a settings-only change,
-+        // whose take-in applies the quality keys and the fill's mode
-+        // (arm_frame_generation_async) without a rebuild.
++        // whose take-in applies the quality keys (arm_frame_generation_async)
++        // without a rebuild.
 +        if (!settings_only) retire_async_arm(chain);
          std::unique_lock lock(chain->mutex);
 -        // The same gates the enumeration path applies, and for the same reason.
@@ -896,51 +716,41 @@ index 44a9b18..1b8ab95 100644
          if (chain->frame_generation && chain->frame_generation->synthesizer) {
              auto& synthesis = chain->frame_generation->synthesizer;
              result = synthesis->wait_for_idle();
-@@ -17584,6 +17568,9 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
-             if (SUCCEEDED(result) && !changed && quality_changed) {
-                 synthesis->set_fg_quality(chain_options.fg_quality); // DCS Control (0104)
-             }
-+            if (SUCCEEDED(result) && !changed && fill_changed) {
-+                synthesis->set_occlusion_fill(chain_options.dcs_motion_occlusion_fill); // DCS Control (0123)
-+            }
-             if (SUCCEEDED(result) && changed) {
-                 result = synthesis->reconfigure(backend, chain_options);
-                 if (FAILED(result) &&
-@@ -17602,6 +17589,11 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+@@ -17589,6 +17564,11 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
                      result = synthesis->reconfigure(backend, chain_options);
                  }
              }
 +            // DCS Control (0123): what the synthesizer composes with now
 +            // (live_settings result=5: 2 set live, 3 rebuilt).
-+            if (SUCCEEDED(result) && (changed || quality_changed || fill_changed)) {
++            if (SUCCEEDED(result) && (changed || quality_changed)) {
 +                log_synthesizer_settings(*chain, *synthesis, changed ? 3U : 2U);
 +            }
          }
          if (SUCCEEDED(result) && chain->d3d12_history) result = chain->d3d12_history->wait_for_idle();
          if (SUCCEEDED(result) && chain->frame_generation && chain->frame_generation->interop)
 diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
-index cc366e6..836e248 100644
+index d1f9c86..b1ac829 100644
 --- a/tests/d3d12_history_tests.cpp
 +++ b/tests/d3d12_history_tests.cpp
 @@ -4354,6 +4354,8 @@ void test_nvidia_serialized_eye_context_stress(
  }
  
  #include "nvidia_fast_patterns.inc"
-+#define XRFG_BENCH_FG_EXTRAS 1 // DCS Control (0123): this tree has the quality keys and the fill
++#define XRFG_BENCH_FG_EXTRAS 1 // DCS Control (0123): this tree has the quality keys
 +#include "fg_triple_bench.inc" // DCS Control (0123)
- #include "fg_engine_data.inc" // DCS Control (0120)
  
  }  // namespace
-@@ -6901,7 +6903,7 @@ int main() {
+ 
+@@ -6900,7 +6902,7 @@ int main() {
          for (const char* bench : {"XRFG_TEST_PARALLEL_EYES_BENCH", "XRFG_TEST_DCS_MOTION_BENCH",
                   "XRFG_TEST_COCKPIT_DEPTH_BENCH", "XRFG_TEST_OCCLUSION_BENCH", "XRFG_TEST_TRIPLE_BENCH",
                   "XRFG_TEST_CURSOR_BENCH", "XRFG_TEST_WARM_ONE_BENCH", // 0059
--                 "XRFG_TEST_FOVEATED_BENCH", "XRFG_TEST_FOVEATED_QUALITY",
-+                 "XRFG_TEST_FOVEATED_BENCH", "XRFG_TEST_FOVEATED_QUALITY", "XRFG_TEST_FG_TRIPLE_BENCH", // 0123
-                  "XRFG_TEST_FG_ENGINE_DATA_BENCH"}) { // DCS Control (0121)
+-                 "XRFG_TEST_FOVEATED_BENCH", "XRFG_TEST_FOVEATED_QUALITY"}) {
++                 "XRFG_TEST_FOVEATED_BENCH", "XRFG_TEST_FOVEATED_QUALITY", "XRFG_TEST_FG_TRIPLE_BENCH"}) { // 0123
              if (GetEnvironmentVariableA(bench, nullptr, 0) && !nvidia_hardware_present()) {
                  std::cout << bench << " skipped: no NVIDIA hardware adapter\n";
-@@ -7023,6 +7025,13 @@ int main() {
+                 return kSkipped;
+@@ -7004,6 +7006,13 @@ int main() {
              replay_fixture.require_no_debug_errors();
              return 0;
          }
@@ -954,110 +764,17 @@ index cc366e6..836e248 100644
          if (GetEnvironmentVariableA("XRFG_TEST_TRIPLE_BENCH", nullptr, 0)) {
              D3D12WarpFixture bench_fixture(true);
              bench_triple_composition(bench_fixture, 2712, 2678);
-diff --git a/tests/fg_engine_data.inc b/tests/fg_engine_data.inc
-index 288d577..d02e2d9 100644
---- a/tests/fg_engine_data.inc
-+++ b/tests/fg_engine_data.inc
-@@ -451,6 +451,10 @@ struct FeVariant {
-     float yaw{};
-     double t{0.5};
-     std::uint32_t fill_mode{2}; // the key's mode with `fill` (1: only where the HUD was taken out)
-+    // DCS Control (0123): >= 0, the synthesizer is made with this fill mode
-+    // and set to the variant's live (set_occlusion_fill) between the prime
-+    // and the pair, as the layer does on a live change.
-+    int live_from{-1};
- };
- 
- struct FeResult {
-@@ -466,7 +470,7 @@ struct FeResult {
- StereoPattern fe_synthesize(D3D12WarpFixture& fixture, const StereoPattern& a, const StereoPattern& b, UINT width,
-     UINT height, const xrfg::D3D12NvidiaOpticalFlowOptions& options,
-     const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>& masks, const ReprojectionViews& previous_views,
--    const ReprojectionViews& views, float t) {
-+    const ReprojectionViews& views, float t, int live_from = -1) {
-     std::array<ComPtr<ID3D12Resource>, 2> sources{
-         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
-     auto current = create_source_texture(fixture, width, height);
-@@ -480,6 +484,7 @@ StereoPattern fe_synthesize(D3D12WarpFixture& fixture, const StereoPattern& a, c
-         "engine data history");
-     xrfg::D3D12NvidiaOpticalFlowOptions session_options = options;
-     session_options.cockpit_mask = true;
-+    if (live_from >= 0) session_options.dcs_motion_occlusion_fill = static_cast<std::uint32_t>(live_from); // 0123
-     xrfg::D3D12FrameSynthesizer synth;
-     require_hresult(synth.initialize(fixture.device(), fixture.queue(), history, current_out, synthetic_out, kFormat,
-                         D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::nvidia, session_options),
-@@ -491,6 +496,14 @@ StereoPattern fe_synthesize(D3D12WarpFixture& fixture, const StereoPattern& a, c
-     synth.set_cockpit_mask(masks[0]);
-     require_hresult(synth.submit_prime(ca, previous_views, 0, &output), "engine data prime");
-     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
-+    // DCS Control (0123): the fill's mode changed live, the synthesizer kept.
-+    if (live_from >= 0) {
-+        require(synth.fg_settings().fill == static_cast<std::uint32_t>(live_from), "engine data: the fill made with");
-+        synth.set_occlusion_fill(options.dcs_motion_occlusion_fill);
-+        const auto settings = synth.fg_settings();
-+        require(settings.fill == options.dcs_motion_occlusion_fill && settings.fill_active == options.dcs_motion,
-+            "engine data: the fill's mode set live");
-+    }
-     require_hresult(history->capture(1, &cb), "engine data B");
-     require_hresult(history->commit(cb), "engine data commit B");
-     synth.set_cockpit_mask(masks[1]);
-@@ -524,7 +537,7 @@ FeResult fe_run(D3D12WarpFixture& fixture, const FeCase& scene, const FeRegions&
-     const std::string cell = std::to_string(variant.cell);
-     SetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_CELL", variant.cell != 0 ? cell.c_str() : nullptr);
-     result.image = fe_synthesize(fixture, a.image, b.image, width, height, options, {previous, current}, previous_views,
--        views, static_cast<float>(variant.t));
-+        views, static_cast<float>(variant.t), variant.live_from);
-     SetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_CELL", nullptr);
-     for (std::size_t r = 0; r < regions.masks.size(); ++r) {
-         const auto& mask = regions.masks[r];
-@@ -712,6 +725,36 @@ void run_fg_engine_data_fixtures() {
-                 label + ": the occlusion fill makes the rotor worse");
-         }
-     }
-+    // DCS Control (0123): the fill's mode live, 0 -> 2 -> 1 -> 0, each step on
-+    // a synthesizer made with the mode before it (no rebuild): the image of a
-+    // synthesizer made with the new mode, byte for byte. On the glass-HUD
-+    // rotor case, where mode 2 changes the image (and 1 does not, its HUD
-+    // never taken out here).
-+    {
-+        const FeCase scene = fe_rotor_case();
-+        const FeRegions regions = fe_regions(scene, width, height, 0.5);
-+        xrfg::D3D12NvidiaOpticalFlowOptions medium{};
-+        medium.occlusion_aware = 1;
-+        const std::array<std::pair<int, std::uint32_t>, 3> steps{{{0, 2U}, {2, 1U}, {1, 0U}}};
-+        std::array<StereoPattern, 3> fresh{};
-+        for (std::uint32_t mode = 0; mode <= 2U; ++mode) {
-+            FeVariant variant{"fill-fresh", true, medium, 2};
-+            variant.fill = mode != 0U;
-+            variant.fill_mode = mode;
-+            fresh[mode] = fe_run(fixture, scene, regions, variant, width, height).image;
-+        }
-+        require(!(fresh[2] == fresh[0]), "fg engine data live fill: mode 2 does not change the rotor case");
-+        for (const auto& [from, to] : steps) {
-+            FeVariant variant{"fill-live", true, medium, 2};
-+            variant.fill = to != 0U;
-+            variant.fill_mode = to;
-+            variant.live_from = from;
-+            const FeResult live = fe_run(fixture, scene, regions, variant, width, height);
-+            require(live.image == fresh[to], "fg engine data live fill " + std::to_string(from) + " -> " +
-+                std::to_string(to) + ": not the image of a synthesizer made with that mode");
-+            std::cout << "fe live fill " << from << " -> " << to << ": the fresh synthesizer's image" << std::endl;
-+        }
-+    }
-     fixture.require_no_debug_errors();
- }
- // DCS Control (0121): the occlusion fill's GPU cost at a headset's eye image
 diff --git a/tests/fg_triple_bench.inc b/tests/fg_triple_bench.inc
 new file mode 100644
-index 0000000..3a62248
+index 0000000..5cbfa67
 --- /dev/null
 +++ b/tests/fg_triple_bench.inc
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,125 @@
 +// DCS Control (0123): the NVIDIA composition's GPU time with DCS's cockpit mask and motion vectors, as DCS runs it
 +// (cockpit_mask, dcs_motion, one-way flow, occlusion handling on), in 2X (one synthetic at 1/2) and in 3X (two at 1/3
 +// and 2/3), at a headset's eye image (XRFG_TEST_FG_TRIPLE_BENCH). The flight log's comp+pack per pair is the
-+// composition's and the pack's time printed here. With XRFG_BENCH_FG_EXTRAS (this tree's quality keys and occlusion
-+// fill): XRFG_TEST_FG_TRIPLE_QUALITY=<bits> and XRFG_TEST_FG_TRIPLE_FILL=<mode> set them; unset, every key is off.
++// composition's and the pack's time printed here. With XRFG_BENCH_FG_EXTRAS (this tree's quality keys):
++// XRFG_TEST_FG_TRIPLE_QUALITY=<bits> sets them; unset, every key is off.
 +// Written so the same file builds against the 0.7.0 patch set (0001-0103) for a like-for-like comparison.
 +void bench_fg_motion_triple(D3D12WarpFixture& fixture, UINT width, UINT height) {
 +    constexpr UINT kFrames = 4;
@@ -1072,12 +789,10 @@ index 0000000..3a62248
 +    const ReprojectionViews views = make_reprojection_views();
 +    const DcsMotionFrame a = dcs_motion_frame(scene, width, height, 0.0);
 +    const DcsMotionFrame b = dcs_motion_frame(scene, width, height, 1.0);
-+    std::uint32_t quality = 0U, fill = 0U;
++    std::uint32_t quality = 0U;
 +#ifdef XRFG_BENCH_FG_EXTRAS
 +    if (char text[32]{}; GetEnvironmentVariableA("XRFG_TEST_FG_TRIPLE_QUALITY", text, sizeof(text)) != 0)
 +        quality = static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0));
-+    if (char text[32]{}; GetEnvironmentVariableA("XRFG_TEST_FG_TRIPLE_FILL", text, sizeof(text)) != 0)
-+        fill = static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0));
 +#endif
 +    struct Pipeline {
 +        bool triple{};
@@ -1113,7 +828,6 @@ index 0000000..3a62248
 +        options.dcs_motion = true;
 +#ifdef XRFG_BENCH_FG_EXTRAS
 +        options.fg_quality = quality;
-+        options.dcs_motion_occlusion_fill = fill;
 +#endif
 +        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
 +        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
@@ -1175,7 +889,7 @@ index 0000000..3a62248
 +    };
 +    for (const Pipeline& pipeline : pipelines) {
 +        std::cout << "fg triple bench " << width << "x" << height << " x2 " << (pipeline.triple ? "3X" : "2X")
-+                  << " quality " << quality << " fill " << fill << ": composition median "
++                  << " quality " << quality << ": composition median "
 +                  << median(pipeline.composition) << " us, pack " << median(pipeline.pack) << " us, comp+pack "
 +                  << median(pipeline.composition) + median(pipeline.pack) << " us, whole pair "
 +                  << median(pipeline.total) << " us (" << pipeline.composition.size() << " pairs)" << std::endl;

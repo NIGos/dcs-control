@@ -219,19 +219,13 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
     var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
     Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
-    // Fork patches 0121/0122: the occlusion fill's mode, off by default, written only with NVIDIA frame generation (DCS's MVs).
-    Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\ndcs_motion=1\n") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\ndcs_motion_occlusion_fill=0\n")
-        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = OcclusionFill.WithSharpHud }).Contains("\ndcs_motion_occlusion_fill=1\n")
-        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenOcclusionFill = OcclusionFill.Always }).Contains("\ndcs_motion_occlusion_fill=2\n")
-        && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.FidelityFx, FrameGenOcclusionFill = OcclusionFill.Always }).Contains("\ndcs_motion_occlusion_fill=0\n") && new VrProfile().FrameGenOcclusionFill == OcclusionFill.Off, "Occlusion fill: off by default, 1 (Sharp HUD only) or 2 (always) only with NVIDIA frame generation");
-    // A profile saved with the fill off carries no key for it; on, it round-trips.
-    Require(!JsonData.Serialize(nvidia).Contains("frameGenOcclusionFill") && JsonData.Serialize(nvidia with { FrameGenOcclusionFill = OcclusionFill.WithSharpHud }).Contains("\"frameGenOcclusionFill\": \"WithSharpHud\"")
-        && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenOcclusionFill = OcclusionFill.Always })).FrameGenOcclusionFill == OcclusionFill.Always, "Occlusion fill key only in profiles that turn it on");
+    // The occlusion fill of the 0.7.1 development builds (OFXR dcs_motion_occlusion_fill) is gone: never written.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion=1\n") && !ConfigurationWriters.Ofxr(nvidia).Contains("occlusion_fill"), "no occlusion fill key");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.
     var node = JsonData.ProfileNode(nvidia);
-    Require(node["frameGenSkyOcclusion"]?.GetValue<bool>() == false && node["frameGenOcclusionFill"]?.GetValue<string>() == "Off" && node["developerOptions"]?.GetValue<bool>() == false
+    Require(node["frameGenSkyOcclusion"]?.GetValue<bool>() == false && node["developerOptions"]?.GetValue<bool>() == false
         && JsonData.Serialize(JsonData.Deserialize<VrProfile>(node.ToJsonString())) == JsonData.Serialize(nvidia), "every setting in the node, the profile the same");
-    Require(ControlService.ChangedSettings(nvidia with { FrameGenOcclusionFill = OcclusionFill.Always, FrameGenHudGuard = true }, nvidia).Order().SequenceEqual(new[] { "frameGenHudGuard", "frameGenOcclusionFill" })
+    Require(ControlService.ChangedSettings(nvidia with { FrameGenEdgeChoice = true, FrameGenHudGuard = true }, nvidia).Order().SequenceEqual(new[] { "frameGenEdgeChoice", "frameGenHudGuard" })
         && ControlService.ChangedSettings(nvidia, nvidia with { FrameGenSkyOcclusion = true }).SequenceEqual(["frameGenSkyOcclusion"]) && ControlService.ChangedSettings(nvidia, nvidia).Count == 0, "set and back off: a change each way");
 });
 Test("Profiles for 0.7.0: a profile that changed no setting new since 0.7.0 has none of their keys, and 0.7.0's strict reader opens it", () =>
@@ -240,7 +234,7 @@ Test("Profiles for 0.7.0: a profile that changed no setting new since 0.7.0 has 
     // refuses keys it does not know: simulated by these options' strict reader with exactly these members taken out.
     string[] newSince070 = ["binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects",
         "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey",
-        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard", "frameGenOcclusionFill"];
+        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard"];
     var strict070 = new System.Text.Json.JsonSerializerOptions
     {
         PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
@@ -2455,22 +2449,14 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     Require((withPupil.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? []).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "with Pupil shift the layer still takes over DCS's IPD");
     Require(!planner.Build(vr with { GVision = true, GVisionUseGaze = false }, inventory, Path.Combine(root, "publish/managed-g")).Files.Any(f => f.Path.Contains("pupilshift")), "G vision straight ahead needs no layer");
 });
-Test("The occlusion fill of feat/fg-engine-data dev builds (a bool, and frameGenOcclusionFillOverHud) loads as its mode", () =>
+Test("The occlusion fill of the 0.7.1 development builds is gone: a profile with it (a mode, a bool, frameGenOcclusionFillOverHud) loads without it", () =>
 {
-    foreach (var (json, want) in new (string, OcclusionFill)[] {
-        ("{\"frameGenOcclusionFill\":true}", OcclusionFill.WithSharpHud),
-        ("{\"frameGenOcclusionFill\":true,\"frameGenOcclusionFillOverHud\":true}", OcclusionFill.Always),
-        ("{\"FrameGenOcclusionFillOverHud\":true,\"FRAMEGENOCCLUSIONFILL\":true}", OcclusionFill.Always),
-        ("{\"frameGenOcclusionFill\":true,\"frameGenOcclusionFillOverHud\":false}", OcclusionFill.WithSharpHud),
-        ("{\"frameGenOcclusionFill\":false,\"frameGenOcclusionFillOverHud\":true}", OcclusionFill.Off),
-        ("{\"frameGenOcclusionFillOverHud\":true}", OcclusionFill.Off),
-        ("{\"frameGenOcclusionFill\":\"Always\",\"frameGenOcclusionFillOverHud\":false}", OcclusionFill.Always),
-        ("{\"frameGenOcclusionFill\":\"WithSharpHud\"}", OcclusionFill.WithSharpHud) })
+    foreach (var json in new[] { "{\"frameGenOcclusionFill\":true}", "{\"frameGenOcclusionFill\":true,\"frameGenOcclusionFillOverHud\":true}",
+        "{\"FrameGenOcclusionFillOverHud\":true,\"FRAMEGENOCCLUSIONFILL\":false}", "{\"frameGenOcclusionFill\":\"Always\"}", "{\"frameGenOcclusionFill\":\"WithSharpHud\",\"frameGenHudGuard\":true}" })
     {
         var loaded = JsonData.Deserialize<VrProfile>(json);
         var saved = JsonData.Serialize(loaded);
-        Require(loaded.FrameGenOcclusionFill == want && !saved.Contains("OverHud", StringComparison.OrdinalIgnoreCase)
-            && JsonData.Deserialize<VrProfile>(saved).FrameGenOcclusionFill == want, json + " -> " + loaded.FrameGenOcclusionFill);
+        Require(!saved.Contains("OcclusionFill", StringComparison.OrdinalIgnoreCase) && loaded.FrameGenHudGuard == json.Contains("frameGenHudGuard"), json + " -> " + saved);
     }
 });
 Test("Free unused DLSS memory is gone (0.7): an older profile with it loads, and [DLSS] ReleaseIdleSets is never written", () =>
@@ -7681,9 +7667,9 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     // OFXR: the NVIDIA flow keys, not the preset (R148: OFXR re-initialises the flow for it, DCS froze for 6.8 s); from 0.7
     // the headset panel's keys; the flow keys only when DCS started with NVIDIA frame generation.
     var ofxr = IniFile.Parse(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }));
-    // OFXR 0104/0122: the generated-frame quality keys and the occlusion fill, with NVIDIA frame generation and an OFXR that reads them.
-    string[] fgQualityKeys = ["ofxr.dcs_motion_hud_guard", "ofxr.dcs_motion_mask_band", "ofxr.dcs_motion_occlusion_fill", "ofxr.dcs_motion_sky_occlusion", "ofxr.nvidia_edge_choice"];
-    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.dcs_motion_hud_guard", "ofxr.dcs_motion_mask_band", "ofxr.dcs_motion_occlusion_fill", "ofxr.dcs_motion_sky_occlusion",
+    // OFXR 0104/0123: the generated-frame quality keys, with NVIDIA frame generation and an OFXR that reads them.
+    string[] fgQualityKeys = ["ofxr.dcs_motion_hud_guard", "ofxr.dcs_motion_mask_band", "ofxr.dcs_motion_sky_occlusion", "ofxr.nvidia_edge_choice"];
+    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.dcs_motion_hud_guard", "ofxr.dcs_motion_mask_band", "ofxr.dcs_motion_sky_occlusion",
         "ofxr.diag_vram", "ofxr.nvidia_bidirectional", "ofxr.nvidia_edge_choice", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware", "overlay.panel_position", "overlay.position" }));
     Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null, current07: false, fgQuality: false)).Order().SequenceEqual(new[] { "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware" }));
     Require(fgQualityKeys.All(ofxr.ContainsKey) && fgQualityKeys.All(k => !LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null, fgQuality: false) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null, nvidiaFlow: false)), "an older OFXR or no NVIDIA flow: they wait");
@@ -7708,14 +7694,13 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     var old = LiveSettings.AvailableFields(nvidia, Journal(null, all));
     Require(old.Contains("engineBeeps") && old.Contains("engineModelAllocator") && !old.Contains("quadSharpening") && !old.Contains("flowPreset") && !old.Contains("neuralIntensity") && !old.Contains("engineDiagnosticHooks"), string.Join(", ", old));
     Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("nvidiaFlowScale"), "FidelityFX: the flow keys mean nothing");
-    // The quality options and the occlusion fill: only with an OFXR whose DLL has their live contract (0123's marker,
-    // DCSC-OFXR-LIVE-FG/2 or a later number). 0.7.0's has not; nor has an OFXR with only 0104/0122's key names (its fill
-    // was a rebuild with a hitch).
+    // The quality options: only with an OFXR whose DLL has their live contract (0123's marker, DCSC-OFXR-LIVE-FG/2 or a
+    // later number). 0.7.0's has not; nor has an OFXR with only 0104's key names (each change armed unused swapchains).
     Require(LiveSettings.FgQualityFields.All(n => LiveSettings.Find(n) is { Kind: LiveSettings.Kind.Flow }) && !LiveSettings.FgQualityFields.Any(tags.Contains), "no OFXR layer in the journal: " + string.Join(", ", tags));
     var newLayer = Path.Combine(root, "fgq-new", LiveSettings.OfxrLayerFile); var oldLayer = Path.Combine(root, "fgq-old", LiveSettings.OfxrLayerFile);
     Directory.CreateDirectory(Path.GetDirectoryName(newLayer)!); Directory.CreateDirectory(Path.GetDirectoryName(oldLayer)!);
     File.WriteAllBytes(newLayer, [.. "MZ"u8, .. "x DCSC-OFXR-LIVE-FG/2\0 y"u8]);
-    File.WriteAllBytes(oldLayer, [.. "MZ"u8, .. System.Text.Encoding.Unicode.GetBytes("x nvidia_occlusion_aware y dcs_motion_hud_guard z dcs_motion_occlusion_fill")]);
+    File.WriteAllBytes(oldLayer, [.. "MZ"u8, .. System.Text.Encoding.Unicode.GetBytes("x nvidia_occlusion_aware y dcs_motion_hud_guard z dcs_motion_sky_occlusion")]);
     Require(LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/2"u8) && LiveSettings.HasLiveContract("a DCSC-OFXR-LIVE-FG/1 b DCSC-OFXR-LIVE-FG/12\0"u8)
         && !LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/1\0"u8) && !LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/"u8) && !LiveSettings.HasLiveContract("DCSC-OFXR-LIVE-FG/x2"u8),
         "the live contract marker: its number from 2 up, every occurrence looked at");
@@ -7871,7 +7856,7 @@ Test("Live phase 2: OFXR's NVIDIA flow is written live only when DCS started wit
     var scale = WhileDcsRuns(h, () => h.Service.ApplyLive(foveated with { NvidiaFlowScale = 75 }, E2eInventory(h)));
     Require(scale.Written.Count == 1 && scale.Applied.SequenceEqual(["nvidiaFlowScale"]) && scale.Waiting.Count == 0, scale.Message);
 });
-Test("Live: the generated-frame quality options and the occlusion fill are written live with this OFXR, on and back off", () =>
+Test("Live: the generated-frame quality options are written live with this OFXR, on and back off", () =>
 {
     var f = E2e("live-ofxr-quality"); var draft = LiveCheekyDraft(); var inventory = E2eInventory(f);
     Require(draft.FrameGen == FrameGeneration.Nvidia && f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied);
@@ -7886,15 +7871,15 @@ Test("Live: the generated-frame quality options and the occlusion fill are writt
     Require(LiveSettings.FgQualityInstalled(applied.Journal) && LiveSettings.FgQualityFields.All(LiveSettings.AvailableFields(applied.Profile, applied.Journal).Contains), "this build's OFXR reads them");
     Require(LiveSettings.OfxrReadsFgQuality(DeferredOfxr) || !File.Exists(DeferredOfxr), "the built OFXR layer has the live contract marker");
     var ofxr = LiveEntry(f, LiveSettings.FlowFile).Path;
-    var on = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FrameGenOcclusionFill = OcclusionFill.WithSharpHud, FrameGenHudGuard = true, FrameGenSkyOcclusion = true }, inventory));
-    Require(on.Written.SequenceEqual([ofxr]) && on.Applied.Order().SequenceEqual(new[] { "frameGenHudGuard", "frameGenOcclusionFill", "frameGenSkyOcclusion" }) && on.Waiting.Count == 0, on.Message);
+    var on = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FrameGenHudGuard = true, FrameGenSkyOcclusion = true }, inventory));
+    Require(on.Written.SequenceEqual([ofxr]) && on.Applied.Order().SequenceEqual(new[] { "frameGenHudGuard", "frameGenSkyOcclusion" }) && on.Waiting.Count == 0, on.Message);
     var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)));
-    Require(ini["ofxr.dcs_motion_occlusion_fill"] == "1" && ini["ofxr.dcs_motion_hud_guard"] == "1" && ini["ofxr.dcs_motion_sky_occlusion"] == "1" && ini["ofxr.nvidia_edge_choice"] == "0", "written");
-    var always = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FrameGenOcclusionFill = OcclusionFill.Always, FrameGenHudGuard = true, FrameGenSkyOcclusion = true }, inventory));
-    Require(always.Written.SequenceEqual([ofxr]) && always.Waiting.Count == 0 && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.dcs_motion_occlusion_fill"] == "2", always.Message);
+    Require(ini["ofxr.dcs_motion_hud_guard"] == "1" && ini["ofxr.dcs_motion_sky_occlusion"] == "1" && ini["ofxr.nvidia_edge_choice"] == "0" && !ini.ContainsKey("ofxr.dcs_motion_occlusion_fill"), "written");
+    var more = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FrameGenEdgeChoice = true, FrameGenHudGuard = true, FrameGenSkyOcclusion = true }, inventory));
+    Require(more.Written.SequenceEqual([ofxr]) && more.Waiting.Count == 0 && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.nvidia_edge_choice"] == "1", more.Message);
     // Back to the launched profile (the settings off, so missing from profile.json): written live again, nothing waits.
     var off = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
-    Require(off.Written.SequenceEqual([ofxr]) && off.Applied.Order().SequenceEqual(new[] { "frameGenHudGuard", "frameGenOcclusionFill", "frameGenSkyOcclusion" }) && off.Waiting.Count == 0, off.Message);
+    Require(off.Written.SequenceEqual([ofxr]) && off.Applied.Order().SequenceEqual(new[] { "frameGenEdgeChoice", "frameGenHudGuard", "frameGenSkyOcclusion" }) && off.Waiting.Count == 0, off.Message);
     var still = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
     Require(still.Written.Count == 0 && still.Applied.Count == 0 && still.Waiting.Count == 0, still.Message);
 });

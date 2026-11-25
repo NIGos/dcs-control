@@ -350,7 +350,6 @@ Ofxr	ofxr	d3d11_bridge
 Ofxr	ofxr	dcs_motion
 Ofxr	ofxr	dcs_motion_hud_guard
 Ofxr	ofxr	dcs_motion_mask_band
-Ofxr	ofxr	dcs_motion_occlusion_fill
 Ofxr	ofxr	dcs_motion_sky_occlusion
 Ofxr	ofxr	deep_pipeline
 Ofxr	ofxr	diag_vram

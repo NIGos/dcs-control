@@ -4,8 +4,8 @@ namespace DcsVr.Core;
 /// Live mode: the settings whose component re-reads its file while DCS runs, so the app can write that file at once
 /// (ControlService.ApplyLive). Phase 1: the engine module's DcsQvCull.ini (re-read every second) and the pupil shift
 /// layer's PupilShift.ini (about every 90 frames). Phase 2: Quad Views' settings.cfg (about every second), OFXR's
-/// ofxr_bridge.ini (every 250 ms: NVIDIA flow keys; from 0.7 the headset panel's; with OFXR 0104/0122 the generated-frame
-/// quality options and the occlusion fill) and Cheeky's CheekyFoveatedDLSS.ini
+/// ofxr_bridge.ini (every 250 ms: NVIDIA flow keys; from 0.7 the headset panel's; with OFXR 0104/0123 the generated-frame
+/// quality options) and Cheeky's CheekyFoveatedDLSS.ini
 /// (about every second, DLSS 5 tuning). Phase 2 files are written only for a profile applied by an app whose bundled components reload them
 /// (<see cref="Reloads"/>). Everything else (options.lua, layers, DLLs, other keys) waits for the next launch. One table
 /// for the backend's whitelist and the interface's "Live" tags: the interface gets <see cref="AvailableFields"/>.
@@ -93,10 +93,9 @@ public static class LiveSettings
         // R148: the flow quality preset is not here: OFXR re-initialises its NVIDIA flow for it (5.5 s), and DCS froze for
         // 6.8 s. Resolution and bidirectional flow cost a single frame of about 0.5 s.
         F("nvidiaFlowScale"), F("bidirectionalFlow"),
-        // OFXR 0104, 0122 and 0123: the generated-frame quality options and the occlusion fill (both set on each frame
-        // generator without a rebuild, no hitch), taken by the same watcher; only where the installed OFXR has that live
-        // contract (FgQualityInstalled).
-        F("frameGenSkyOcclusion"), F("frameGenHudGuard"), F("frameGenEdgeChoice"), F("frameGenMaskBand"), F("frameGenOcclusionFill"),
+        // OFXR 0104 and 0123: the generated-frame quality options (set on each frame generator without a rebuild, no
+        // hitch), taken by the same watcher; only where the installed OFXR has that live contract (FgQualityInstalled).
+        F("frameGenSkyOcclusion"), F("frameGenHudGuard"), F("frameGenEdgeChoice"), F("frameGenMaskBand"),
         N("neuralIntensity"), N("neuralLocalTone"), N("neuralLocalStructure"), N("neuralSkinStructure"), N("neuralStyle"), N("neuralAutomaticMask"),
         N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralBrightnessMatch"), N("neuralDepth"),
         N("neuralMotionScaleX"), N("neuralMotionScaleY"),
@@ -135,21 +134,21 @@ public static class LiveSettings
         (journal?.Entries ?? []).Where(e => e.Path.EndsWith(Binaural.HrtfExtension, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(Path.GetFileName(Path.GetDirectoryName(e.Path)), Binaural.HrtfFolder, StringComparison.OrdinalIgnoreCase))
             .Select(e => Path.GetFileNameWithoutExtension(e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    /// <summary>The settings OFXR 0104, 0122 and 0123 take in live (<see cref="FgQualityInstalled"/>).</summary>
+    /// <summary>The settings OFXR 0104 and 0123 take in live (<see cref="FgQualityInstalled"/>).</summary>
     public static IReadOnlySet<string> FgQualityFields { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
-        "frameGenSkyOcclusion", "frameGenHudGuard", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenOcclusionFill",
+        "frameGenSkyOcclusion", "frameGenHudGuard", "frameGenEdgeChoice", "frameGenMaskBand",
     };
-    /// <summary>The OFXR layer the applied profile installed takes the generated-frame quality keys and the occlusion fill
+    /// <summary>The OFXR layer the applied profile installed takes the generated-frame quality keys
     /// in live with the contract this app writes them for (<see cref="OfxrReadsFgQuality"/>). Not a version check: this app
     /// version can be the one that installed an OFXR without them (0.7.0), whose live watcher would ignore them.</summary>
     public static bool FgQualityInstalled(TransactionJournal? journal) =>
         journal?.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(OfxrLayerFile, StringComparison.OrdinalIgnoreCase)) is { } layer && OfxrReadsFgQuality(layer.Path);
     public const string OfxrLayerFile = "XR_APILAYER_XRFrameBridge_diagnostic.dll";
     /// <summary>The live contract marker an OFXR layer carries (fork patch 0123, src/common/embedded_control.cpp,
-    /// <c>OFXR_LiveFgContract</c>): this text, then the contract's number in ASCII digits. 2 (0123): the quality keys and
-    /// the occlusion fill are set on each frame generator without a rebuild. A layer without it (0104/0122 only, whose
-    /// fill was a rebuild with a hitch, or 0.7.0 without either) does not count. A later contract raises the number and
+    /// <c>OFXR_LiveFgContract</c>): this text, then the contract's number in ASCII digits. 2 (0123): the quality keys are
+    /// set on each frame generator without a rebuild and no unused swapchain is armed by the change. A layer without it
+    /// (0104 only, of the 0.7.1 development builds, or 0.7.0 without the keys) does not count. A later contract raises the number and
     /// keeps the text; any number from <see cref="FgLiveContract"/> up counts.</summary>
     public const string FgLiveContractMarker = "DCSC-OFXR-LIVE-FG/";
     public const int FgLiveContract = 2;
@@ -220,7 +219,7 @@ public static class LiveSettings
             Kind.Visual => !launch.Desktop,
             // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is
             // filled (foveated_uncovered_fill), which OFXR reads at start: the whole file waits.
-            // The quality options and the occlusion fill only with an OFXR that reads them.
+            // The quality options only with an OFXR that reads them.
             Kind.Flow => launch.FrameGen == FrameGeneration.Nvidia && (f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen) && (fgQuality || !FgQualityFields.Contains(f.Name)),
             Kind.Panel => launch.UsesHeadsetPanel,
             // With Soft focus edge on, Hide the focus edge also switches dcsvr_edge_match, which Quad Views reads at start.
@@ -286,12 +285,12 @@ public static class LiveSettings
     {
         "ofxr.nvidia_input_scale", "ofxr.nvidia_bidirectional", "ofxr.nvidia_occlusion_aware",
     };
-    // ofxr_bridge.ini keys of OFXR 0104 (the generated-frame quality options: shader bits, set_fg_quality, no rebuild) and
-    // 0122 (the occlusion fill's mode: a rebuild), followed by the same watcher with NVIDIA frame generation; only where
-    // the installed OFXR reads them (fgQuality, FgQualityInstalled).
+    // ofxr_bridge.ini keys of OFXR 0104 (the generated-frame quality options: shader bits, set_fg_quality, no rebuild),
+    // followed by the same watcher with NVIDIA frame generation; only where the installed OFXR reads them (fgQuality,
+    // FgQualityInstalled).
     private static readonly HashSet<string> FgQualityKeys = new(StringComparer.OrdinalIgnoreCase)
     {
-        "ofxr.dcs_motion_sky_occlusion", "ofxr.dcs_motion_hud_guard", "ofxr.nvidia_edge_choice", "ofxr.dcs_motion_mask_band", "ofxr.dcs_motion_occlusion_fill",
+        "ofxr.dcs_motion_sky_occlusion", "ofxr.dcs_motion_hud_guard", "ofxr.nvidia_edge_choice", "ofxr.dcs_motion_mask_band",
     };
     // CheekyFoveatedDLSS.ini keys Cheeky applies while it runs (patches/cheeky/dcs_live_reload.hpp, dcs_live_keys). The first
     // nine without a hitch; the rest recreate the DLSS-NR feature (a short hitch).
@@ -314,7 +313,7 @@ public static class LiveSettings
     /// <paramref name="audio"/>: the installed engine payload has the audio part (<see cref="AudioInstalled"/>), for [Audio].
     /// <paramref name="hrtfSets"/>: the personal HRTF sets installed next to the module (<see cref="InstalledHrtfSets"/>);
     /// [Audio] Hrtf naming another one waits, since its file comes only with the next launch. Null: not checked.
-    /// <paramref name="fgQuality"/>: the installed OFXR reads the quality keys and the occlusion fill (<see cref="FgQualityInstalled"/>).
+    /// <paramref name="fgQuality"/>: the installed OFXR reads the quality keys (<see cref="FgQualityInstalled"/>).
     public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null, bool audioOnLive = true, bool fgQuality = true)
     {
         if (file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase) && IsAudioKey(key))

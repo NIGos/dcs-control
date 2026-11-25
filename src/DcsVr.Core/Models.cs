@@ -19,9 +19,6 @@ public enum NvidiaFlowPreset { Fast, Medium, Slow }
 /// <summary>How readily frame generation only when needed passes DCS's frames through ungenerated
 /// (<see cref="VrProfile.FrameGenPassThrough"/>; OFXR <c>cadence_preference</c> 0, 1, 2, fork patch 0070).</summary>
 public enum PassThroughPreference { Steady, Balanced, PreferRefresh }
-/// <summary>OFXR dcs_motion_occlusion_fill's mode (<see cref="VrProfile.FrameGenOcclusionFill"/>; fork patches 0121, 0122):
-/// Off 0, WithSharpHud 1 (only on frames whose HUD Sharp HUD took out of the image), Always 2.</summary>
-public enum OcclusionFill { Off, WithSharpHud, Always }
 /// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.
 /// The app offers Off, E and F; K and M (offered until 0.7, slower than E: R122, E 0.138 ms against M 0.261 ms per view)
 /// stay so a saved one parses, and a profile that has one loads as E (JsonData).</summary>
@@ -106,20 +103,6 @@ public sealed record VrProfile
     /// <summary>OFXR async_arm (fork patch 0050): frame generation for a new swapchain (leaving the F10 map) is prepared on
     /// a worker thread; frames pass through meanwhile. Off until flown; "Prepare in the background" in the Framegen page's Advanced fold.</summary>
     public bool FrameGenAsyncArm { get; init; }
-    /// <summary>OFXR dcs_motion_occlusion_fill (fork patch 0121): around a moving aircraft (or the world over the sky) the
-    /// background seen in one real frame only is taken from that frame alone, by DCS's class atlas of both frames, where
-    /// the motion vectors did not hold, instead of the optical flow's blend that smears the edge into a halo. NVIDIA
-    /// frame generation with DCS's motion vectors only. Measured offline (synthetic fixtures, sRGB error against the true
-    /// middle frame, fork patch 0122): behind a moving model by day 17.4 -> 8.0, ahead of it 12.0 -> 8.8, the whole image
-    /// 1.44 -> 1.33; at night smaller gains. GPU per pair at 5424 px (OFXR 0123's bench): Always +0.27 ms at 2X and +1.13 ms at 3X (the quality keys together +0.12 / +0.67 ms); no render targets or buffers. A HUD left in the
-    /// image (Sharp HUD off) moves with it where an aircraft passes behind it (a semi-transparent HUD up to 9% worse), so
-    /// <see cref="OcclusionFill.WithSharpHud"/> (mode 1) fills only where Sharp HUD took the symbols out, and
-    /// <see cref="OcclusionFill.Always"/> (mode 2) everywhere. Off until flown (an A/B in the headset decides). OFXR takes a
-    /// change of the key in while DCS runs without a rebuild (fork patch 0123: set on each synthesizer, no hitch): live
-    /// (LiveSettings). Dev builds of feat/fg-engine-data saved it as a bool with "frameGenOcclusionFillOverHud"; such a
-    /// profile loads as Only with Sharp HUD, or Always with the second key on (JsonData.LegacyOcclusionFill). The
-    /// Image quality "Fine-tune" fold. Written only when on, so a profile with it off is what 0.7.0 reads.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public OcclusionFill FrameGenOcclusionFill { get; init; }
     /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
     /// the full refresh rate; frames pass through (1X, less latency) while it holds that, and 2X/3X Auto takes over while
     /// it falls behind. Every session and scene starts at 2X (DCS paced at half the refresh rate by OFXR, which the
@@ -909,30 +892,16 @@ public static class JsonData
     /// "frameGenFocusLayer", the Focus layer choice of earlier 0.7 builds: foveated frame generation now always sends the
     /// focus as Opaque focus (ConfigurationWriters.QuadViews), whatever an older draft or preset chose. "engineReleaseIdleDlss"
     /// (Free unused DLSS memory, removed in 0.7: on DCS 2.9.31 it released nothing) and its derived "usesReleaseIdleDlss".
+    /// "frameGenOcclusionFill" (Fill around moving aircraft, OFXR dcs_motion_occlusion_fill: in the 0.7.1 development
+    /// builds only, removed before release: in flight it never fired in the cockpit view and made the external view's
+    /// halo worse by day; saved as Off / WithSharpHud / Always,
+    /// earlier as a bool) and "frameGenOcclusionFillOverHud" (its second bool in the first dev builds).
     /// Dropped when a profile loads, in any casing.</summary>
     private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
         "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey", "tracking",
         "usesThreeViews", "usesQuadSaccadeTail", "usesQuadLostGazeEase", "usesWaterSkip", "usesIdleEffectSkip", "engineModuleRequired",
         "usesLayerOwnGaze", "usesLayerGaze", "quadSaccadeHoldMs", "quadSaccadeMaxExtend", "frameGenFocusLayer",
-        "engineReleaseIdleDlss", "usesReleaseIdleDlss", "frameGenOcclusionFillOverHud"], StringComparer.OrdinalIgnoreCase);
-    // Unreleased dev builds of feat/fg-engine-data saved the occlusion fill as "frameGenOcclusionFill": true / false and
-    // "frameGenOcclusionFillOverHud": true / false (the second is in ObsoleteProfileKeys).
-    private const string OcclusionFillKey = "frameGenOcclusionFill", OcclusionFillOverHudKey = "frameGenOcclusionFillOverHud";
-    private static bool IsLegacyOcclusionFill(JsonProperty p) =>
-        p.Name.Equals(OcclusionFillKey, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False;
-    /// <summary>The mode such a profile meant: the bool on gives <see cref="OcclusionFill.WithSharpHud"/>, with the over-HUD
-    /// key on too <see cref="OcclusionFill.Always"/>, off <see cref="OcclusionFill.Off"/>; null for a profile without the bool.</summary>
-    internal static OcclusionFill? LegacyOcclusionFill(JsonElement profile)
-    {
-        if (profile.ValueKind != JsonValueKind.Object) return null;
-        bool? on = null, overHud = false;
-        foreach (var p in profile.EnumerateObject())
-        {
-            if (IsLegacyOcclusionFill(p)) on = p.Value.ValueKind == JsonValueKind.True;
-            else if (p.Name.Equals(OcclusionFillOverHudKey, StringComparison.OrdinalIgnoreCase)) overHud = p.Value.ValueKind == JsonValueKind.True;
-        }
-        return on switch { null => null, false => OcclusionFill.Off, true => overHud == true ? OcclusionFill.Always : OcclusionFill.WithSharpHud };
-    }
+        "engineReleaseIdleDlss", "usesReleaseIdleDlss", "frameGenOcclusionFill", "frameGenOcclusionFillOverHud"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
     /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own
@@ -942,11 +911,9 @@ public static class JsonData
         public override VrProfile Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
             using var document = JsonDocument.ParseValue(ref reader);
-            var legacyFill = LegacyOcclusionFill(document.RootElement);
-            var profile = (document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.EnumerateObject().Any(p => ObsoleteProfileKeys.Contains(p.Name) || IsLegacyOcclusionFill(p))
+            var profile = (document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.EnumerateObject().Any(p => ObsoleteProfileKeys.Contains(p.Name))
                 ? JsonSerializer.Deserialize<VrProfile>(WithoutObsoleteKeys(document.RootElement), plain)
                 : document.Deserialize<VrProfile>(plain)) ?? throw new JsonException("The profile is empty.");
-            if (legacyFill is { } fill) profile = profile with { FrameGenOcclusionFill = fill };
             if (document.RootElement.ValueKind == JsonValueKind.Object && !document.RootElement.TryGetProperty("foveaSource", out _))
                 profile = profile with { FoveaSource = FoveaSource.Profile };
             // Periphery DLSS preset K or M (no longer offered: heavier than E, which the periphery is for) loads as E.
@@ -963,7 +930,7 @@ public static class JsonData
             {
                 writer.WriteStartObject();
                 foreach (var property in profile.EnumerateObject())
-                    if (!ObsoleteProfileKeys.Contains(property.Name) && !IsLegacyOcclusionFill(property)) property.WriteTo(writer);
+                    if (!ObsoleteProfileKeys.Contains(property.Name)) property.WriteTo(writer);
                 writer.WriteEndObject();
             }
             return stream.ToArray();

@@ -6,9 +6,9 @@
 - **Alt+Shift+F6** in flight (or **Switch 3D audio off** on the page) compares it with DCS's own sound. Every setting applies in flight.
 - Feedback on GitHub is very welcome.
 
-**Cleaner generated frames (experimental, NVIDIA frame generation).** Five new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges**, **Cleaner world beside the cockpit**, and **Fill around moving aircraft** (Off, Only with Sharp HUD or Always), which takes away most of the smear just behind and ahead of another aircraft.
+**Cleaner generated frames (experimental, NVIDIA frame generation).** Four new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight: **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges** and **Cleaner world beside the cockpit**.
 - They were measured offline only and have not been flown yet: please tell us on GitHub what you see.
-- GPU cost: the four quality settings together about 0.1 ms per frame at 2X and 0.7 ms at 3X; Fill around moving aircraft on Always about 0.3 / 1.1 ms. With all of them off, frame generation is exactly as in 0.7.0.
+- GPU cost: the four together about 0.1 ms per frame at 2X and 0.7 ms at 3X. With all of them off, frame generation is exactly as in 0.7.0.
 - Turning one on in flight no longer stalls the headset for a moment: what they need is prepared in the background, the first time one is turned on.
 
 **Multi-threading without driver support is now on by default with AMD graphics** (AMD Radeon, GitHub #27): about 7 % more FPS on a Radeon RX 7900 XTX. Profiles from 0.7.0 get it once. On NVIDIA nothing changes: where DCS gets no command lists there (MFAA on, the integrated GPU, a hooking program) it stays off as before, the Engine Optimizations page says what gives the full gain, and you can still turn it on yourself.
