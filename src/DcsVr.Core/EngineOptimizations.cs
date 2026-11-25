@@ -74,8 +74,10 @@ public static class EngineOptimizations
     }
 
     /// <summary>Reads DcsQvCull.log (rewritten at every DCS start) and the newest report. <paramref name="dcsLog"/> is
-    /// DCS's own log, where a module that could not be loaded is reported.</summary>
-    public static EngineStatus Read(string optionsPath, string? dcsLog, bool dcsRunning)
+    /// DCS's own log, where a module that could not be loaded is reported. <paramref name="appliedUtc"/> is when the
+    /// applied profile that installed the module was written (<see cref="AppliedAt"/>): an apply leaves an unchanged
+    /// DcsQvCull.dll as it is, so its write time alone can be older than a re-apply that changed only the INI.</summary>
+    public static EngineStatus Read(string optionsPath, string? dcsLog, bool dcsRunning, DateTime? appliedUtc = null)
     {
         var module = ModuleDirectory(optionsPath);
         var loader = Path.Combine(module, "DcsQvCull.dll");
@@ -87,10 +89,13 @@ public static class EngineOptimizations
         var warnings = new List<string>();
         var lines = ReadShared(log);
         var noLists = lines is not null && HasNoDriverCommandLists(lines);
-        // The log is written when DCS starts the module; one older than the loader belongs to an earlier install.
-        if (lines is null || File.GetLastWriteTimeUtc(log) < File.GetLastWriteTimeUtc(loader))
+        // The log is written when DCS starts the module; one older than the install (the loader written, or the apply
+        // that installed it) belongs to an earlier one.
+        var installedUtc = File.GetLastWriteTimeUtc(loader);
+        if (appliedUtc is { } applied && applied > installedUtc) installedUtc = applied;
+        if (lines is null || File.GetLastWriteTimeUtc(log) < installedUtc)
         {
-            var failed = LoadFailure(dcsLog, File.GetLastWriteTimeUtc(loader));
+            var failed = LoadFailure(dcsLog, installedUtc);
             if (failed is not null) return new("failed", "DCS could not load the module: " + failed, [failed], false, false, false, false, module, null, report, reportAt, null, noLists);
             return new("installed", dcsRunning ? "Installed. DCS loads it when its interface starts." : "Installed. DCS loads it at its next start.", [], false, false, false, false, module, null, report, reportAt, null, noLists);
         }
@@ -326,6 +331,16 @@ public static class EngineOptimizations
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
         static List<string> Split(string text) => [.. text.Split('\n').Select(l => l.TrimEnd('\r'))];
+    }
+
+    /// <summary>When the applied profile was written, if it installed this options.lua's engine module (its journal lists
+    /// DcsQvCull.dll), else null. Live edits keep the applied profile, so they do not move this time.</summary>
+    public static DateTime? AppliedAt(TransactionJournal? current, string optionsPath)
+    {
+        if (current is null) return null;
+        var loader = Path.Combine(ModuleDirectory(optionsPath), "DcsQvCull.dll");
+        return current.Entries.Any(e => e.Applied && !e.Deleted && string.Equals(Path.GetFullPath(e.Path), loader, StringComparison.OrdinalIgnoreCase))
+            ? current.CreatedAt.UtcDateTime : null;
     }
 
     /// <summary>DCS's own report that the Lua hook could not load the module, from a dcs.log written after the install.</summary>

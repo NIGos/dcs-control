@@ -2875,6 +2875,23 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
     var pidLog = Path.Combine(module, "DcsQvCull.4242.log");
     File.WriteAllText(pidLog, "21:09:00.000 loader: starting payload active_3.dll (generation 1)\n"); File.SetLastWriteTimeUtc(pidLog, DateTime.UtcNow.AddMinutes(2));
     Require(EngineOptimizations.ModuleLog(module) == pidLog && EngineOptimizations.Read(options, dcsLog, dcsRunning: true) is { State: "loaded" });
+    // A re-apply leaves the unchanged DcsQvCull.dll as it is (only an INI changed): the status goes by the apply's time,
+    // so the previous DCS start's log no longer counts and the page says DCS loads it at its next start.
+    var loaderDll = Path.Combine(module, "DcsQvCull.dll");
+    File.SetLastWriteTimeUtc(loaderDll, DateTime.UtcNow.AddMinutes(-30));
+    foreach (var earlier in new[] { log, pidLog, dcsLog }) File.SetLastWriteTimeUtc(earlier, DateTime.UtcNow.AddMinutes(-10));
+    var loaderWritten = File.GetLastWriteTimeUtc(loaderDll);
+    store.Apply(plan);
+    Require(File.GetLastWriteTimeUtc(loaderDll) == loaderWritten, "an unchanged engine module is not rewritten by a re-apply");
+    Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: false) is { State: "loaded" }, "by the module's write time alone the old log still counts");
+    var reapplied = EngineOptimizations.AppliedAt(store.ReadCurrent(), options);
+    Require(reapplied is { } at && at > DateTime.UtcNow.AddMinutes(-1), "the applied profile that installed the module gives its time");
+    Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: false, reapplied) is { State: "installed", Summary: "Installed. DCS loads it at its next start.", LogPath: null },
+        "after a re-apply the previous run's log is not shown");
+    Require(EngineOptimizations.AppliedAt(store.ReadCurrent(), Make("engine/other/DCS/Config/options.lua", Lua)) is null, "another Saved Games folder's module is not this apply's");
+    // DCS started after the re-apply: its log counts again.
+    File.SetLastWriteTimeUtc(pidLog, DateTime.UtcNow.AddMinutes(2));
+    Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: true, reapplied) is { State: "loaded" }, "a DCS start after the re-apply is read");
 
     Require(store.RestoreOriginals().Complete);
     Require(!Directory.Exists(module) && !File.Exists(Path.Combine(scripts, "Hooks", "DcsQvCull.lua")) && File.ReadAllText(otherHook) == "-- user's own hook");

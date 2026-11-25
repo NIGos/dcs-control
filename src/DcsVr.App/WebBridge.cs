@@ -553,7 +553,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         var (cacheFiles, cacheBytes) = await Task.Run(() => EngineShaderCache.Stats(cacheDirectory));
                         return Reply(id, new
                         {
-                            status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), running)),
+                            status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), running, EngineOptimizations.AppliedAt(service.Originals.ReadCurrent(), engineOptions))),
                             warmup = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.ReadWarmup(EngineOptimizations.ModuleDirectory(engineOptions), running)),
                             shaderCache = new { files = cacheFiles, bytes = cacheBytes, dcsRunning = running, refused = cacheRefused }
                         });
@@ -842,7 +842,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 case "engineOpen":
                     EnsureInteractive();
                     var openOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");
-                    var engineStatus = EngineOptimizations.Read(openOptions, DcsLogPath(openOptions), DcsRunning());
+                    var engineStatus = EngineOptimizations.Read(openOptions, DcsLogPath(openOptions), DcsRunning(), EngineOptimizations.AppliedAt(service.Originals.ReadCurrent(), openOptions));
                     var engineTarget = data.GetProperty("target").GetString() switch
                     {
                         "report" => engineStatus.LastReport ?? throw new InvalidOperationException("No test report yet."),

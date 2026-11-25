@@ -18,6 +18,8 @@
 
 **Profiles stay readable by 0.7.0.** A profile or preset that leaves the new settings at their defaults still opens in 0.7.0 (Go back, or an exported file). One that turns on 3D audio, a Fine-tune setting or changes Multi-threading without driver support does not.
 
+**Faster launch, smaller download.** Launch DCS and settings changed in flight are quicker, because files that did not change are no longer read or written again, and the download is smaller.
+
 **Fixes:**
 - Pupil shift: when the headset software refuses the eye-tracking extension, the head pose keeps its exact display time.
 - The Engine Optimizations page counts 3D audio among the features that need the engine module.
