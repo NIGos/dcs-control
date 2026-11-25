@@ -1520,6 +1520,18 @@ void StereoOne(Rig& r, Kind kind, double x, double z, float inner = -1, float cr
 
 // Steady state: a point source's HRTF input is DCS's mid at DCS's frontal gain, at the stereo's loudness; a wide one
 // adds DCS's own side; a wide one past its width keeps no side at all.
+// DCS's own level of a horizontal source in direction (dx, dz) against its frontal gain (audio_render.h PanLevel): the
+// HRTF part's gain for a voice without a loudness factor. Ratio of the core's gain to it: the loudness factor.
+double PanLevelAt(double x, double dx, double dz) {
+  const double n = std::sqrt(dx * dx + dz * dz);
+  dx /= n, dz /= n;
+  float gL, gR;
+  audv::PanLaw(1.0, x, dx * 0.5 + dz * -0.8660254037844386, dx * 0.5 + dz * 0.8660254037844386, &gL, &gR);
+  const double m = 1.5 * (0.4 - 0.35 * x) + 0.2 + 0.7 * x;
+  return std::sqrt(0.5 * (double(gL) * gL + double(gR) * gR)) / m;
+}
+bool FactorIs(double gain, double level, double want) { return std::fabs(gain / level - want) <= 2e-5 * want; }
+
 void StereoSteady() {
   std::vector<float> a(2 * 480), b(2 * 480);
   {  // dual mono at 53 deg right with crosstalk: the mid is the wave itself, the loudness factor exactly 1
@@ -1539,12 +1551,14 @@ void StereoSteady() {
       worst = std::max(worst, std::fabs(audiofake::g_lastMono[i] - want));
       peak = std::max(peak, std::fabs(want));
     }
-    printf("     stereo steady (dual mono): mid vs DCS-at-front worst %.2e of %.3f, loudness factor %.6f\n", worst, peak,
-           audiofake::g_lastGain);
-    Check(equal && peak > 0.1 && worst <= 2e-6 * peak + 1e-7 && audiofake::g_lastGain == 1.0f &&
+    const double level = PanLevelAt(x, 3, 4);
+    printf("     stereo steady (dual mono): mid vs DCS-at-front worst %.2e of %.3f, core gain %.6f (DCS's level %.6f)\n", worst,
+           peak, audiofake::g_lastGain, level);
+    Check(equal && peak > 0.1 && worst <= 2e-6 * peak + 1e-7 && FactorIs(audiofake::g_lastGain, level, 1.0) && level < 0.99 &&
               audio::g_cnt.stereoCalls.load() > 30 && audio::g_cnt.fadeIns.load() == 0,
           "audio stereo steady state: a dual-mono stereo wave is a point source: the core's input is DCS's own signal at "
-          "DCS's frontal gain, at its own level (factor 1), owned from its creation (no fade), nothing else added");
+          "DCS's frontal gain, its gain DCS's own level for that direction (loudness factor 1), owned from its creation "
+          "(no fade), nothing else added");
     RigDown(r);
   }
   {  // channels correlated in part, in front: a point source, the HRTF part raised to the stereo's loudness, no side
@@ -1585,7 +1599,7 @@ void StereoSteady() {
     }
     printf("     stereo steady (decorrelated bed): loudness factor %.4f, side vs DCS's worst %.2e of %.3f\n",
            audiofake::g_lastGain, worst, peak);
-    Check(audiofake::g_lastGain == 1.0f && peak > 0.01 && worst <= 1e-5 * peak + 1e-7,
+    Check(FactorIs(audiofake::g_lastGain, PanLevelAt(0, 3, 4), 1.0) && peak > 0.01 && worst <= 1e-5 * peak + 1e-7,
           "audio stereo steady state: decorrelated channels (wind, rain) are a diffuse bed: DCS's own side kept around "
           "the binaural mid, no loudness factor");
     RigDown(r);
@@ -1598,7 +1612,7 @@ void StereoSteady() {
     double side = 0;
     for (int i = 0; i < 960; ++i) side = std::max(side, static_cast<double>(std::fabs(a[i] - audiofake::g_lastAdded[i])));
     printf("     stereo steady (1 m away): loudness factor %.4f, side added up to %.3f\n", audiofake::g_lastGain, side);
-    Check(audiofake::g_lastGain == 1.0f && side > 0.01,
+    Check(FactorIs(audiofake::g_lastGain, PanLevelAt(0, 0.6, 0.8), 1.0) && side > 0.01,
           "audio stereo steady state: a stereo wave under 1.5 m keeps DCS's side (no loudness factor)");
     RigDown(r);
   }
@@ -1617,7 +1631,7 @@ void StereoSteady() {
                         std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] + s * gR)});
       peak = std::max(peak, std::fabs(s * gL));
     }
-    const bool noComp = audiofake::g_lastGain == 1.0f;
+    const bool noComp = FactorIs(audiofake::g_lastGain, PanLevelAt(0, 3, 4), 1.0);
     RigDown(r);
     // far past its width (DCS's width 0): no side at all, the output is the core's alone
     Rig q;

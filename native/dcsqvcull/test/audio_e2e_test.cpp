@@ -408,6 +408,27 @@ void Stereo() {
         "dual-mono and decorrelated channels)");
   Check(peakDual > 0.05 && worstDual <= 1e-5 * peakDual + 1e-7,
         "audio e2e stereo: a dual-mono stereo wave (most of DCS's stereo files) renders exactly as the same mono wave");
+  // 2b. Loudness away from the front. The flight of 2026-11-25: the ownship's cockpit sounds sit behind and above the
+  // pilot (DCS's pan law -3 to -5 dB there), most of their power under 1 kHz, where the HRTF is about as loud as ahead;
+  // with the mid at DCS's frontal gain the kill switch stepped 2.3-2.8 dB. A 250 Hz tone, mono and dual-mono stereo, at
+  // those two places and close at the side (the near-field shelf): within 1 dB of DCS's own output.
+  {
+    const float behind[3] = {-0.83f, -0.58f, 0.0f}, above[3] = {-0.13f, 0.42f, 0.0f}, sideNear[3] = {0.05f, 0.0f, 0.3f},
+                farBehind[3] = {-6.0f, 0.0f, -2.0f};
+    const float* where[] = {behind, above, sideNear, farBehind};
+    const char* names[] = {"behind-below 1 m", "above-behind 0.44 m", "right 0.3 m", "behind-left 6 m"};
+    double worst = 0;
+    for (int p = 0; p < 4; ++p) {
+      const Take m1 = Hold(1, kSine, where[p], 20, 100, 0, 31, 250), s2 = Hold(2, kDual, where[p], 20, 100, 0, 31, 250);
+      const double d1 = 10 * std::log10(Energy(m1.hooked) / Energy(m1.stock));
+      const double d2 = 10 * std::log10(Energy(s2.hooked) / Energy(s2.stock));
+      printf("     loudness %s vs DCS's own output (250 Hz): mono %+.2f dB, stereo %+.2f dB\n", names[p], d1, d2);
+      worst = std::max({worst, std::fabs(d1), std::fabs(d2)});
+    }
+    Check(worst <= 1.0,
+          "audio e2e: away from the front (behind, above, close at the side, far behind) a low sound is as loud as DCS's own "
+          "output within 1 dB: the HRTF part carries DCS's level for the direction, the near-field shelf keeps the level");
+  }
   // 3. The kill switch flipping every 50 blocks: no click (second difference) beyond the steady state's own.
   const float at[3] = {4, 0, 3};
   bool clickFree = true;

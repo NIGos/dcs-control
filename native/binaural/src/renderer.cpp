@@ -245,6 +245,14 @@ struct Renderer::Impl {
             const float cosEar = e == 0 ? -dir[2] : dir[2];
             t[e].shelf = (nearOn && r < set->nearFromM) ? std::pow(10.0f, NearFieldShelfDb(cosEar, r, set->nearFromM) * nearMix / 20.0f) : 1.0f;
         }
+        // The shelves change the ILD, not the level: their two gains are scaled so that their mean power is 1
+        // (NearFieldShelfLevel). DCS's own gain already holds the distance; +8 / -4 dB at 0.25 m, 90 degrees alone
+        // raised the low end of a close lateral cockpit sound by 5 dB against DCS's own panning.
+        if (t[0].shelf != 1.0f || t[1].shelf != 1.0f) {
+            const float level = NearFieldShelfLevel(t[0].shelf, t[1].shelf);
+            t[0].shelf *= level;
+            t[1].shelf *= level;
+        }
     }
 
     void BuildFilter(const EarTarget& t, int ear, float* out) const {

@@ -503,11 +503,22 @@ static void TestNearField(const std::vector<std::uint32_t>& file) {
         std::printf("A7 near-field ILD at %.2f m, 90 deg (60-250 Hz) minus at 2 m: %.2f dB, model %.2f dB (+-1)\n", dist, got, model);
         CHECKM(std::fabs(got - model) <= 1.0, "%.2f m: %.2f vs %.2f", dist, got, model);
     }
+    // The shelves add ILD, not level (NearFieldShelfLevel): both ears' 60-250 Hz power at 0.25 m, 90 degrees with the
+    // near field on equals it with the near field off within 1 dB (the +8 / -4 dB shelves alone added 5 dB there).
+    auto lowPow = [&](float dist) {
+        const Vec out = RenderStatic(rig.r, 0, FromAzEl(-90, 0), dist, noise, 480);
+        const double l = BandRatioDb(Channel(out, 0), noise, 48000, 60, 250, 1024), r = BandRatioDb(Channel(out, 1), noise, 48000, 60, 250, 1024);
+        return 10.0 * std::log10(0.5 * (std::pow(10.0, l / 10.0) + std::pow(10.0, r / 10.0)));
+    };
+    const double powOn = lowPow(0.25f);
     // Near field off: no change with distance.
     rig.r.SetNearField(false);
     const double offDiff = lowIld(0.25f) - lowIld(2.0f);
     std::printf("A7 near field off: ILD change 0.25 m vs 2 m %.3f dB (0 +- 0.1)\n", offDiff);
     CHECK(std::fabs(offDiff) <= 0.1);
+    const double powOff = lowPow(0.25f);
+    std::printf("A7 near-field level at 0.25 m, 90 deg (60-250 Hz, both ears): on %.2f dB, off %.2f dB (+-1)\n", powOn, powOff);
+    CHECKM(std::fabs(powOn - powOff) <= 1.0, "near-field level %.2f vs %.2f dB", powOn, powOff);
     rig.r.SetNearField(true);
     // Parallax: 0.3 m at 45 degrees right; each ear's filter is looked up from that ear (+-r on the z axis).
     Vec in(960, 0.0f);

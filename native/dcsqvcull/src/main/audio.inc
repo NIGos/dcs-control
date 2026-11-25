@@ -923,16 +923,17 @@ void LogVoicesTick() {
   if (exists && (static_cast<uint64_t>(fa.nFileSizeHigh) << 32 | fa.nFileSizeLow) > (8ull << 20)) return;
   FILE* f = nullptr;
   if (_wfopen_s(&f, g_voicesCsv.c_str(), L"ab") || !f) return;
-  if (!exists) fprintf(f, "time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR\r\n");
+  // flags: meta_flags (audio_voice.h): 8 under 1.5 m (kept wide), 32 a stereo wave, 64 auto_width (kept wide).
+  if (!exists) fprintf(f, "time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags\r\n");
   SYSTEMTIME st;
   GetLocalTime(&st);
   for (int s = 0; s < audv::kSlots; ++s) {
     if (!g_meta.voice[s].load()) continue;
     audv::MetaData d;
     if (!audv::MetaRead(g_meta.slot[s], &d)) continue;
-    fprintf(f, "%02d:%02d:%02d.%03d,%d,%u,%u,%d,%.3f,%.3f,%.3f,%.3f,%.6g,%.6g,%.6g\r\n", st.wHour, st.wMinute, st.wSecond,
+    fprintf(f, "%02d:%02d:%02d.%03d,%d,%u,%u,%d,%.3f,%.3f,%.3f,%.3f,%.6g,%.6g,%.6g,%u\r\n", st.wHour, st.wMinute, st.wSecond,
             st.wMilliseconds, s, d.gen, d.ctx, (d.flags & audv::meta_flags::kOwned) ? 1 : 0, d.pos[0], d.pos[1], d.pos[2],
-            d.dist, d.mTag, d.gL, d.gR);
+            d.dist, d.mTag, d.gL, d.gR, d.flags);
   }
   fclose(f);
 }

@@ -2,6 +2,7 @@
 // of the interface: the audio module uses only include/binaural_core.h.
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -30,7 +31,7 @@ constexpr float kShelfCornerHz = 1000.0f;           // near-field ILD low shelf 
 // close source glide instead of jumping within one call (on the KU100 set at 0.3 m a jump within a 480-frame call
 // overshot A10's -60 dBFS step limit).
 constexpr float kNearFieldFadeS = 0.02f;
-constexpr float kNearFieldMaxDb = 12.0f;            // added ILD at 0.25 m, 90 degrees: +8 dB near ear, -4 dB far ear
+constexpr float kNearFieldMaxDb = 12.0f;            // added ILD at 0.25 m, 90 degrees (the level kept: NearFieldShelfLevel)
 constexpr float kNearFieldRefM = 0.25f;
 
 struct HrtfSet {
@@ -75,6 +76,13 @@ void InterpolatedDelays(const HrtfSet& set, const std::uint32_t idx[3], const fl
 // (HrtfSet::nearFromM): a set measured closer than kNearFieldM already holds G(fromM), so only G(r) - G(fromM) is
 // added, 0 at and beyond fromM.
 float NearFieldShelfDb(float cosEar, float r, float fromM = kNearFieldM);
+// The renderer applies the two ears' shelves (linear gains gL, gR from NearFieldShelfDb) scaled by this factor,
+// 1 / sqrt((gL^2 + gR^2) / 2): the ILD they add stays, their mean power below the corner is 1 (the level is DCS's: its
+// gain already holds the distance). At 0.25 m, 90 degrees: +2.75 dB near ear, -9.25 dB far ear (12 dB of ILD).
+inline float NearFieldShelfLevel(float gL, float gR) {
+    const float p = 0.5f * (gL * gL + gR * gR);
+    return p > 0.0f ? 1.0f / std::sqrt(p) : 1.0f;
+}
 // Parallax weight: 1 below 1.5 m, fading linearly to 0 at kParallaxM.
 float ParallaxWeight(float r);
 

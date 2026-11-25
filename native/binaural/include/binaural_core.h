@@ -14,7 +14,8 @@
 //   - Near field (NearField on, source < 1 m): per-ear parallax (direction from each ear, ears at +-r on the z axis) for
 //     sources under 2 m (fading out between 1.5 and 2 m; the ear offset shrinks to 0 between 2 and 1 head radius, so
 //     a source at the head never flips the near ear's filter), plus a first-order low shelf per ear (1 kHz corner,
-//     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees (+8 dB near ear, -4 dB far ear). A set
+//     Brungart-style) that adds up to 12 dB of ILD at 0.25 m, 90 degrees, its two gains scaled to a mean power of 1
+//     (+2.75 dB near ear, -9.25 dB far ear: the ILD changes, the level stays the caller's). A set
 //     measured closer than 1 m (Header.measurementDistanceM = D, at least kNearFieldFloorM) already holds the near field down to D: the shelf adds
 //     only the difference from D (nothing at and beyond D), and each ear looks up the point at D on its own ray through
 //     the source, so a source at D plays the set's own filters. Sets measured at 1 m or farther (SADIE II: 1.2 m)

@@ -41,7 +41,8 @@
 // where SidePan puts S back with DCS's gains (+gL left, -gR right), so h = 0 is DCS's stock stereo exactly. q = 0, a
 // point source: c' = c (Loudness, 1..2) keeps the stereo's loudness. q = 1, a wide sound (the sdef's auto_width, a
 // source under kNearM, or a diffuse bed by its own mid / side powers): c' = 1, DCS's side stays around a binaural mid.
-// A change of q is crossfaded across one block.
+// A change of q is crossfaded across one block. c' also carries DCS's own level for the direction (PanLevel below:
+// the HRTF part is as loud as DCS's own panning of that voice, the HRTF adds the direction's cues).
 #pragma once
 
 #include <immintrin.h>
@@ -353,6 +354,23 @@ constexpr float kDiffuseOn = 1.3f;     // P_S / P_M above 0.69
 constexpr float kDiffuseOff = 1.15f;   // P_S / P_M under 0.32
 constexpr double kDiffuseHoldS = 0.2;
 
+// DCS's own level of a voice against its frontal gain m: sqrt((gL^2 + gR^2) / (2 m^2)) from its pan ratios gL / m,
+// gR / m. ed_sound's pan law gives a frontal source m on both channels and every other direction less (about -1.3 dB
+// at the sides, -2.5 dB above, -6 dB behind without crosstalk), broadband. The HRTF is normalised to the front only
+// and at low frequencies, where DCS's engine and cockpit sounds carry most of their power, it is about as loud from
+// every direction (SADIE II KU100, 100-400 Hz: within 1.7 dB of the front all round). So the HRTF part carries DCS's
+// own level for the direction and the HRTF adds the interaural and spectral cues: the kill switch keeps the level
+// (flight of 2026-11-25: cockpit sounds behind and above the pilot came out 2.3-2.8 dB louder with the mid at m).
+// 1 for a frontal source, at most kPanLevelMax; non-finite ratios give 1.
+constexpr float kPanLevelMin = 0.25f;   // -12 dB (the pan law's own floor is about -6 dB)
+constexpr float kPanLevelMax = 1.0f;    // the front is the pan law's loudest direction
+inline float PanLevel(float rL, float rR) {
+  const float p = 0.5f * (rL * rL + rR * rR);
+  if (!std::isfinite(p)) return 1.0f;
+  const float l = std::sqrt(p);
+  return l < kPanLevelMin ? kPanLevelMin : (l > kPanLevelMax ? kPanLevelMax : l);
+}
+
 // The mid / side estimate of one voice (render thread). Non-finite input leaves it untouched; a non-finite state
 // (never expected) is dropped and rebuilt from the next finite block.
 struct Loudness {
@@ -550,6 +568,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   const MetaData& pm = tagSnap && rs.prev.mTag == snap[0] && rs.meta.mTag != snap[0] ? rs.prev : rs.meta;
   const float mRef = pm.mTag > 0 ? pm.mTag : 1.0f;
   float rL1 = pm.gL / mRef, rR1 = pm.gR / mRef;
+  const float panLevel = PanLevel(rL1, rR1);
   if (!std::isfinite(rL1) || !std::isfinite(rR1)) rL1 = rR1 = 0.5f;
   if (rs.rL == 0 && rs.rR == 0) rs.rL = rL1, rs.rR = rR1;
 
@@ -589,7 +608,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     binaural::SourceUpdate u{};
     float gT = 1.0f;
     CorrectedPosition(pm, blk.pose, blk.late, u.position, &gT);
-    u.gain = blk.trim * gT * ((1.0f - q1) * rs.loud.comp + q1);
+    u.gain = blk.trim * gT * panLevel * ((1.0f - q1) * rs.loud.comp + q1);
     // Near field on/off is the core's own (Renderer::SetNearField fades it); no per-source exclusion here.
     u.flags = rs.live ? 0u : binaural::source_flags::kReset;
     binaural::MonoInput in{a, bb, 2, scale};
