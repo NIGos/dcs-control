@@ -219,6 +219,10 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
     var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
     Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
+    // OFXR 0128: the focus view's own MVs, off by default, 1 only with NVIDIA frame generation, in the profile only when on.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_focus=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=1\n")
+        && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=0\n") && !new VrProfile().FrameGenFocusMotion
+        && !qualitySaved.Contains("frameGenFocusMotion") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenFocusMotion = true }))!.FrameGenFocusMotion, "dcs_motion_focus: off by default, 1 only with NVIDIA frame generation");
     // The occlusion fill of the 0.7.1 development builds (OFXR dcs_motion_occlusion_fill) is gone: never written.
     Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion=1\n") && !ConfigurationWriters.Ofxr(nvidia).Contains("occlusion_fill"), "no occlusion fill key");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.
