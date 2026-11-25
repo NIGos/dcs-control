@@ -319,6 +319,51 @@ Test("Originals: the first write backs up, later applies overwrite anything with
     Require(store.Status() is { Count: 0, State: "clean", Current: null } && Directory.GetFiles(store.Directory, "*.original").Length == 0, "Nothing left to restore");
     Require(store.RestoreOriginals().Complete, "Restoring twice is harmless");
 });
+Test("Originals: a re-apply leaves a file that already holds the planned bytes untouched, records it as written, and writes changed ones", () =>
+{
+    var dll = Path.Combine(root, "originals/same/bin/component.dll"); var ini = Make("originals/same/bin/component.ini", "a=1");
+    var store = new OriginalsStore(Path.Combine(root, "originals/same/state"));
+    store.Apply(Plan("one", Write(dll, "component v1"), Write(ini, "a=2")));
+    var before = store.Read().Current!.Entries.Single(e => e.Path == Path.GetFullPath(dll));
+    var old = DateTime.UtcNow.AddHours(-1); File.SetLastWriteTimeUtc(dll, old); File.SetCreationTimeUtc(dll, old);
+    var again = store.Apply(Plan("one", Write(dll, "component v1"), Write(ini, "a=3")));
+    Require(File.GetLastWriteTimeUtc(dll) == old && File.ReadAllText(dll) == "component v1", "The identical file is not written again");
+    Require(File.ReadAllText(ini) == "a=3", "The changed file is written");
+    var after = again.Current.Entries.Single(e => e.Path == Path.GetFullPath(dll));
+    Require(after.InstalledSha256 == before.InstalledSha256 && after.PreviousSha256 == before.PreviousSha256 && after.Applied, "Recorded exactly as a written file");
+    // Changed since (other bytes of the same length, another write time): written again.
+    File.WriteAllText(dll, "component v2"); File.SetLastWriteTimeUtc(dll, old.AddMinutes(5)); File.SetCreationTimeUtc(dll, old);
+    store.Apply(Plan("one", Write(dll, "component v1"), Write(ini, "a=3")));
+    Require(File.ReadAllText(dll) == "component v1", "A changed file is written again");
+    Require(store.RestoreOriginals().Complete && !File.Exists(dll) && File.ReadAllText(ini) == "a=1", "Back to stock DCS as before");
+});
+Test("Hashing: cached hashes follow a change of size or time and never cache a file written just now; a scope reads an unchanged file once", () =>
+{
+    string Sha(string text) => Hashing.BytesSha256(Encoding.UTF8.GetBytes(text));
+    var path = Make("hashing/file.bin", "first content"); var old = DateTime.UtcNow.AddMinutes(-10);
+    File.SetLastWriteTimeUtc(path, old); File.SetCreationTimeUtc(path, old);
+    Require(Hashing.FileSha256Cached(path) == Sha("first content"));
+    File.WriteAllText(path, "other content"); // the same size, written now
+    Require(Hashing.FileSha256Cached(path) == Sha("other content"), "Written just now: hashed again");
+    File.SetLastWriteTimeUtc(path, old.AddMinutes(1));
+    Require(Hashing.FileSha256Cached(path) == Sha("other content"));
+    File.WriteAllText(path, "third content"); File.SetLastWriteTimeUtc(path, old.AddMinutes(2));
+    Require(Hashing.FileSha256Cached(path) == Sha("third content"), "Another write time: hashed again");
+    var bytes = Hashing.ReadAllBytes(path);
+    Require(Hashing.ContentSha256(bytes) == Sha("third content") && Hashing.ContentSha256([1, 2, 3]) == Hashing.BytesSha256([1, 2, 3]), "Content hashes");
+    using (Hashing.Scope())
+    {
+        var once = Hashing.FileSha256(path);
+        using (Hashing.Scope()) // nested: the outer one's
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            Require(Hashing.FileSha256(path) == once, "Within a scope an unchanged file is not read again");
+    }
+    using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None)) Throws<IOException>(() => Hashing.FileSha256(path));
+    // Only passes are remembered: a refused runtime is checked (and refused) again.
+    var junk = Encoding.UTF8.GetBytes("MZ not a real runtime");
+    Throws<InvalidDataException>(() => NativeBinary.VerifyNeuralRuntime(junk, allowModified: true));
+    Throws<InvalidDataException>(() => NativeBinary.VerifyNeuralRuntime(junk, allowModified: true));
+});
 Test("Originals: another program's file is backed up once, replaced, reported and brought back", () =>
 {
     var bin = Path.Combine(root, "originals/foreign/bin"); var dxgi = Make("originals/foreign/bin/dxgi.dll", "ReShade");

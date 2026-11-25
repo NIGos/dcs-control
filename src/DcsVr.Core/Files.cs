@@ -6,11 +6,88 @@ namespace DcsVr.Core;
 public static class Hashing
 {
     public static string BytesSha256(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+    /// <summary>The file's SHA-256, read now. Inside a <see cref="Scope"/> a file whose size and times did not change since
+    /// it was hashed in the same scope is not read again (one launch verifies, plans and applies the same files).</summary>
     public static string FileSha256(string path)
+    {
+        if (ScopeMemo.Value is not { } memo || Identity(path) is not { } before) return HashFile(path);
+        if (memo.TryGetValue(before, out var known)) return known;
+        var hash = HashFile(path);
+        if (Identity(path) == before) memo[before] = hash;
+        return hash;
+    }
+
+    /// <summary>The file's SHA-256, kept for the life of the process and computed again when its size, write time or
+    /// creation time changed (a file written in the last two seconds is always hashed). For planning, the identical-file
+    /// check of an apply and display: the tamper checks before a launch use <see cref="FileSha256"/>.</summary>
+    public static string FileSha256Cached(string path)
+    {
+        if (Identity(path) is not { } before) return HashFile(path);
+        if (Known.TryGetValue(before, out var known)) return known;
+        var hash = FileSha256(path);
+        if (Identity(path) == before) Known[before] = hash;
+        return hash;
+    }
+
+    /// <summary>The bytes of a file whose content goes into a plan. Their hash (<see cref="ContentSha256"/>) comes with them:
+    /// the cached one when the file did not change while it was read, otherwise one pass over the bytes read.</summary>
+    public static byte[] ReadAllBytes(string path)
+    {
+        var before = Identity(path);
+        var bytes = File.ReadAllBytes(path);
+        if (before is { } id && Identity(path) == id)
+        {
+            if (!Known.TryGetValue(id, out var hash)) Known[id] = hash = BytesSha256(bytes);
+            Contents.AddOrUpdate(bytes, hash);
+        }
+        return bytes;
+    }
+
+    /// <summary>SHA-256 of planned content, computed once per array. Plan contents are never changed after they are made.</summary>
+    public static string ContentSha256(byte[] bytes)
+    {
+        if (Contents.TryGetValue(bytes, out var known)) return known;
+        var hash = BytesSha256(bytes);
+        Contents.AddOrUpdate(bytes, hash);
+        return hash;
+    }
+
+    /// <summary>Within the returned scope (one launch, one apply) <see cref="FileSha256"/> reads each unchanged file once.
+    /// Nested scopes share the outer one.</summary>
+    public static IDisposable Scope()
+    {
+        if (ScopeMemo.Value is not null) return NoScope.Instance;
+        ScopeMemo.Value = new();
+        return new ScopeEnd();
+    }
+
+    private static string HashFile(string path)
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
+    private readonly record struct FileIdentity(string Path, long Length, DateTime Written, DateTime Created);
+    // A file written in the last two seconds (or dated in the future) is never cached: two writes within one tick of the
+    // file system's clock can leave the same size and times (git's "racy" entries), so its hash is always computed.
+    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(2);
+    private static FileIdentity? Identity(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) return null;
+            var now = DateTime.UtcNow;
+            if (now - info.LastWriteTimeUtc < Settle || now - info.CreationTimeUtc < Settle) return null;
+            return new(info.FullName.ToUpperInvariant(), info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<FileIdentity, string> Known = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], string> Contents = new();
+    private static readonly AsyncLocal<System.Collections.Concurrent.ConcurrentDictionary<FileIdentity, string>?> ScopeMemo = new();
+    private sealed class ScopeEnd : IDisposable { public void Dispose() => ScopeMemo.Value = null; }
+    private sealed class NoScope : IDisposable { public static readonly NoScope Instance = new(); public void Dispose() { } }
 }
 
 public static class AtomicFile

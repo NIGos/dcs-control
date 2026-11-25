@@ -237,10 +237,14 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 PathPolicy.RejectReparsePoints(full, file.Root);
                 var released = new List<string>();
                 var bytes = file.LuaChanges is { } changes ? MergeSettings(full, original, changes, SettingsAt(settingsBefore, full), released) : file.Content;
-                AtomicFile.Write(full, bytes);
+                var installed = Hashing.ContentSha256(bytes);
+                // A file that already holds exactly these bytes (the 254 MB DLSS 5 runtime, OFXR, the engine module on a
+                // re-apply that changed one INI) is not written again; it is recorded exactly as a written one. options.lua
+                // always goes through the merge and the write.
+                if (file.LuaChanges is not null || !HoldsAlready(full, bytes.LongLength, installed)) AtomicFile.Write(full, bytes);
                 // Settings set back are forgotten only once the file says so: a failed write keeps their originals.
                 foreach (var key in released) original.Settings!.Remove(key);
-                entries.Add(new() { Path = full, InstalledSha256 = Hashing.BytesSha256(bytes), PreviousSha256 = original.OriginalSha256, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root), Applied = true });
+                entries.Add(new() { Path = full, InstalledSha256 = installed, PreviousSha256 = original.OriginalSha256, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root), Applied = true });
             }
             baseline.Current = new() { Id = Guid.NewGuid().ToString("N"), ProfileId = plan.ProfileId, AppVersion = ProductInfo.Version, Status = "applied", Entries = entries };
             baseline.LastInstalled = null; baseline.LastInstalledSettings = null;
@@ -490,7 +494,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         // pilot installed by hand, so they are backed up and come back. DCS Control's own unrecorded copies of those are
         // removed before an apply (ControlService.SyncApplied sweeps Leftovers first).
         if (settings is null && (file.OwnedLocation || !Leftovers.UpstreamHashes.Contains(hash)
-            && (hash == Hashing.BytesSha256(file.Content) || own.Contains(hash) || file.OwnHashes?.Contains(hash) == true)))
+            && (hash == Hashing.ContentSha256(file.Content) || own.Contains(hash) || file.OwnHashes?.Contains(hash) == true)))
             return new() { Path = full, Root = root, Leftover = true };
         var backup = NextBackupName(baseline);
         AtomicFile.Write(System.IO.Path.Combine(Directory, backup), bytes);
@@ -888,8 +892,16 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         // After an interrupted apply the record is cleared; what that apply's predecessor installed is kept for this.
         if ((InstalledHashes(baseline) ?? Recorded(baseline.LastInstalled)) is not { } installed) return null;
         var now = Hashing.FileSha256(full);
-        if (now == Hashing.BytesSha256(file.Content) || file.OwnHashes?.Contains(now) == true) return null;
+        if (now == Hashing.ContentSha256(file.Content) || file.OwnHashes?.Contains(now) == true) return null;
         return ReplacedAfterInstall(installed, full, now, original.OriginalSha256, own) ? now : null;
+    }
+
+    /// <summary>The file at <paramref name="full"/> holds bytes of this length and hash now (hashed now, or earlier while
+    /// its size and times stayed the same): writing them again would change nothing.</summary>
+    private static bool HoldsAlready(string full, long length, string sha256)
+    {
+        try { return new FileInfo(full) is { Exists: true } info && info.Length == length && Hashing.FileSha256Cached(full) == sha256; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>A Windows program library (starts with "MZ"): what another program (ReShade, an overlay) puts in DCS's bin.</summary>

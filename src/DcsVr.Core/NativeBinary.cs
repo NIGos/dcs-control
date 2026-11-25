@@ -49,6 +49,17 @@ public static class NativeBinary
     /// signed by anyone but NVIDIA, is not NVIDIA's runtime and is refused.</summary>
     public static BinaryInspection VerifyNeuralRuntime(byte[] bytes, bool allowModified = false)
     {
+        // Bytes that already passed these checks (the same content, hashed once) pass again without a second private copy,
+        // signature pass and re-read: every plan build (each Live edit, each Launch) checks the saved copy.
+        var sha = Hashing.ContentSha256(bytes);
+        if (VerifiedRuntimes.TryGetValue((sha, allowModified), out var verified)) return verified;
+        verified = VerifyNeuralRuntimeNow(bytes, sha, allowModified);
+        VerifiedRuntimes[(sha, allowModified)] = verified;
+        return verified;
+    }
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string Sha256, bool AllowModified), BinaryInspection> VerifiedRuntimes = new();
+    private static BinaryInspection VerifyNeuralRuntimeNow(byte[] bytes, string sha, bool allowModified)
+    {
         var privateCopy = Path.Combine(Path.GetTempPath(), "dcsvr-" + Guid.NewGuid().ToString("N"), "nvngx_dlssnr.dll");
         BinaryInspection verification;
         try
@@ -57,7 +68,7 @@ public static class NativeBinary
             verification = Inspect(privateCopy);
         }
         finally { try { Directory.Delete(Path.GetDirectoryName(privateCopy)!, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
-        if (verification.Sha256 != Hashing.BytesSha256(bytes)) throw new InvalidDataException("The DLSS 5 runtime changed during verification. Select it again.");
+        if (verification.Sha256 != sha) throw new InvalidDataException("The DLSS 5 runtime changed during verification. Select it again.");
         if (!verification.IsX64) throw new InvalidDataException("The DLSS 5 runtime must be the x64 nvngx_dlssnr.dll.");
         if (!SupportsNeuralContract(verification.Version))
             throw new InvalidDataException($"DLSS 5 supports nvngx_dlssnr.dll version 310.8 or 310.9; the selected file is version {verification.Version ?? "unknown"}.");

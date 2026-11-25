@@ -46,7 +46,7 @@ public sealed class NeuralRuntimeStore(string directory)
         if (!System.IO.Path.GetFileName(original).Equals(FileName, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The DLSS 5 runtime must be named nvngx_dlssnr.dll.");
         var bytes = File.ReadAllBytes(original);
-        var sha = Hashing.BytesSha256(bytes);
+        var sha = Hashing.ContentSha256(bytes);
         // The same file already saved (and the copy still intact): nothing is written.
         if (Read() is { } existing && existing.Sha256 == sha && Hashing.FileSha256(DllPath) == sha)
         {

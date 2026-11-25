@@ -60,9 +60,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                     ?? throw new InvalidDataException("Runtime manifest is missing its library.");
                 var runtimeLibrary = Path.GetFullPath(library, Path.GetDirectoryName(Path.GetFullPath(runtime))!);
                 if (!File.Exists(runtimeLibrary)) throw new InvalidDataException("The OpenXR runtime library does not exist.");
-                dependencies[runtimeLibrary] = Hashing.FileSha256(runtimeLibrary);
+                dependencies[runtimeLibrary] = Hashing.FileSha256Cached(runtimeLibrary);
             }
-            dependencies[Path.GetFullPath(runtime)] = Hashing.FileSha256(runtime);
+            dependencies[Path.GetFullPath(runtime)] = Hashing.FileSha256Cached(runtime);
             environment["XR_RUNTIME_JSON"] = Path.GetFullPath(runtime);
         }
         environment["DCSVR_QUAD_FOCUS"] = profile.UsesQuadFocus ? "1" : "0";
@@ -175,7 +175,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         if (profile.UsesBinauralAudio && current.Get("sound") is not null) Require("sound.main_layout", Binaural.StereoLayout);
         // Existing autoexec commands remain untouched, but edits invalidate the saved launch contract.
         var autoexec = Path.Combine(Path.GetDirectoryName(optionsPath)!, "autoexec.cfg");
-        if (File.Exists(autoexec)) dependencies[autoexec] = Hashing.FileSha256(autoexec);
+        if (File.Exists(autoexec)) dependencies[autoexec] = Hashing.FileSha256Cached(autoexec);
         var patched = LuaOptions.Patch(text, optionChanges);
         var originalLua = new LuaOptions(text); var installedLua = new LuaOptions(patched);
         // Nothing to change: options.lua is not touched at all.
@@ -188,7 +188,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 profile.UsesQuadFocus ? "Verified focus adapter binaries are unavailable." : "Cheeky package has not been imported.");
             AddLoader(cheeky);
             foreach (var file in new[] { "CheekyFoveatedDLSSHost.dll", "CheekyFoveatedDLSSRuntime.dll" })
-                Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/" + file), File.ReadAllBytes(PathPolicy.UnderRoot(cheeky, "CheekyFoveatedDLSS/" + file)), "Cheeky runtime", ownHashes: Variants("CheekyFoveatedDLSS/" + file));
+                Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/" + file), Hashing.ReadAllBytes(PathPolicy.UnderRoot(cheeky, "CheekyFoveatedDLSS/" + file)), "Cheeky runtime", ownHashes: Variants("CheekyFoveatedDLSS/" + file));
             var cheekyIni = ConfigurationWriters.Cheeky(profile);
             Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/CheekyFoveatedDLSS.ini"), new UTF8Encoding(false).GetBytes(cheekyIni), "DLSS and gaze settings", iniValues: IniFile.Parse(cheekyIni));
             // Cheeky's loader and stereo runtime are byte-identical to its public release: this mark says DCS Control put
@@ -196,7 +196,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             AddText(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/" + Leftovers.OwnerMark), Leftovers.OwnerMarkText, "DCS Control's mark on its DLSS 5 files");
             var layerDll = components.CheekyLayerDll ?? throw new InvalidDataException("Cheeky OpenXR layer unavailable.");
             var deployedDll = PathPolicy.UnderRoot(profileRoot, "cheeky/CheekyOpenXRLayer.dll");
-            Add(deployedDll, File.ReadAllBytes(layerDll), "Cheeky OpenXR layer");
+            Add(deployedDll, Hashing.ReadAllBytes(layerDll), "Cheeky OpenXR layer");
             AddText(PathPolicy.UnderRoot(layersRoot, "cheeky.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_CHEEKY_foveated_dlss", deployedDll, 1, "DCS Control · Cheeky gaze"), "Profile Cheeky manifest");
             layerNames.Add("XR_APILAYER_CHEEKY_foveated_dlss");
             environment["CHEEKY_OPENXR_LAYER_DISABLE"] = "1";
@@ -205,10 +205,12 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 var neural = Path.GetFullPath(profile.NeuralRuntimePath!);
                 if (!Path.GetFileName(neural).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("The DLSS 5 runtime must be named nvngx_dlssnr.dll.");
                 // Read once, then verify signature, architecture and version on a private copy of those bytes, so the
-                // selected file cannot be swapped between the checks and the deployment.
-                var neuralBytes = File.ReadAllBytes(neural);
+                // selected file cannot be swapped between the checks and the deployment. Bytes with the hash of content
+                // already verified are not checked again (NativeBinary.VerifyNeuralRuntime), and their hash is the cached
+                // one of the unchanged file (Hashing.ReadAllBytes): a plan build no longer re-reads and re-hashes the 254 MB.
+                var neuralBytes = Hashing.ReadAllBytes(neural);
                 // The app's saved copy must still be the file that was verified and recorded when it was saved.
-                if (neuralSha256 is not null && Hashing.BytesSha256(neuralBytes) != neuralSha256)
+                if (neuralSha256 is not null && Hashing.ContentSha256(neuralBytes) != neuralSha256)
                     throw new InvalidDataException("The saved copy of the DLSS 5 runtime changed since it was saved. Select nvngx_dlssnr.dll again.");
                 // A file the user chose (the saved copy or the path in the profile) may be NVIDIA's runtime patched for
                 // RTX 20, 30 and 40 cards; Detect only ever picks validly signed files.
@@ -225,7 +227,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         {
             var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : profile.UsesVisualRealism ? "Visual realism's engine module is unavailable." : profile.UsesBinauralAudio && !profile.UsesFarDepth ? "3D headphone audio's engine module is unavailable." : "Far depth's engine module is unavailable.");
             var module = Path.Combine(scripts, "DcsQvCull");
-            Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
+            Add(Path.Combine(module, "DcsQvCull.dll"), Hashing.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore. Its shader cache is
                 // no longer among it: that lives in the app's state folder (EngineShaderCache) and survives a restore;
                 // cache\*.qvc here covers what an earlier version, or a module without the key, left in this folder.
@@ -233,7 +235,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCull.*.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log", "warmup.json", "warmup.json.tmp", "motion_*.csv", "rotation_*.csv", "timeline_*.csv", "events_*.csv", "fbc_*.csv", "run_profile.flag", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", "recorders_emulated_lists.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp"), "gbrec_states*.jsonl", Path.Combine("tone_probe", "*.f32"), "DcsQvCull_water*.csv", "water_timing_*.csv", "early_census_*.csv", "three_views_timing_*.csv", "three_views.log",
                     // 3D headphone audio: its kill switch (deleted by the module when taken) and the per-sound CSV of LogVoices.
                     Binaural.KillFlag, "audio_*.csv" }.Select(name => Path.Combine(module, name))]);
-            Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
+            Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), Hashing.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
             // 3D headphone audio: the pilot's own HRTF sets next to the module (the generic one is inside it). Every set, so
             // another can be picked in flight; a profile whose set is gone from the library uses the generic one.
             string? hrtf = null;
@@ -247,7 +249,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             }
             AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory, EngineOptimizations.EmulatedListsMatter(module), hrtf), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
-            Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
+            Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), Hashing.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
         }
 
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated)
@@ -261,15 +263,15 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             {
                 using var alternative = JsonDocument.Parse(explicitManifest);
                 var dll = alternative.RootElement.GetProperty("api_layer").GetProperty("library_path").GetString()!;
-                dependencies[Path.GetFullPath(manifest)] = Hashing.FileSha256(manifest);
-                dependencies[dll] = Hashing.FileSha256(dll);
+                dependencies[Path.GetFullPath(manifest)] = Hashing.FileSha256Cached(manifest);
+                dependencies[dll] = Hashing.FileSha256Cached(dll);
             }
             if (useBundledProvider)
             {
                 var node = System.Text.Json.Nodes.JsonNode.Parse(explicitManifest)!;
                 var sourceDll = node["api_layer"]!["library_path"]!.GetValue<string>();
                 var deployedDll = PathPolicy.UnderRoot(profileRoot, "quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll");
-                Add(deployedDll, File.ReadAllBytes(sourceDll), "Software Quad Views provider");
+                Add(deployedDll, Hashing.ReadAllBytes(sourceDll), "Software Quad Views provider");
                 node["api_layer"]!["library_path"] = deployedDll;
                 explicitManifest = node.ToJsonString(JsonData.Options);
                 var settings = PathPolicy.UnderRoot(profileRoot, "quadviews/settings.cfg");
@@ -292,7 +294,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 throw new InvalidDataException("Framegen needs the OFXR layer in components/ofxr. Rebuild the release with scripts/build-ofxr-djules75.ps1.");
             var ofxr = forkDll is null ? RequireDirectory(components.OfxrDirectory, "OFXR package has not been imported.") : null;
             var dll = PathPolicy.UnderRoot(profileRoot, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll");
-            Add(dll, File.ReadAllBytes(forkDll ?? PathPolicy.UnderRoot(ofxr!, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll")), "OFXR framegen");
+            Add(dll, Hashing.ReadAllBytes(forkDll ?? PathPolicy.UnderRoot(ofxr!, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll")), "OFXR framegen");
             AddIni(PathPolicy.UnderRoot(profileRoot, "ofxr/ofxr_bridge.ini"), ConfigurationWriters.Ofxr(profile, Path.GetDirectoryName(exe)), "Framegen settings");
             AddText(PathPolicy.UnderRoot(layersRoot, "ofxr.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_XRFrameBridge_diagnostic", dll, forkDll is null ? 116 : 401, "DCS Control · OFXR Bridge"), "Profile OFXR manifest");
             layerNames.Add("XR_APILAYER_XRFrameBridge_diagnostic");
@@ -312,9 +314,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             using (var parsed = JsonDocument.Parse(gazeManifest))
             {
                 var gazeDll = parsed.RootElement.GetProperty("api_layer").GetProperty("library_path").GetString()!;
-                dependencies[gazeDll] = Hashing.FileSha256(gazeDll);
+                dependencies[gazeDll] = Hashing.FileSha256Cached(gazeDll);
             }
-            dependencies[Path.GetFullPath(gaze.ManifestPath)] = Hashing.FileSha256(gaze.ManifestPath);
+            dependencies[Path.GetFullPath(gaze.ManifestPath)] = Hashing.FileSha256Cached(gaze.ManifestPath);
             environment[disable] = "1";
             layerNames.Add(gaze.Name!);
         }
@@ -339,9 +341,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 using (var parsed = JsonDocument.Parse(handsManifest))
                 {
                     var handsDll = parsed.RootElement.GetProperty("api_layer").GetProperty("library_path").GetString()!;
-                    dependencies[handsDll] = Hashing.FileSha256(handsDll);
+                    dependencies[handsDll] = Hashing.FileSha256Cached(handsDll);
                 }
-                dependencies[Path.GetFullPath(hands.ManifestPath)] = Hashing.FileSha256(hands.ManifestPath);
+                dependencies[Path.GetFullPath(hands.ManifestPath)] = Hashing.FileSha256Cached(hands.ManifestPath);
                 layerNames.Insert(layerNames.IndexOf("XR_APILAYER_MBUCCHIA_quad_views_foveated") + 1, hands.Name!);
             }
         }
@@ -354,7 +356,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var source = components.PupilShiftDll is { } built && File.Exists(built) ? built : throw new InvalidDataException("The pupil shift layer is unavailable.");
             var folder = PathPolicy.UnderRoot(profileRoot, "pupilshift");
             var dll = PathPolicy.UnderRoot(folder, "XR_APILAYER_DCSVR_pupil_shift.dll");
-            Add(dll, File.ReadAllBytes(source), "Pupil shift OpenXR layer", runtimeLogs: [PathPolicy.UnderRoot(folder, "PupilShift.log")]);
+            Add(dll, Hashing.ReadAllBytes(source), "Pupil shift OpenXR layer", runtimeLogs: [PathPolicy.UnderRoot(folder, "PupilShift.log")]);
             var pupilIni = ConfigurationWriters.PupilShift(profile, pupilIpd);
             Add(PathPolicy.UnderRoot(folder, "PupilShift.ini"), new UTF8Encoding(false).GetBytes(pupilIni), "Pupil shift settings", iniValues: IniFile.Parse(pupilIni));
             AddText(PathPolicy.UnderRoot(layersRoot, "pupil-shift.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_DCSVR_pupil_shift", dll, 1, "DCS Control · pupil shift"), "Profile pupil shift manifest");
@@ -384,14 +386,14 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         void AddIni(string path, string content, string purpose) => Add(path, [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(content)], purpose);
         // The same file in both Cheeky builds (upstream and focus adapter): either one already there is ours.
         string[] Variants(string relative) => new[] { components.CheekyDirectory, components.QuadFocusDirectory }
-            .Where(d => d is not null && File.Exists(Path.Combine(d, relative))).Select(d => Hashing.FileSha256(Path.Combine(d!, relative))).ToArray();
+            .Where(d => d is not null && File.Exists(Path.Combine(d, relative))).Select(d => Hashing.FileSha256Cached(Path.Combine(d!, relative))).ToArray();
         void AddLoader(string source)
         {
             // dxgi.dll is the only loader: the version.dll fallback is flagged by Microsoft Defender and is not distributed.
             // Another program's dxgi.dll (ReShade, an overlay) is backed up the first time and replaced; Restore
             // originals brings it back. Removed last on restore (reverse order), after Cheeky's own files.
             const string loader = "dxgi.dll";
-            Add(PathPolicy.UnderRoot(bin, loader), File.ReadAllBytes(PathPolicy.UnderRoot(source, loader)), "Cheeky loader " + loader, ownHashes: Variants(loader),
+            Add(PathPolicy.UnderRoot(bin, loader), Hashing.ReadAllBytes(PathPolicy.UnderRoot(source, loader)), "Cheeky loader " + loader, ownHashes: Variants(loader),
                 runtimeLogs: new[] { "CheekyFoveatedDLSS-Loader.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log",
                     "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.prev.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.prev.log" }
                     .Select(log => PathPolicy.UnderRoot(bin, log)).ToArray());
@@ -409,7 +411,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 .FirstOrDefault(r => Path.GetFullPath(path).StartsWith(r.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
             PathPolicy.RejectReparsePoints(path, root);
             // An existing file is never a conflict: Apply backs up its original the first time and overwrites it.
-            files.Add(new(path, File.Exists(path) ? Hashing.FileSha256(path) : null, content, purpose, luaChanges, IniValues: iniValues, RuntimeLogs: runtimeLogs, Root: root,
+            files.Add(new(path, File.Exists(path) ? Hashing.FileSha256Cached(path) : null, content, purpose, luaChanges, IniValues: iniValues, RuntimeLogs: runtimeLogs, Root: root,
                 OwnHashes: ownHashes, OwnedLocation: root is not null && root.Equals(managed, StringComparison.OrdinalIgnoreCase)));
         }
     }

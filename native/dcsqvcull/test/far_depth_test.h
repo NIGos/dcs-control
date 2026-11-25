@@ -981,6 +981,42 @@ void TestPipeline() {
   frame(order);
   Check(lastPush(2).d.texture == s1.d.texture && s1.result == DCSVR_DEPTH_PUSH_ACCEPTED,
         "far depth: FarDepthExportSlots=1 -> one texture per view");
+  // 6a. One slot, a copy whose push is refused: the latch of the earlier accepted push points at the overwritten
+  // texture, so Quad Views' references go at the frame end; the next accepted push holds it again.
+  {
+    auto rels = [&] {
+      std::lock_guard<std::mutex> lock(g_m);
+      return g_rels.size();
+    };
+    auto heldBoth = [&] {
+      std::lock_guard<std::mutex> lock(g_m);
+      return g_held[2] != nullptr && g_held[3] != nullptr;
+    };
+    const size_t rel0 = rels();
+    const uint64_t np0 = fdexport::g_notPushedReleases.load();
+    const DWORD rt = g_renderThread;
+    g_renderThread = 1;  // never a thread id: every push refused (NOT_RENDER_THREAD) after its copy
+    frame(order);
+    g_renderThread = rt;
+    const bool refused = lastPush(2).result == DCSVR_DEPTH_PUSH_NOT_RENDER_THREAD;
+    // The frame end (here: the next frame's start) lets Quad Views' references go; that frame's pushes hold them again.
+    frame(order);
+    Check(refused && fdexport::g_notPushedReleases.load() == np0 + 1 && rels() > rel0,
+          "far depth: one slot, a copied view's push refused -> Quad Views' references released at the frame end");
+    frame(order);
+    Check(lastPush(2).result == DCSVR_DEPTH_PUSH_ACCEPTED && heldBoth() && fdexport::g_notPushedReleases.load() == np0 + 1,
+          "far depth: one slot, the next accepted pushes are held again (no further release)");
+    fdexport::g_slots = 2;
+    frame(order);
+    frame(order);
+    const size_t rel2 = rels();
+    g_renderThread = 1;
+    frame(order);
+    g_renderThread = rt;
+    frame(order);
+    Check(fdexport::g_notPushedReleases.load() == np0 + 1 && rels() == rel2,
+          "far depth: two slots, a refused push releases nothing (the latched copy is the other slot)");
+  }
   fdexport::g_slots = 2;
 
   // 6b. v1.1 pre-overlay: each focus view's colour copied at its first

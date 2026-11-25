@@ -272,7 +272,7 @@ static class OldDcsQvCullTemplate
         FixationDepthDump=0
         ; Far depth (docs/FAR_DEPTH.md): the engine's depth for the bundled Quad Views, on with the profile's Far depth.
         FarDepthExport={(p.UsesFarDepth ? 1 : 0)}
-        FarDepthExportSlots=2
+        FarDepthExportSlots=1
         ; The image before DCS draws its HUD and symbology, so the bundled Quad Views keeps them out of Far depth.
         FarDepthPreOverlay=1
         ; Cockpit mask for Framegen (R65): the cockpit stays still in generated frames. The module computes it only while

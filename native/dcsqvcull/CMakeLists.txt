@@ -8,13 +8,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
-set(DCSQV_OPTS /W4 /O2 /wd4201 $<$<COMPILE_LANGUAGE:CXX>:/EHsc /permissive->)
+# /Brepro: a relink of unchanged sources gives the same bytes (no PE timestamp), so the test cache (scripts/test-cache.ps1)
+# and KnownComponents.txt see an unchanged payload as unchanged. Nothing compares this module's own timestamp.
+set(DCSQV_OPTS /W4 /O2 /wd4201 /Brepro $<$<COMPILE_LANGUAGE:CXX>:/EHsc /permissive->)
 set(DCSQV_DEFS WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 
 # Stable loader, loaded once by the Lua hook; hot-reloads the payload.
 add_library(DcsQvCull SHARED src/loader.cpp)
 target_compile_options(DcsQvCull PRIVATE ${DCSQV_OPTS})
 target_compile_definitions(DcsQvCull PRIVATE ${DCSQV_DEFS})
+target_link_options(DcsQvCull PRIVATE /Brepro)
 
 # Binaural audio (docs/BINAURAL_AUDIO.md): the interface headers live in native/binaural/include (no copies).
 # BinauralCore (the HRTF renderer, native/binaural/src) is built here from its sources as a static library and linked
@@ -30,7 +33,7 @@ add_library(DcsQvBinauralCore STATIC
   ${DCSQV_BINAURAL_DIR}/src/kernels_sse.cpp
   ${DCSQV_BINAURAL_DIR}/src/kernels_avx2.cpp)
 target_include_directories(DcsQvBinauralCore PUBLIC ${DCSQV_BINAURAL_INCLUDE})
-target_compile_options(DcsQvBinauralCore PRIVATE /W4 /O2 /fp:precise /EHsc /permissive-)
+target_compile_options(DcsQvBinauralCore PRIVATE /W4 /O2 /fp:precise /EHsc /permissive- /Brepro)
 target_compile_definitions(DcsQvBinauralCore PRIVATE ${DCSQV_DEFS})
 # kernels_avx2.cpp is the only file built with /arch:AVX2; it runs only when the CPU reports AVX2 and FMA.
 set_source_files_properties(${DCSQV_BINAURAL_DIR}/src/kernels_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
@@ -39,7 +42,10 @@ set_source_files_properties(${DCSQV_BINAURAL_DIR}/src/kernels_avx2.cpp PROPERTIE
 set(DCSQV_PAYLOAD_SOURCES src/main.cpp src/d3d_vtbl.c)
 if(EXISTS ${DCSQV_HRTF_DEFAULT})
   file(TO_CMAKE_PATH "${DCSQV_HRTF_DEFAULT}" DCSQV_HRTF_DEFAULT_RC)
-  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/payload_hrtf.rc "HRTF_DEFAULT RCDATA \"${DCSQV_HRTF_DEFAULT_RC}\"\n")
+  # Written only when its text changes (a rewrite at every configure relinked the payload); the set itself is a
+  # dependency of the resource, so a changed .dcshrtf is embedded again.
+  file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/payload_hrtf.rc CONTENT "HRTF_DEFAULT RCDATA \"${DCSQV_HRTF_DEFAULT_RC}\"\n" @ONLY)
+  set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/payload_hrtf.rc PROPERTIES OBJECT_DEPENDS ${DCSQV_HRTF_DEFAULT})
   list(APPEND DCSQV_PAYLOAD_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/payload_hrtf.rc)
 endif()
 add_library(DcsQvCullPayload SHARED ${DCSQV_PAYLOAD_SOURCES})
@@ -47,6 +53,7 @@ target_compile_options(DcsQvCullPayload PRIVATE ${DCSQV_OPTS} /bigobj)  # main.c
 target_compile_definitions(DcsQvCullPayload PRIVATE ${DCSQV_DEFS})
 target_include_directories(DcsQvCullPayload PRIVATE ${DCSQV_BINAURAL_INCLUDE})
 target_link_libraries(DcsQvCullPayload PRIVATE DcsQvBinauralCore)
+target_link_options(DcsQvCullPayload PRIVATE /Brepro)
 target_compile_definitions(DcsQvCullPayload PRIVATE DCSQV_HAVE_BINAURAL_CORE=1)
 
 # Offline checks (frustum decoding, Scene.dll export lookup, timer cache, partition boost, kill switch, suite report).

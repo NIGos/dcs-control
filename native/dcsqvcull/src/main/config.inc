@@ -285,7 +285,7 @@ struct Config {
   bool fixationDepthDump = false; // [Perception] FixationDepthDump: one window as a PGM in the dev folder
   std::wstring fixationTestGaze;  // [Perception] FixationDepthTestGaze: "x,y" tangents written as GazeOut if absent
   bool farDepthExport = false;    // [Perception] FarDepthExport: focus views' depth to Quad Views (when it wants them)
-  int farDepthSlots = 2;          // [Perception] FarDepthExportSlots: copies per focus view (1 or 2)
+  int farDepthSlots = 1;          // [Perception] FarDepthExportSlots: copies per focus view (1 or 2)
   int farDepthLogProj = 0;        // [Perception] FarDepthLogProj: log the focus views' P20/P21 for N frames
   bool farDepthPreOverlay = true; // [Perception] FarDepthPreOverlay: each focus view's colour before the overlays
   int farDepthCoverageMode = 1;   // [Perception] FarDepthCoverageMode: hdr (1, the default; per-view fallback to overlay) or overlay (0)
