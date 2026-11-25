@@ -182,6 +182,11 @@ public:
                 float w1, float* outLR);
     // Clears a slot (the voice ended). Bounded, no allocation.
     void ResetSource(std::uint32_t slot);
+    // Each ear's total delay (samples at the device rate: the onset delay, the ITD and parallax, plus the 12 samples of
+    // the fractional delay's look-ahead) a slot reached at the end of its last Render call: out[0] left, out[1] right.
+    // The audio module delays what it adds next to the HRTF output (a wide sound's side) by it, so both arrive together
+    // at each ear. False (out untouched) for a slot out of range or without state (reset, refused, never rendered).
+    bool SourceDelays(std::uint32_t slot, float out[2]) const;
     void EndBlock();
 
     // ---- any thread -----------------------------------------------------------------------------------------------

@@ -491,6 +491,16 @@ void Renderer::ResetSource(std::uint32_t slot) {
     if (slot < m.cfg.maxSources && m.block) m.ResetSlot(m.slots[slot]);
 }
 
+bool Renderer::SourceDelays(std::uint32_t slot, float out[2]) const {
+    const Impl& m = *impl_;
+    if (slot >= m.cfg.maxSources || !m.block || !out) return false;
+    const Slot& s = m.slots[slot];
+    if (!s.hasState || !std::isfinite(s.delay[0]) || !std::isfinite(s.delay[1])) return false;
+    out[0] = s.delay[0];
+    out[1] = s.delay[1];
+    return true;
+}
+
 bool Renderer::Render(std::uint32_t slot, const SourceUpdate& update, const MonoInput& input, std::uint32_t frames,
                       float w0, float w1, float* outLR) {
     Impl& m = *impl_;
