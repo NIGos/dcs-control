@@ -3973,6 +3973,7 @@ void FarCapture(const Run& r, int idx, bool seaEnd) {
   // the DSV's slice into our subresource 0.
   c->CopySubresourceRegion(t, 0, 0, 0, 0, r.tex, D3D11CalcSubresource(0, r.slice, r.mipLevels), nullptr);
   fdexport::g_copies++;
+  fdexport::g_copiedUnpushed[idx - 2] = true;  // until its push is accepted (fdexport::EndFrame's one-slot guard)
   if (check) {
     fdexport::g_stateChecks++;
     if (!(ReadBind(c, s.ctx1) == before)) fdexport::g_stateDiffs++;

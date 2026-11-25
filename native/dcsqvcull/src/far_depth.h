@@ -34,8 +34,13 @@
 //     the DSV's subresource, NULL), whole subresource (no source box on
 //     depth-stencil). Ours: same typeless format and size, ArraySize 1,
 //     MipLevels 1, DEFAULT, BIND_SHADER_RESOURCE, single-sample. A ring of
-//     [Perception] FarDepthExportSlots (2, or 1 under VRAM pressure) per view,
-//     by engine frame. No binding is read or changed (state checked in
+//     [Perception] FarDepthExportSlots (1 since 0.7.1, or 2) per view, by
+//     engine frame. One is enough: Quad Views reads the copy at xrEndFrame on
+//     the same immediate context, before the next frame's copy is recorded,
+//     and consumes each push (only a fresh push is read). Guard: with one
+//     slot, a frame that copied a view but did not get its push accepted
+//     (rejected, dropped at the frame end) releases Quad Views' references at
+//     its end, so no latch of Quad Views points at a copy with newer bytes. No binding is read or changed (state checked in
 //     FixationDepthVerify mode and in the tests). R91 (R90 phase 2): a view's
 //     slots are made in one go at its first copy after a size or format change
 //     (one creation stall on the render thread, not a second one a frame later).
@@ -193,7 +198,7 @@ bool HdrFloatFormat(DXGI_FORMAT f) {
          f == DXGI_FORMAT_R32G32B32_FLOAT || f == DXGI_FORMAT_R11G11B10_FLOAT || f == DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
 }
 std::atomic<bool> g_stopping{false};  // uninstall in progress: no new copy or push
-std::atomic<int> g_slots{2};          // [Perception] FarDepthExportSlots (1-2)
+std::atomic<int> g_slots{1};          // [Perception] FarDepthExportSlots (1-2)
 std::atomic<int> g_logProjLeft{0};    // [Perception] FarDepthLogProj frames left
 // Uninstall -> render thread: release the layer's references and our copies.
 std::atomic<bool> g_releaseReq{false}, g_releaseDone{false};
@@ -218,7 +223,8 @@ std::atomic<uint64_t> g_frames{0}, g_wantedFrames{0}, g_noLayer{0}, g_noExport{0
     g_omLost{0}, g_preCopies{0}, g_prePushed{0}, g_preMissing{0}, g_preSkipMsaa{0}, g_preSkipFormat{0},
     g_preNoViewport{0}, g_preArms{0}, g_dropped{0}, g_postCopies{0}, g_postSkipWide{0}, g_postMissing{0},
     g_hdrPre{0}, g_hdrPost{0}, g_hdrNoSource{0}, g_hdrMismatch{0}, g_hdrNoPost{0}, g_hdrLearns{0}, g_hdrFallback{0},
-    g_hdrBadFormat{0}, g_hdrToOverlay{0}, g_hdrToHdr{0}, g_hdrOverlayFrames{0}, g_hdrNoPair[4] = {};
+    g_hdrBadFormat{0}, g_hdrToOverlay{0}, g_hdrToHdr{0}, g_hdrOverlayFrames{0}, g_hdrNoPair[4] = {},
+    g_notPushedReleases{0};
 std::atomic<uint32_t> g_lastMask{0};
 std::atomic<bool> g_loggedFirst{false};
 std::mutex g_statMutex;
@@ -431,6 +437,9 @@ void ClearPend(PendingPush& p) {
   p = PendingPush{};
 }
 PendingPush g_pend[2];
+// The view's copy of this frame was made and its push not (yet) accepted: with one slot, Quad Views' latch of an
+// earlier frame points at a texture that now holds newer bytes (EndFrame's guard).
+bool g_copiedUnpushed[2] = {};
 ID3D11Resource* g_target[2] = {};  // learned colour target per focus view (identity only)
 bool g_preLogged[2] = {};
 
@@ -898,6 +907,7 @@ void DoPush(int view) {
   g_pushes++;
   if (res == DCSVR_DEPTH_PUSH_ACCEPTED) {
     g_accepted++;
+    g_copiedUnpushed[view - 2] = false;
     NoteHeld(d.generation);
   } else {
     g_rejected[std::min<uint32_t>(res, 7)]++;
@@ -989,6 +999,7 @@ void ResetFrameState() {
   g_useClock = 0;
   for (KnownCb& k : g_known) k = KnownCb{};
   for (PendingPush& p : g_pend) ClearPend(p);
+  g_copiedUnpushed[0] = g_copiedUnpushed[1] = false;
   DropFrameModule();  // R91
   g_target[0] = g_target[1] = nullptr;
   g_preLogged[0] = g_preLogged[1] = false;
@@ -1004,6 +1015,14 @@ void EndFrame() {
     if (p.on) g_dropped++;
     ClearPend(p);
   }
+  // One slot: a copy whose push was not accepted (rejected, or dropped above) overwrote the texture an earlier
+  // accepted push left latched in Quad Views. Quad Views reads only fresh pushes, so the latch is never read; its
+  // references are let go anyway, after this frame's xrEndFrame, so none points at newer bytes.
+  if ((g_copiedUnpushed[0] || g_copiedUnpushed[1]) && g_heldN && std::clamp(g_slots.load(), 1, kMaxSlots) == 1) {
+    g_notPushedReleases++;
+    ReleaseHeld();
+  }
+  g_copiedUnpushed[0] = g_copiedUnpushed[1] = false;
   g_frames++;
   if (g_mask) {
     g_wantedFrames++;

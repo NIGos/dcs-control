@@ -497,7 +497,9 @@ void LoadConfig(bool initial) {
   c.fixationDepthVerify = GetPrivateProfileIntW(L"Perception", L"FixationDepthVerify", 0, ini.c_str());
   c.fixationDepthDump = GetPrivateProfileIntW(L"Perception", L"FixationDepthDump", 0, ini.c_str()) != 0;
   c.farDepthExport = GetPrivateProfileIntW(L"Perception", L"FarDepthExport", 0, ini.c_str()) != 0;
-  c.farDepthSlots = GetPrivateProfileIntW(L"Perception", L"FarDepthExportSlots", 2, ini.c_str()) == 1 ? 1 : 2;
+  // 0.7.1: one copy per view by default (about 140 MB less VRAM). Quad Views reads the copy at xrEndFrame on DCS's own
+  // immediate context, before the next frame's copy is recorded there; 2 keeps a second ring as a reserve.
+  c.farDepthSlots = GetPrivateProfileIntW(L"Perception", L"FarDepthExportSlots", 1, ini.c_str()) == 2 ? 2 : 1;
   c.farDepthLogProj = static_cast<int>(GetPrivateProfileIntW(L"Perception", L"FarDepthLogProj", 0, ini.c_str()));
   c.farDepthLogProj = (std::max)(0, (std::min)(1000, c.farDepthLogProj));
   c.farDepthPreOverlay = GetPrivateProfileIntW(L"Perception", L"FarDepthPreOverlay", 1, ini.c_str()) != 0;

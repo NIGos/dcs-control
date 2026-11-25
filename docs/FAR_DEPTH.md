@@ -299,8 +299,11 @@ the flags, the Quad Views exports and the rejection codes.
    - `generation` is an opaque id: change it on payload load, device change and texture recreation. It need not grow
      (a reloaded payload may restart it); both focus views of a frame must carry the same one.
    - `fovTan` is DcsFov, computed from gProj: it carries the jitter and is not used as the unjittered centre.
-4. Keep a ring of 2 slots per view, alternating by engine frame; 1 slot is acceptable under VRAM pressure. The copy
-   and Quad Views' read are recorded on the same immediate context in order, so no fence is needed.
+4. Keep one slot per view (`[Perception] FarDepthExportSlots=1`, the default since 0.7.1; 2 alternates two by engine
+   frame). The copy and Quad Views' read are recorded on the same immediate context in order (the read at xrEndFrame,
+   before the next frame's copy), and Quad Views reads only a push of the current frame, so no fence is needed. With
+   one slot, a frame whose copy was made but whose push was not accepted releases Quad Views' references at its end,
+   so no latch points at a copy with newer bytes.
 5. Never push a view whose identity is uncertain: no learned CopyToHMDPass ordinal, a MatchFov mismatch, a missed arm,
    the size-rank fallback, or MSAA. Not pushing skips the frame for both eyes: Quad Views bridges up to 2 such frames
    with its held fields, so an occasional skip does not show.
