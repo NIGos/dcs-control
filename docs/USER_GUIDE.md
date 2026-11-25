@@ -38,7 +38,7 @@
 ## New in 0.7.1
 
 - **3D headphone audio** (Audio page, experimental, off by default): real 3D sound for headphones, in VR and on a monitor. See [Audio](#audio).
-- **Cleaner generated frames** (Frame generation page, Image quality > **Fine-tune**, experimental, NVIDIA only, all off by default, not flown yet): five ways to clean up generated frames. See [Frame generation](#frame-generation).
+- **Cleaner generated frames** (Frame generation page, Image quality > **Fine-tune**, experimental, NVIDIA only, all off by default): four options for cleaner edges around your aircraft in the external view; little effect in the cockpit. See [Frame generation](#frame-generation).
 - **Multi-threading without driver support** is on by default with AMD graphics (GitHub #27); NVIDIA PCs keep their choice.
 - **Ultraleap hand tracking** no longer crashes DCS at start with Quad Views and frame generation (GitHub #35). See the [release notes](RELEASE_NOTES.md).
 
