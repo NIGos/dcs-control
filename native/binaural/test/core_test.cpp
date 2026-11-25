@@ -504,7 +504,7 @@ static void TestNearField(const std::vector<std::uint32_t>& file) {
         CHECKM(std::fabs(got - model) <= 1.0, "%.2f m: %.2f vs %.2f", dist, got, model);
     }
     // The shelves add ILD, not level (NearFieldShelfLevel): both ears' 60-250 Hz power at 0.25 m, 90 degrees with the
-    // near field on equals it with the near field off within 1 dB (the +8 / -4 dB shelves alone added 5 dB there).
+    // near field on equals it with the near field off within 1 dB (the shelf is level-neutral; unscaled shelves added 5 dB there).
     auto lowPow = [&](float dist) {
         const Vec out = RenderStatic(rig.r, 0, FromAzEl(-90, 0), dist, noise, 480);
         const double l = BandRatioDb(Channel(out, 0), noise, 48000, 60, 250, 1024), r = BandRatioDb(Channel(out, 1), noise, 48000, 60, 250, 1024);

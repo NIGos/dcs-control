@@ -83,7 +83,7 @@ off or in perception-only mode, since audio is not an engine optimization.
 | **Fractional delay (4-tap Lagrange/Thiran), changed per sample** | Smooth ITD changes with head motion; no zipper noise. |
 | **Direct-form FIR, AVX2/FMA** | Any block length (WASAPI asks for a varying number of frames), no FFT framing latency. At 128 taps it is cheaper than partitioned convolution: about 3 µs per source per 10 ms block. |
 | **Crossfade on every parameter change** | Filters: old and new FIR both run and crossfade over 64 frames when the direction moves more than 0.5°. Gains and shelves: linear ramps. HRTF swap: 10 ms crossfade per source. Every crossfade and delay glide keeps its length across calls, so short calls never shorten it. Ownership: one-block crossfade with DCS's own output, exact at both ends (hook spec §5.2). |
-| **Near field: per-ear parallax (< 2 m) + first-order ILD shelf (< 1 m)** | Cockpit sources are 0.3 to 1 m away; far-field HRTFs measured at 1.2 m put them in the wrong place per ear. The Brungart-style shelf adds the close-range level difference (up to +12 dB at 0.25 m, 90°). |
+| **Near field: per-ear parallax (< 2 m) + first-order ILD shelf (< 1 m)** | Cockpit sources are 0.3 to 1 m away; far-field HRTFs measured at 1.2 m put them in the wrong place per ear. The Brungart-style shelf adds the close-range level difference (up to 12 dB more ILD at 0.25 m, 90°), level-neutral: its two ears' gains are scaled to a mean power of 1 (+2.75 / -9.25 dB there), so the loudness stays DCS's own. |
 | **Diffuse-field equalised, front normalised to 0 dB** | The KU100 colouring stays neutral on average, and a sound from the front keeps DCS's level exactly (the mono gain rule, hook spec §5.1). |
 | **No distance, doppler or filter of our own** | DCS already applied them once; applying them twice would change DCS's mix. The only distance term is the late-translation correction `r_dcs / r_now` for sources under 1.5 m, clamped to ±3 dB. |
 
@@ -257,7 +257,7 @@ Pass: `0 failure(s)`.
 | A4 | 360°/s horizontal sweep of a 1 kHz sine and of noise | no sample-to-sample step larger than the input's own maximum step × 1.05 plus 1e-4; band level monotonic in the lateral angle (±0.5 dB) |
 | A5 | Energy, front | white noise from the front: output per ear 0 dB ± 0.5 dB (front-normalised set; a measured set over 200 Hz-8 kHz, the converter's band) |
 | A6 | Front/back | KU100 front vs back, 2-8 kHz band level difference ≥ 3 dB, as in the source set ±1 dB |
-| A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; parallax: a source 0.3 m at 45° right gets each ear's own direction (the near, right ear sees it at < 45°, the left ear at > 45°) |
+| A7 | Near field | ILD at 0.25 m, 90° minus ILD at 2 m, 90°: matches the shelf model ±1 dB; the level with near field on vs off within 1 dB (the shelf is level-neutral); parallax: a source 0.3 m at 45° right gets each ear's own direction (the near, right ear sees it at < 45°, the left ear at > 45°) |
 | A7b | Near field from the set's distance | sets measured at 1.0, 1.2, 1.5 and 5 m render bit-identically (near field on, 0.1-1.8 m); a set measured at 0.5 m: a source at 0.5 m equals near field off (< 1e-4 RMS), ILD 0.25 m minus 0.5 m matches the shelf model from 0.5 m ±1 dB, 0.8 m minus 0.5 m 0 ± 0.5 dB, parallax from the 0.5 m sphere ± 0.5°; sets at 0.10 and 0.15 m render bit-identically (the floor), finite with the largest ears, 0.2 m differs |
 | A8 | Latency | impulse from the front appears at sample `round(onset delay)` ± 1 with no block delay, for block sizes 1, 7, 480, 1056, 4096 |
 | A9 | Block-size invariance | the same input rendered with blocks of 480 and with random sizes 1-2048: identical within 1e-5 |
@@ -415,7 +415,8 @@ wingman passing around, then a short flight with ATC/wingman radio.
 
 **Where to look:** every `audio:` line is in `DcsQvCull.log` (Saved Games, `Scripts\DcsQvCull`). The sound log
 `audio_voices.csv` is in the same folder: one row per 3D voice per second, columns
-`time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR`, listener frame (x forward, y up, z right, metres).
+`time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags`, listener frame (x forward, y up, z right, metres); `flags` are the
+voice's meta flags (8 under 1.5 m, 32 a stereo wave, 64 auto_width: added, so 40 is a close stereo wave).
 
 | # | What to do | What to listen for (pass) | Log proof (pass) |
 |---|---|---|---|
