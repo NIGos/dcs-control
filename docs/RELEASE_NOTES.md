@@ -1,3 +1,7 @@
+# Unreleased
+
+**One image of distant lights (experimental, NVIDIA frame generation).** A new setting under Frame generation > Image quality > **Fine-tune**, off by default and changeable in flight. At night a far aircraft seen only as its lights showed two copies of each light in every generated frame. With it, a small bright light on a dark sky is followed from one real frame to the next and drawn once, where it is in between; a light it cannot follow is shown from the nearer real frame only. Stars, runway lights, the HUD and anything by day are left as they are. Not flown yet: please tell us on GitHub what you see.
+
 # 0.7.1 preview
 
 **3D headphone audio (experimental).** A new **Audio** page, off by default. DCS's left/right panning is replaced by real 3D sound for headphones: engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head.

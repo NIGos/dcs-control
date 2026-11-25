@@ -1,0 +1,2374 @@
+One image of a distant light (DCS Control, 2026-11-25): [ofxr] light_single_image, quality bit 16 (kFgQualityLightSingle),
+shader bit 21, live like the other quality keys (set_fg_quality); NVIDIA path with DCS's motion vectors only.
+- The pilot's night complaint (validation round 08): a far aircraft seen only as its lights (a spot of ~3 px, ~79 codes
+  on a sky of 0-1) came out of every generated frame as two copies 5-7 px apart (ghostW 0.98, real frames 0.18). A
+  light drawn after DCS's G-buffer has no MV of its own and the optical flow finds no match for it on black, so the
+  composition cross-faded the two real frames there.
+- Step 1, in the _light or _extras composition of output 0 (dcs_motion_pixel): past the gate below, where
+  the brighter of the MVs' two samples sits on a small bright spot of its frame (a strict 3x3 maximum, a ring at 2, 3, 4
+  or 6 px with 7 of 8 samples below 35 % of the peak and their mean below 64 codes, the other frame at the very same
+  place below 92 % of it: not still content), the spot is appended to the view's list (64 entries; after the counters in
+  the counters buffer, 2208 bytes in all; cleared per pair by DcsMotionResampleCS, DcsMotionParameters flags bit 2): its
+  place to an eighth of a pixel (3x3 centroid), frame, size, colour and peak.
+- Step 2, LightMatchVS (one instance per entry, nothing rasterised): each spot's best partner in the other frame (within
+  48 px, peak ratio 0.5-2, similar chroma; cost distance / 48 + 2 |log2 ratio| + chroma), the first of repeated
+  entries, and a flag for a spot the MVs carry (the other frame shows it at 75 % of the peak where the MVs put it: stars
+  with the sky, runway lights with the terrain), which is then left alone.
+- Step 3, LightRegionVS / LightCompositePS after the view's composition, into the render target bound (3X: per output):
+  a quad per light; a sample on a listed spot of its frame is replaced by the other frame's sample (the darker where
+  both are), a pair whose spots are each other's best is drawn once where it is at the instant (the two spots moved
+  along their own displacement; where the two samples disagree, around the light, the darker, so nothing but the light
+  moves), the pixels along its path in one-surface cells are composed along the MVs (a copy the flow half followed); a
+  spot without a partner is kept from the nearer real frame only (the current one at the middle). Every other pixel is
+  discarded: the composition's. The cockpit mask's pixels are left out; the HUD symbology is put back after it.
+- Compositions: with this key alone (no other quality key) a pair binds _light twins of the MV compositions
+  (XRFG_FG_EXTRAS=2: the spot detection alone, every other option compiled out), not the full _extras twins, which cost
+  +0.27 ms at 2X; with other keys the _extras twins carry it too. Unmatched spots also look for the other frame's light
+  within 3 px of where the MVs put them (copies that overlap: a light moving little against what is behind it), drawn as
+  a pair when found. Detection gate: the MVs' two samples 12 codes apart, the brighter at least 40 and twice the dimmer
+  + 12, the dimmer at most 40 (dark surroundings), then 4 samples 3 px out below 60 % of the peak before the 3x3 test.
+- Pipelines: the two passes and the _light twins ride with the _extras twins (made with them, in the background on first
+  use; none with the key off); with the key off every composition and every command is 0125's (the resample's u2 stays
+  the null view and its clear bit off). (Checked on the 0.7.1 development series, before its occlusion fill was
+  removed: 80 images of the DCS motion fixtures, keys 0 and 15, byte for byte against its 0125 build.)
+- GPU per pair at 5424 x 5356 x 2 (XRFG_TEST_FG_LIGHTS_BENCH, night, two lights): +0.12 ms at 2X, +0.16 ms at 3X (the
+  detection in the composition about +0.06 / +0.10 ms, the passes and their UAV barriers about +0.06 ms); a textured
+  scene without lights (XRFG_TEST_FG_TRIPLE_BENCH, quality 16) +0.14 ms at 2X. About 2 KB of buffer, no image.
+- Live contract DCSC-OFXR-LIVE-FG/3 (embedded_control.cpp): DCS Control writes light_single_image live only to a layer
+  with it.
+- tests/fg_lights.inc (XRFG_TEST_FG_LIGHTS, NVIDIA hardware): see the file's head; FgSettings::light_draws and
+  D3D12FrameSynthesizer::light_list_for_tests for the tests; XRFG_TEST_FG_LIGHTS_BENCH (label bench) the cost at
+  5424 x 5356 x 2, 2X and 3X. tests/fg_scene.inc: the synthetic flight scene those fixtures draw in (MVs, classes,
+  cockpit mask), the scene part of the development series' engine-data fixtures, removed with its occlusion fill.
+- The light list follows the composition's counters at byte 128 (kLightListBase, repeated in frame_synthesis.hlsl
+  and dcs_motion.hlsl).
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7dd21da..258cfb7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -359,6 +359,65 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             VERBATIM)
+         list(APPEND XRFG_FG_EXTRAS_HEADERS ${XRFG_EXTRAS_GROUP_HEADERS})
+     endforeach()
++    # DCS Control (0126): the MV compositions once more with light_single_image's
++    # spot detection alone (XRFG_FG_EXTRAS=2, suffix _light), bound for a pair
++    # whose only quality bit is that key.
++    foreach(XRFG_LIGHT_GROUP _masked_motion _masked_depth_motion)
++        if(XRFG_LIGHT_GROUP MATCHES "_depth")
++            set(XRFG_LIGHT_DEPTH 1)
++        else()
++            set(XRFG_LIGHT_DEPTH 0)
++        endif()
++        set(XRFG_LIGHT_GROUP_HEADERS)
++        set(XRFG_LIGHT_GROUP_COMMANDS)
++        foreach(XRFG_INDEX RANGE 0 ${XRFG_NVIDIA_COMPOSITION_VARIANT_LAST} 2)
++            math(EXPR XRFG_NAME_INDEX "${XRFG_INDEX} + 1")
++            list(GET XRFG_NVIDIA_COMPOSITION_VARIANTS ${XRFG_INDEX} XRFG_ENTRY)
++            list(GET XRFG_NVIDIA_COMPOSITION_VARIANTS ${XRFG_NAME_INDEX} XRFG_NAME)
++            set(XRFG_HEADER "${XRFG_GENERATED_SHADER_DIR}/${XRFG_NAME}${XRFG_LIGHT_GROUP}_light.hpp")
++            list(APPEND XRFG_LIGHT_GROUP_HEADERS "${XRFG_HEADER}")
++            list(APPEND XRFG_LIGHT_GROUP_COMMANDS
++                COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E ${XRFG_ENTRY}
++                    /D XRFG_FG_EXTRAS=2 /D XRFG_COCKPIT_MASK=1 /D XRFG_COCKPIT_DEPTH=${XRFG_LIGHT_DEPTH} /D XRFG_DCS_MOTION=1
++                    /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++                    /Fh "${XRFG_HEADER}" /Vn g_xrfg_${XRFG_NAME}${XRFG_LIGHT_GROUP}_light
++                    "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl")
++        endforeach()
++        add_custom_command(
++            OUTPUT ${XRFG_LIGHT_GROUP_HEADERS}
++            COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
++            ${XRFG_LIGHT_GROUP_COMMANDS}
++            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++            VERBATIM)
++        list(APPEND XRFG_FG_EXTRAS_HEADERS ${XRFG_LIGHT_GROUP_HEADERS})
++    endforeach()
++    # DCS Control (0126): light_single_image's passes after the composition
++    # (frame_synthesis.hlsl: LightMatchVS, LightRegionVS, LightCompositePS),
++    # with the mask, the MVs and the extras compiled in; made with the
++    # _extras compositions (on first use), never with the key off.
++    set(XRFG_LIGHT_HEADERS
++        "${XRFG_GENERATED_SHADER_DIR}/light_match_vertex_shader.hpp"
++        "${XRFG_GENERATED_SHADER_DIR}/light_region_vertex_shader.hpp"
++        "${XRFG_GENERATED_SHADER_DIR}/light_composite_pixel_shader.hpp")
++    set(XRFG_LIGHT_DEFINES /D XRFG_COCKPIT_MASK=1 /D XRFG_COCKPIT_DEPTH=0 /D XRFG_DCS_MOTION=1 /D XRFG_FG_EXTRAS=1)
++    add_custom_command(
++        OUTPUT ${XRFG_LIGHT_HEADERS}
++        COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E LightMatchVS ${XRFG_LIGHT_DEFINES}
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_GENERATED_SHADER_DIR}/light_match_vertex_shader.hpp" /Vn g_xrfg_light_match_vertex_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E LightRegionVS ${XRFG_LIGHT_DEFINES}
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_GENERATED_SHADER_DIR}/light_region_vertex_shader.hpp" /Vn g_xrfg_light_region_vertex_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E LightCompositePS ${XRFG_LIGHT_DEFINES}
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_GENERATED_SHADER_DIR}/light_composite_pixel_shader.hpp" /Vn g_xrfg_light_composite_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++        VERBATIM)
++    list(APPEND XRFG_FG_EXTRAS_HEADERS ${XRFG_LIGHT_HEADERS})
+     # DCS Control (0049): the HUD symbology's passes (hud_symbology.hlsl),
+     # run only with [ofxr] hud_symbology for a pair whose frames carry it.
+     set(XRFG_HUD_SYMBOLOGY_HEADERS
+@@ -1965,6 +2024,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         add_test(NAME xrfg_d3d12_dcs_motion COMMAND xrfg_d3d12_history_tests)
+         set_tests_properties(xrfg_d3d12_dcs_motion PROPERTIES
+             ENVIRONMENT "XRFG_TEST_DCS_MOTION=1" TIMEOUT 600 SKIP_RETURN_CODE 77)
++        # DCS Control (0126): light_single_image's fixtures (a light seen from
++        # afar at night: no MVs, two copies in a cross-fade), key off and on,
++        # 2X, 3X and an sRGB view, with stars, a runway, a terrain edge, a HUD
++        # and a day glint; NVIDIA hardware, skipped without one.
++        add_test(NAME xrfg_d3d12_fg_lights COMMAND xrfg_d3d12_history_tests)
++        set_tests_properties(xrfg_d3d12_fg_lights PROPERTIES
++            ENVIRONMENT "XRFG_TEST_FG_LIGHTS=1" TIMEOUT 900 SKIP_RETURN_CODE 77)
+         # DCS Control (0038): [ofxr] parallel_eye_synthesis (a synthesis queue
+         # per eye swapchain) against the shared queue, every byte of every
+         # output, then back to back; on NVIDIA hardware, skipped without one.
+@@ -1982,7 +2048,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         # required), labelled bench: `ctest -L bench` runs them, a build
+         # leaves them out (-LE bench). Skipped without NVIDIA hardware.
+         # DCS Control (0059): and WARM_ONE, adaptive cadence's 1X.
+-        foreach(XRFG_BENCH PARALLEL_EYES DCS_MOTION COCKPIT_DEPTH OCCLUSION TRIPLE CURSOR WARM_ONE FOVEATED)
++        # DCS Control (0126): and FG_LIGHTS, light_single_image's cost.
++        foreach(XRFG_BENCH PARALLEL_EYES DCS_MOTION COCKPIT_DEPTH OCCLUSION TRIPLE CURSOR WARM_ONE FOVEATED FG_LIGHTS)
+             string(TOLOWER "${XRFG_BENCH}" XRFG_BENCH_NAME)
+             add_test(NAME xrfg_d3d12_bench_${XRFG_BENCH_NAME} COMMAND xrfg_d3d12_history_tests)
+             set_tests_properties(xrfg_d3d12_bench_${XRFG_BENCH_NAME} PROPERTIES
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+index eceac16..1c981f2 100644
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -387,7 +387,15 @@ inline constexpr std::uint32_t kFgQualityMaskBand = 4U;
+ // agreement, 0057's still-content guard) on encoded values on an sRGB view, as
+ // on a UNORM one (the same values there).
+ inline constexpr std::uint32_t kFgQualityHudGuard = 8U;
+-inline constexpr std::uint32_t kFgQualityAll = 15U;
++// DCS Control (0126): one image of a light (light_single_image). A small
++// bright spot on dark surroundings that the MVs' two samples disagree on (a
++// light drawn after the G-buffer: no MV of its own, and the flow finds no
++// match for it on black) is found in each real frame, matched with the other
++// frame's spot, and drawn once where it is at the synthetic's instant after
++// the composition, both frames' copies taken out; a spot without a match is
++// kept from the nearer real frame alone. With DCS's MVs (dcs_motion) only.
++inline constexpr std::uint32_t kFgQualityLightSingle = 16U;
++inline constexpr std::uint32_t kFgQualityAll = 31U;
+ 
+ 
+ // Foveated layers: the Waits a command queue already has queued, by fence.
+@@ -884,6 +892,11 @@ public:
+         std::uint32_t timeout_milliseconds) noexcept;
+ 
+     [[nodiscard]] HRESULT wait_for_idle() noexcept;
++    // DCS Control (0126), tests: the light list (light_single_image) as the
++    // last pair left it, words from the counters buffer's list (per view: the
++    // count, three words of padding, then four words per entry). Waits for the
++    // synthesis queue; empty without the list.
++    [[nodiscard]] std::vector<std::uint32_t> light_list_for_tests() noexcept;
+ 
+     // DCS VR Control (0008): the runtime's visibility mask
+     // (XR_KHR_visibility_mask, VISIBLE_TRIANGLE_MESH) for view `view` (0, 1):
+@@ -969,6 +982,9 @@ public:
+         bool extras_building{};
+         std::uint64_t extras_build_us{};
+         std::uint64_t extras_binds{};
++        // DCS Control (0126): light_single_image's passes recorded so far (one
++        // per view and output of a pair that carried the light list).
++        std::uint64_t light_draws{};
+     };
+     [[nodiscard]] FgSettings fg_settings() const noexcept;
+     // Foveated layers: the session's ledger of queued Waits (see
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index 10caae9..22921b0 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -321,11 +321,12 @@ struct FgQualityKey {
+     const wchar_t* name;
+     std::uint32_t bit;
+ };
+-inline constexpr std::array<FgQualityKey, 4> kFgQualityKeys{{
++inline constexpr std::array<FgQualityKey, 5> kFgQualityKeys{{
+     {L"dcs_motion_sky_occlusion", 1U},
+     {L"nvidia_edge_choice", 2U},
+     {L"dcs_motion_mask_band", 4U},
+     {L"dcs_motion_hud_guard", 8U},
++    {L"light_single_image", 16U}, // DCS Control (0126)
+ }};
+ [[nodiscard]] std::uint32_t read_fg_quality(
+     const std::filesystem::path& module_directory) noexcept;
+diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
+index a64d840..1f8247a 100644
+--- a/src/common/embedded_control.cpp
++++ b/src/common/embedded_control.cpp
+@@ -303,8 +303,10 @@ extern "C" __declspec(dllexport) int OFXR_LiveDiagVramV1() noexcept {
+ // marker): the quality keys set live, and each change armed swapchains no
+ // projection layer uses (a stall of the frame thread); 2 (0123): the quality
+ // keys set live on each synthesizer, no swapchain armed by the change. A later
+-// change of that contract raises the number; the text before it stays.
+-extern "C" __declspec(dllexport) const char OFXR_LiveFgContract[] = "DCSC-OFXR-LIVE-FG/2";
++// change of that contract raises the number; the text before it stays. 3
++// (0126): the quality keys include light_single_image
++// (LiveSettings.LightSingleInstalled).
++extern "C" __declspec(dllexport) const char OFXR_LiveFgContract[] = "DCSC-OFXR-LIVE-FG/3";
+ 
+ // Private, versioned POD ABI for the combined-module host regression harness.
+ extern "C" __declspec(dllexport) int OFXR_EmbeddedRequestV1(int enabled, int backend, int preset, int scale, int backward) noexcept {
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index d3588f2..79dbc1d 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -31,6 +31,26 @@
+ #include "cursor_arguments_shader.hpp"
+ #include "cursor_begin_shader.hpp"
+ #include "cursor_composite_pixel_shader.hpp"
++#include "light_match_vertex_shader.hpp" // DCS Control (0126)
++// DCS Control (0126): the MV compositions with the light key's detection alone.
++#include "nvidia_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_fast_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion_light.hpp"
++#include "nvidia_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion_light.hpp"
++#include "light_region_vertex_shader.hpp"
++#include "light_composite_pixel_shader.hpp"
+ #include "cursor_gate_shader.hpp"
+ #include "cursor_import_shader.hpp" // foveated layers, round 4
+ #include "cursor_motion_enlarged_shader.hpp" // foveated layers, round 8
+@@ -227,8 +247,14 @@ struct ExtrasShader {
+     const void* plain;
+     const void* extras;
+     SIZE_T extras_size;
++    // DCS Control (0126): the MV compositions' _light twin (light_single_image
++    // alone), null for the others.
++    const void* light{};
++    SIZE_T light_size{};
+ };
+ #define XRFG_EXTRAS_TWIN(name) ExtrasShader{name, name##_extras, sizeof(name##_extras)}
++#define XRFG_EXTRAS_TWIN_LIGHT(name) \
++    ExtrasShader{name, name##_extras, sizeof(name##_extras), name##_light, sizeof(name##_light)}
+ const std::array kExtrasShaders{
+     XRFG_EXTRAS_TWIN(g_xrfg_nvidia_synthesize_midpoint_pixel_shader),
+     XRFG_EXTRAS_TWIN(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader),
+@@ -254,24 +280,25 @@ const std::array kExtrasShaders{
+     XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth),
+     XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth),
+     XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth_motion),
+-    XRFG_EXTRAS_TWIN(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion)
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth_motion),
++    XRFG_EXTRAS_TWIN_LIGHT(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_motion)
+ };
+ #undef XRFG_EXTRAS_TWIN
++#undef XRFG_EXTRAS_TWIN_LIGHT
+ [[nodiscard]] const ExtrasShader* find_extras_shader(const void* plain) noexcept {
+     for (const ExtrasShader& shader : kExtrasShaders) {
+         if (shader.plain == plain) return &shader;
+@@ -649,14 +676,30 @@ constexpr UINT kQualityLinearInputBit = 1U << 17U;
+ constexpr UINT kQualityEdgeChoiceBit = 1U << 18U;
+ constexpr UINT kQualityMaskBandBit = 1U << 19U;
+ constexpr UINT kQualityHudGuardBit = 1U << 20U;
+-constexpr UINT kQualityShaderBits = 0x1FU << 16U;
++constexpr UINT kQualityLightSingleBit = 1U << 21U; // DCS Control (0126)
++constexpr UINT kQualityShaderBits = 0x3FU << 16U;
+ // The ini keys and the option bits are one list (implicit_layer::kFgQualityKeys).
+-static_assert(implicit_layer::kFgQualityKeys.size() == 4U &&
++static_assert(implicit_layer::kFgQualityKeys.size() == 5U &&
+     implicit_layer::kFgQualityKeys[0].bit == kFgQualitySkyOcclusion &&
+     implicit_layer::kFgQualityKeys[1].bit == kFgQualityEdgeChoice &&
+     implicit_layer::kFgQualityKeys[2].bit == kFgQualityMaskBand &&
+     implicit_layer::kFgQualityKeys[3].bit == kFgQualityHudGuard &&
+-    (kFgQualitySkyOcclusion | kFgQualityEdgeChoice | kFgQualityMaskBand | kFgQualityHudGuard) == kFgQualityAll);
++    implicit_layer::kFgQualityKeys[4].bit == kFgQualityLightSingle &&
++    (kFgQualitySkyOcclusion | kFgQualityEdgeChoice | kFgQualityMaskBand | kFgQualityHudGuard |
++        kFgQualityLightSingle) == kFgQualityAll);
++// DCS Control (0126): light_single_image's list, in the counters buffer after
++// the counters (frame_synthesis.hlsl kLightList*, dcs_motion.hlsl): per view
++// a 16-byte header (the count) and kLightCapacity records of 16 bytes. Only
++// the counters are copied back; the list never leaves the GPU. The resample
++// clears a view's count when DcsMotionParameters::flags has
++// kDcsMotionLightClearFlag.
++constexpr UINT kLightListBase = kDcsMotionCounterBytes;
++constexpr UINT kLightCapacity = 64;
++constexpr UINT kLightViewBytes = 16U + kLightCapacity * 16U;
++constexpr UINT kDcsMotionBufferBytes = kLightListBase + kMaxReprojectionViews * kLightViewBytes;
++constexpr UINT kDcsMotionLightClearFlag = 4U;
++static_assert(kLightListBase == 128U && kLightViewBytes == 1040U,
++    "frame_synthesis.hlsl and dcs_motion.hlsl repeat the light list's layout");
+ // The sky's MVs (the camera's motion at infinity, R70 T2) instead of its flow
+ // (the fixtures: a little closer to the true middle frame, and no worse).
+ constexpr bool kDcsMotionSkyDefault = true;
+@@ -1946,6 +1989,9 @@ struct D3D12FrameSynthesizer::Impl {
+     UINT dcs_motion_cell_code{};
+     UINT dcs_motion_test_bits{};
+     bool pair_motion_bound{};
++    // DCS Control (0126): this pair's MV views clear and fill the light list
++    // (light_single_image's key on, its passes made): draw_lights draws them.
++    bool pair_light{};
+     std::array<UINT, kMaxReprojectionViews> pair_motion_bits{};
+     std::uint64_t dcs_motion_next_order{1};
+     std::uint64_t dcs_motion_harvested_order{};
+@@ -1997,6 +2043,7 @@ struct D3D12FrameSynthesizer::Impl {
+         bits |= (q & kFgQualityEdgeChoice) != 0U ? kQualityEdgeChoiceBit : 0U;
+         bits |= (q & kFgQualityMaskBand) != 0U ? kQualityMaskBandBit : 0U;
+         bits |= (q & kFgQualityHudGuard) != 0U ? kQualityHudGuardBit : 0U;
++        bits |= (q & kFgQualityLightSingle) != 0U ? kQualityLightSingleBit : 0U; // DCS Control (0126)
+         return bits;
+     }
+     // DCS Control (0104): the quality bits next to the MVs' (apply_dcs_motion
+@@ -2026,6 +2073,12 @@ struct D3D12FrameSynthesizer::Impl {
+         D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+         ComPtr<ID3D12PipelineState> pipeline;
+         bool failed{};
++        // DCS Control (0126): light_single_image's passes ride with the twins
++        // (no plain pipeline): 0 the match, 1 the region; -1 a composition's.
++        int light{-1};
++        // DCS Control (0126): the composition's _light twin (the light key's
++        // detection alone), bound when that key is the pair's only one.
++        bool light_only{};
+     };
+     std::vector<ExtrasTwin> extras_twins;
+     [[nodiscard]] HRESULT create_composition_pipeline(
+@@ -2037,6 +2090,12 @@ struct D3D12FrameSynthesizer::Impl {
+                 twin.plain = static_cast<ID3D12PipelineState*>(*out);
+                 twin.description = *description;
+                 twin.description.PS = {shader->extras, shader->extras_size};
++                if (shader->light != nullptr) { // DCS Control (0126)
++                    ExtrasTwin light = twin;
++                    light.description.PS = {shader->light, shader->light_size};
++                    light.light_only = true;
++                    extras_twins.push_back(std::move(light));
++                }
+                 extras_twins.push_back(std::move(twin));
+             }
+         }
+@@ -2075,6 +2134,7 @@ struct D3D12FrameSynthesizer::Impl {
+     std::vector<std::thread> retired_extras_builds; // joined at the destructor
+     std::uint64_t extras_build_microseconds{};       // the last build's, once it is done
+     std::uint64_t extras_binds{};                    // compositions recorded with a twin (tests)
++    std::uint64_t light_draws{};                     // DCS Control (0126): light passes recorded (tests)
+     bool extras_build_started{};                     // the background build was started for these twins
+     [[nodiscard]] bool extras_twin_missing() const noexcept {
+         for (const ExtrasTwin& twin : extras_twins) {
+@@ -2146,29 +2206,92 @@ struct D3D12FrameSynthesizer::Impl {
+             extras_build.reset(); // no thread: the twins are made on first use, as in 0123
+         }
+     }
+-    [[nodiscard]] ID3D12PipelineState* extras_twin(ID3D12PipelineState* pipeline) noexcept {
++    // The twin at `index` once it is made, else null (DCS Control (0126):
++    // extras_twin's body, shared with the light passes).
++    [[nodiscard]] ID3D12PipelineState* twin_at(std::size_t index) noexcept {
++        ExtrasTwin& twin = extras_twins[index];
++        if (twin.pipeline == nullptr && !twin.failed && extras_build != nullptr &&
++            index < extras_build->descriptions.size()) {
++            // 0125: from the background build, or the plain pipeline until it is there.
++            const std::uint8_t state = extras_build->states[index].load(std::memory_order_acquire);
++            if (state == 0U) {
++                extras_build->urgent.store(static_cast<int>(index), std::memory_order_release);
++                return nullptr;
++            }
++            twin.pipeline = extras_build->pipelines[index];
++            twin.failed = state != 1U || twin.pipeline == nullptr; // the keys then do nothing here
++        } else if (twin.pipeline == nullptr && !twin.failed &&
++            FAILED(device->CreateGraphicsPipelineState(&twin.description, IID_PPV_ARGS(twin.pipeline.GetAddressOf())))) {
++            twin.failed = true; // the keys then do nothing for this composition
++        }
++        return twin.pipeline.Get();
++    }
++    [[nodiscard]] ID3D12PipelineState* extras_twin(ID3D12PipelineState* pipeline, bool light_only = false) noexcept {
+         if (pipeline == nullptr) return nullptr;
+         for (std::size_t index = 0; index < extras_twins.size(); ++index) {
+-            ExtrasTwin& twin = extras_twins[index];
+-            if (twin.plain.Get() != pipeline) continue;
+-            if (twin.pipeline == nullptr && !twin.failed && extras_build != nullptr &&
+-                index < extras_build->descriptions.size()) {
+-                // 0125: from the background build, or the plain pipeline until it is there.
+-                const std::uint8_t state = extras_build->states[index].load(std::memory_order_acquire);
+-                if (state == 0U) {
+-                    extras_build->urgent.store(static_cast<int>(index), std::memory_order_release);
+-                    return pipeline;
+-                }
+-                twin.pipeline = extras_build->pipelines[index];
+-                twin.failed = state != 1U || twin.pipeline == nullptr; // the keys then do nothing here
+-            } else if (twin.pipeline == nullptr && !twin.failed &&
+-                FAILED(device->CreateGraphicsPipelineState(&twin.description, IID_PPV_ARGS(twin.pipeline.GetAddressOf())))) {
+-                twin.failed = true; // the keys then do nothing for this composition
+-            }
+-            return twin.pipeline != nullptr ? twin.pipeline.Get() : pipeline;
++            if (extras_twins[index].plain.Get() != pipeline || extras_twins[index].light_only != light_only) continue;
++            ID3D12PipelineState* const twin = twin_at(index);
++            return twin != nullptr ? twin : pipeline;
+         }
+         return pipeline;
+     }
++    // DCS Control (0126): the pair's only extra is light_single_image (no
++    // other quality key): its _light twin, not the full _extras one.
++    [[nodiscard]] bool pair_light_only() const noexcept {
++        if ((quality_bits() & ~(kQualityLightSingleBit | kQualityLinearInputBit)) != 0U) return false;
++        return (quality_bits() & kQualityLightSingleBit) != 0U;
++    }
++    // DCS Control (0126): a light pass's pipeline (0 the match, 1 the
++    // region), null until made (and without dcs_motion or NVIDIA).
++    [[nodiscard]] ID3D12PipelineState* light_pipeline(int which) noexcept {
++        for (std::size_t index = 0; index < extras_twins.size(); ++index) {
++            if (extras_twins[index].light == which) return twin_at(index);
++        }
++        return nullptr;
++    }
++    // DCS Control (0126): the light passes' descriptions, registered with the
++    // compositions' twins (made with them, never with every key off). The
++    // composition's root signature and output, no blending: the region pass
++    // overwrites what it does not discard; the match pass draws nothing.
++    void register_light_twins(UINT node_mask) noexcept {
++        if (backend != D3D12OpticalFlowBackend::nvidia || !dcs_motion_enabled() || root_signature == nullptr) return;
++        try {
++            for (int which = 0; which < 2; ++which) {
++                ExtrasTwin twin{};
++                twin.light = which;
++                D3D12_GRAPHICS_PIPELINE_STATE_DESC& description = twin.description;
++                description.pRootSignature = root_signature.Get();
++                description.VS = which == 0
++                    ? D3D12_SHADER_BYTECODE{g_xrfg_light_match_vertex_shader, sizeof(g_xrfg_light_match_vertex_shader)}
++                    : D3D12_SHADER_BYTECODE{g_xrfg_light_region_vertex_shader, sizeof(g_xrfg_light_region_vertex_shader)};
++                description.PS = {g_xrfg_light_composite_pixel_shader, sizeof(g_xrfg_light_composite_pixel_shader)};
++                D3D12_RENDER_TARGET_BLEND_DESC& blend = description.BlendState.RenderTarget[0];
++                blend.SrcBlend = D3D12_BLEND_ONE;
++                blend.DestBlend = D3D12_BLEND_ZERO;
++                blend.BlendOp = D3D12_BLEND_OP_ADD;
++                blend.SrcBlendAlpha = D3D12_BLEND_ONE;
++                blend.DestBlendAlpha = D3D12_BLEND_ZERO;
++                blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
++                blend.LogicOp = D3D12_LOGIC_OP_NOOP;
++                blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++                description.SampleMask = std::numeric_limits<UINT>::max();
++                description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++                description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++                description.RasterizerState.DepthClipEnable = TRUE;
++                description.DepthStencilState.DepthEnable = FALSE;
++                description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
++                description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
++                description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++                description.NumRenderTargets = 1;
++                description.RTVFormats[0] = view_format;
++                description.DSVFormat = DXGI_FORMAT_UNKNOWN;
++                description.SampleDesc.Count = 1;
++                description.NodeMask = node_mask;
++                extras_twins.push_back(std::move(twin));
++            }
++        } catch (...) {
++        }
++    }
+     // The background build, once it has made every twin: its thread joined
+     // (it has ended: no wait), its time kept. Called per pair; cheap.
+     void finish_extras_build() noexcept {
+@@ -2193,14 +2316,16 @@ struct D3D12FrameSynthesizer::Impl {
+         // pipeline made here). Until a twin is there the pair composes with
+         // the plain pipeline.
+         start_extras_build_once();
+-        ID3D12PipelineState* const twin = extras_twin(pipeline);
++        // DCS Control (0126): the light key alone binds the _light twin (only
++        // the MV compositions have one: any other pair composes as without).
++        ID3D12PipelineState* const twin = extras_twin(pipeline, pair_light_only());
+         if (twin != pipeline) ++extras_binds;
+         return twin;
+     }
+     // Every twin made now (the options have a key on at creation).
+     void make_extras_twins() noexcept {
+-        for (ExtrasTwin& twin : extras_twins) {
+-            static_cast<void>(extras_twin(twin.plain.Get()));
++        for (std::size_t index = 0; index < extras_twins.size(); ++index) {
++            static_cast<void>(twin_at(index)); // DCS Control (0126): the light passes' too
+         }
+     }
+     // The composition for `pipeline`: its masked counterpart while the pair
+@@ -5577,7 +5702,7 @@ struct D3D12FrameSynthesizer::Impl {
+         scatter.Format = kDcsMotionScatterFormat;
+         scatter.DepthOrArraySize = static_cast<UINT16>(kMaxReprojectionViews * 2U);
+         const D3D12_RESOURCE_DESC counters =
+-            buffer_description(kDcsMotionCounterBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++            buffer_description(kDcsMotionBufferBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS); // 0126: + the light list
+         D3D12_HEAP_PROPERTIES readback_heap = heap;
+         readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+         const D3D12_RESOURCE_DESC readback = buffer_description(
+@@ -5627,7 +5752,7 @@ struct D3D12FrameSynthesizer::Impl {
+                 D3D12_UNORDERED_ACCESS_VIEW_DESC counters{};
+                 counters.Format = DXGI_FORMAT_R32_TYPELESS;
+                 counters.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+-                counters.Buffer.NumElements = kDcsMotionCounterBytes / 4U;
++                counters.Buffer.NumElements = kDcsMotionBufferBytes / 4U; // DCS Control (0126): with the light list
+                 counters.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                 device->CreateUnorderedAccessView(dcs_motion_counters.Get(), nullptr, &counters,
+                     offset_cpu_handle(start, base + kSrvDescriptorCount, descriptor_increment));
+@@ -5647,6 +5772,7 @@ struct D3D12FrameSynthesizer::Impl {
+         const RollingSource& previous_source,
+         std::span<const D3D12ReprojectionView> target_views) noexcept {
+         pair_motion_bound = false;
++        pair_light = false; // DCS Control (0126)
+         pair_motion_bits = {};
+         D3D12CockpitMaskFrame* const current = pair_mask_current.get();
+         D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
+@@ -5678,6 +5804,12 @@ struct D3D12FrameSynthesizer::Impl {
+         const UINT outputs = std::clamp(synthetic_output_count(), 1U, 2U);
+         std::array<DcsMotionParameters, kMaxReprojectionViews> views{};
+         bool any = false;
++        // DCS Control (0126): light_single_image, when its passes are made
++        // (with the _extras twins; until then the pair composes as without).
++        // Their build started first, so no pipeline is ever made here.
++        if ((quality_bits() & kQualityLightSingleBit) != 0U) start_extras_build_once();
++        const bool light = (quality_bits() & kQualityLightSingleBit) != 0U && light_pipeline(0) != nullptr &&
++            light_pipeline(1) != nullptr;
+         const UINT width = static_cast<UINT>(image_description.Width);
+         for (UINT index = 0; index < static_cast<UINT>(target_views.size()) && index < kMaxReprojectionViews;
+              ++index) {
+@@ -5696,7 +5828,7 @@ struct D3D12FrameSynthesizer::Impl {
+             parameters.output_height =
+                 (static_cast<UINT>(mapping.target_rect[3]) + dcs_motion_cell - 1U) / dcs_motion_cell;
+             parameters.flags = (current->motion_class && current->motion_class_texture != nullptr ? 1U : 0U) |
+-                (motion.no_stencil ? 2U : 0U);
++                (motion.no_stencil ? 2U : 0U) | (light ? kDcsMotionLightClearFlag : 0U); // 0126
+             parameters.outputs = outputs;
+             parameters.fraction0 = synthetic_output_fraction(0);
+             parameters.fraction1 = outputs > 1U ? synthetic_output_fraction(1) : parameters.fraction0;
+@@ -5757,21 +5889,37 @@ struct D3D12FrameSynthesizer::Impl {
+         target.Texture2DArray.ArraySize = kMaxReprojectionViews * 2U;
+         device->CreateUnorderedAccessView(dcs_motion_scatter.Get(), nullptr, &target,
+             offset_cpu_handle(start, base + kSrvDescriptorCount + 1U, descriptor_increment));
+-        D3D12_UNORDERED_ACCESS_VIEW_DESC null_target{};
+-        null_target.Format = DXGI_FORMAT_R8_UNORM;
+-        null_target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+-        device->CreateUnorderedAccessView(nullptr, nullptr, &null_target,
+-            offset_cpu_handle(start, base + kSrvDescriptorCount + 2U, descriptor_increment));
++        if (light) {
++            // DCS Control (0126): u2 the counters buffer, whose light list the
++            // resample clears (dcs_motion.hlsl LightList).
++            D3D12_UNORDERED_ACCESS_VIEW_DESC list_view{};
++            list_view.Format = DXGI_FORMAT_R32_TYPELESS;
++            list_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
++            list_view.Buffer.NumElements = kDcsMotionBufferBytes / 4U;
++            list_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
++            device->CreateUnorderedAccessView(dcs_motion_counters.Get(), nullptr, &list_view,
++                offset_cpu_handle(start, base + kSrvDescriptorCount + 2U, descriptor_increment));
++        } else {
++            D3D12_UNORDERED_ACCESS_VIEW_DESC null_target{};
++            null_target.Format = DXGI_FORMAT_R8_UNORM;
++            null_target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++            device->CreateUnorderedAccessView(nullptr, nullptr, &null_target,
++                offset_cpu_handle(start, base + kSrvDescriptorCount + 2U, descriptor_increment));
++        }
+ 
+         // DCS Control (0040): none on the frame's MV and class copies (the
+         // consumer's, read by every eye's queue): promoted from COMMON by the
+         // read and decayed back, as the masks' (record_cockpit_mask).
+-        std::array<D3D12_RESOURCE_BARRIER, 2> before{};
++        std::array<D3D12_RESOURCE_BARRIER, 3> before{};
+         UINT before_count = 0;
+         before[before_count++] = transition_barrier(
+             dcs_motion_target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         before[before_count++] = transition_barrier(
+             dcs_motion_scatter.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        if (light) { // DCS Control (0126): the resample clears the light list
++            before[before_count++] = transition_barrier(
++                dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        }
+         list->ResourceBarrier(before_count, before.data());
+         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+         list->SetDescriptorHeaps(1, heaps);
+@@ -5808,10 +5956,12 @@ struct D3D12FrameSynthesizer::Impl {
+         UINT after_count = 0;
+         after[after_count++] = transition_barrier(
+             dcs_motion_scatter.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+-        after[after_count++] = transition_barrier(
+-            dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        after[after_count++] = light ? uav_barrier(dcs_motion_counters.Get()) // DCS Control (0126): cleared
++            : transition_barrier(
++                dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         list->ResourceBarrier(after_count, after.data());
+         pair_motion_bound = true;
++        pair_light = light; // DCS Control (0126)
+         if (current->counters) {
+             current->counters->motion_pairs.fetch_add(1U, std::memory_order_relaxed);
+         }
+@@ -5822,7 +5972,50 @@ struct D3D12FrameSynthesizer::Impl {
+     // DCS Control (0036): after the composition: the MVs' targets back to
+     // COMMON, and the counters (cumulative) to this slot's readback region,
+     // read once the slot's work has completed.
++    // DCS Control (0126): light_single_image after a view's composition of
++    // output `output`, the composition's root constants (`parameters`) bound
++    // and its pipeline `restore` set back after. Output 0 matches the list
++    // its composition filled (LightMatchVS), every output then draws its
++    // lights (LightRegionVS / LightCompositePS) into the one render target
++    // bound. Nothing for a pair or view without the list.
++    void draw_lights(ID3D12GraphicsCommandList* list, UINT view_index, UINT output,
++        const SynthesisParameters& parameters, ID3D12PipelineState* restore) noexcept {
++        if (!pair_light || view_index >= kMaxReprojectionViews || pair_motion_bits[view_index] == 0U ||
++            restore == nullptr) {
++            return;
++        }
++        ID3D12PipelineState* const match = light_pipeline(0);
++        ID3D12PipelineState* const region = light_pipeline(1);
++        if (match == nullptr || region == nullptr) {
++            return;
++        }
++        // The MV field of this output (the single-pass 3X composition binds
++        // output 0's bits for both).
++        SynthesisParameters light_parameters = parameters;
++        light_parameters.use_game_motion = (parameters.use_game_motion & ~(kDcsMotionCountBit | kDcsMotionOutputBit)) |
++            (output != 0U ? kDcsMotionOutputBit : 0U);
++        const bool changed = light_parameters.use_game_motion != parameters.use_game_motion;
++        if (changed) {
++            list->SetGraphicsRoot32BitConstants(2, kSynthesisConstantCount, &light_parameters, 0);
++        }
++        if (output == 0U) {
++            const D3D12_RESOURCE_BARRIER filled = uav_barrier(dcs_motion_counters.Get());
++            list->ResourceBarrier(1, &filled);
++            list->SetPipelineState(match);
++            list->DrawInstanced(3, kLightCapacity, 0, 0);
++            list->ResourceBarrier(1, &filled);
++        }
++        list->SetPipelineState(region);
++        list->DrawInstanced(6, kLightCapacity, 0, 0);
++        list->SetPipelineState(restore);
++        if (changed) {
++            list->SetGraphicsRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
++        }
++        ++light_draws;
++    }
++
+     void finish_dcs_motion(ID3D12GraphicsCommandList* list, WorkSlot& slot) noexcept {
++        pair_light = false; // DCS Control (0126)
+         if (!pair_motion_bound) {
+             return;
+         }
+@@ -7749,6 +7942,7 @@ struct D3D12FrameSynthesizer::Impl {
+         if (FAILED(result)) {
+             return result;
+         }
++        register_light_twins(node_mask); // DCS Control (0126)
+         // DCS Control (0123): the _extras compositions now when the options
+         // already have a quality key (else on first use).
+         // DCS Control (0125): with every key off none is made: the first pair
+@@ -9085,10 +9279,12 @@ struct D3D12FrameSynthesizer::Impl {
+ 
+         synthesis->SetDescriptorHeaps(1, heaps);
+         synthesis->SetGraphicsRootSignature(root_signature.Get());
+-        synthesis->SetPipelineState(composition_pipeline( // DCS Control (0031)
++        // DCS Control (0126): kept, light_single_image's passes set it back.
++        ID3D12PipelineState* const composition_bound = composition_pipeline( // DCS Control (0031)
+             nvidia_options.bidirectional
+                 ? nvidia_bidirectional_graphics_pipeline.Get()
+-                : nvidia_graphics_pipeline.Get()));
++                : nvidia_graphics_pipeline.Get());
++        synthesis->SetPipelineState(composition_bound);
+ 
+         dred_marker(synthesis, "OFXR NVIDIA composition draw");
+         synthesis->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+@@ -9115,7 +9311,8 @@ struct D3D12FrameSynthesizer::Impl {
+             : pair_mask_bound                                                ? masked_pipeline(triple_plain)
+                                                                              : triple_plain;
+         if (synthetic_output_count() == 2U && triple_pipeline != nullptr) {
+-            synthesis->SetPipelineState(with_extras(triple_pipeline)); // DCS Control (0123)
++            ID3D12PipelineState* const triple_bound = with_extras(triple_pipeline); // DCS Control (0123)
++            synthesis->SetPipelineState(triple_bound);
+             const UINT first_rtvs[2] = {
+                 synthetic_output_destination(0, synthetic_destination_index) *
+                     image_description.DepthOrArraySize,
+@@ -9174,6 +9371,7 @@ struct D3D12FrameSynthesizer::Impl {
+                     }
+                     // The cursor and the marker are per synthetic.
+                     synthesis->OMSetRenderTargets(1, &rtvs[output], FALSE, nullptr);
++                    draw_lights(synthesis, view_index, output, parameters, triple_bound); // DCS Control (0126)
+                     draw_cursor_region(synthesis, slot, triple_pipeline); // 0010
+                     clear_synthetic_marker(synthesis, rtvs[output], target_views[view_index],
+                         static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+@@ -9236,6 +9434,7 @@ struct D3D12FrameSynthesizer::Impl {
+                     static_cast<UINT>(image_description.Width),
+                     image_description.Height);
+                 draw_view(synthesis, view_masks[view_index]); // DCS Control (0057)
++                draw_lights(synthesis, view_index, output, parameters, composition_bound); // DCS Control (0126)
+                 draw_cursor_region(synthesis, slot,
+                     composition_pipeline(nvidia_options.bidirectional
+                         ? nvidia_bidirectional_graphics_pipeline.Get()
+@@ -11180,12 +11379,57 @@ D3D12FrameSynthesizer::FgSettings D3D12FrameSynthesizer::fg_settings() const noe
+                 !impl_->extras_build->done.load(std::memory_order_acquire);
+             settings.extras_build_us = impl_->extras_build_microseconds;
+             settings.extras_binds = impl_->extras_binds;
++            settings.light_draws = impl_->light_draws; // DCS Control (0126)
+         }
+     } catch (...) {
+     }
+     return settings;
+ }
+ 
++// DCS Control (0126): tests only (see the header).
++std::vector<std::uint32_t> D3D12FrameSynthesizer::light_list_for_tests() noexcept {
++    std::vector<std::uint32_t> words;
++    try {
++        if (FAILED(wait_for_idle())) return words;
++        std::scoped_lock lock(mutex_);
++        if (impl_ == nullptr || impl_->dcs_motion_counters == nullptr) return words;
++        Impl& impl = *impl_;
++        const UINT bytes = kDcsMotionBufferBytes - kLightListBase;
++        D3D12_HEAP_PROPERTIES heap{};
++        heap.Type = D3D12_HEAP_TYPE_READBACK;
++        D3D12_RESOURCE_DESC description = Impl::buffer_description(bytes, D3D12_RESOURCE_FLAG_NONE);
++        ComPtr<ID3D12Resource> readback;
++        ComPtr<ID3D12CommandAllocator> allocator;
++        ComPtr<ID3D12GraphicsCommandList> list;
++        ComPtr<ID3D12Fence> done;
++        if (FAILED(impl.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
++                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(readback.GetAddressOf()))) ||
++            FAILED(impl.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocator.GetAddressOf()))) ||
++            FAILED(impl.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
++                IID_PPV_ARGS(list.GetAddressOf()))) ||
++            FAILED(impl.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.GetAddressOf())))) {
++            return words;
++        }
++        list->CopyBufferRegion(readback.Get(), 0, impl.dcs_motion_counters.Get(), kLightListBase, bytes);
++        if (FAILED(list->Close())) return words;
++        ID3D12CommandList* lists[] = {list.Get()};
++        impl.queue->ExecuteCommandLists(1, lists);
++        if (FAILED(impl.queue->Signal(done.Get(), 1))) return words;
++        while (done->GetCompletedValue() < 1) Sleep(1);
++        void* mapped = nullptr;
++        const D3D12_RANGE range{0, bytes};
++        if (SUCCEEDED(readback->Map(0, &range, &mapped)) && mapped != nullptr) {
++            words.resize(bytes / 4U);
++            std::memcpy(words.data(), mapped, bytes);
++            const D3D12_RANGE none{0, 0};
++            readback->Unmap(0, &none);
++        }
++    } catch (...) {
++        words.clear();
++    }
++    return words;
++}
++
+ // DCS Control (0092).
+ void D3D12FrameSynthesizer::set_foveated_premultiplied(bool premultiplied) noexcept {
+     try {
+diff --git a/src/d3d12/dcs_motion.hlsl b/src/d3d12/dcs_motion.hlsl
+index aa54f59..462256d 100644
+--- a/src/d3d12/dcs_motion.hlsl
++++ b/src/d3d12/dcs_motion.hlsl
+@@ -50,6 +50,12 @@ Texture2D<uint> ClassSource : register(t1);
+ Texture2DArray<float4> MotionResampled : register(t2);
+ RWTexture2DArray<float4> MotionTarget : register(u0);
+ RWTexture2DArray<uint> ScatterTarget : register(u1);
++// DCS Control (0126): the composition's counters buffer, whose light list
++// (frame_synthesis.hlsl, light_single_image) is cleared here per view and pair
++// (Flags bit 2); a null view without the key.
++RWByteAddressBuffer LightList : register(u2);
++static const uint kLightListBase = 128u; // frame_synthesis.hlsl: after the counters
++static const uint kLightViewBytes = 16u + 64u * 16u;
+ 
+ cbuffer DcsMotionParameters : register(b0) {
+     uint OutputWidth;
+@@ -57,7 +63,8 @@ cbuffer DcsMotionParameters : register(b0) {
+     uint Cell;
+     uint Slice;
+     // Bit 0: the class rect is bound; bit 1: its composition bits are unknown
+-    // for this view (no stencil: taken as a surface).
++    // for this view (no stencil: taken as a surface). DCS Control (0126): bit
++    // 2, clear this view's light list.
+     uint Flags;
+     // How many outputs the pair composes (1 or 2), for the scatter.
+     uint Outputs;
+@@ -154,6 +161,9 @@ float2 motion_around(float2 position, out uint klass) {
+ 
+ [numthreads(8, 8, 1)]
+ void DcsMotionResampleCS(uint3 thread_id : SV_DispatchThreadID) {
++    [branch] if ((Flags & 4u) != 0u && thread_id.x == 0u && thread_id.y == 0u) {
++        LightList.Store(kLightListBase + Slice * kLightViewBytes, 0u); // DCS Control (0126)
++    }
+     if (thread_id.x >= OutputWidth || thread_id.y >= OutputHeight) {
+         return;
+     }
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index 3f1c865..d4ba1aa 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -103,6 +103,7 @@ static const uint kQualityLinearInput = 1u << 17;
+ static const uint kQualityEdgeChoice = 1u << 18;   // nvidia_edge_choice
+ static const uint kQualityMaskBand = 1u << 19;     // dcs_motion_mask_band
+ static const uint kQualityHudGuard = 1u << 20;     // dcs_motion_hud_guard
++static const uint kQualityLightSingle = 1u << 21;  // light_single_image (DCS Control 0126)
+ 
+ // DCS Control (0123): the quality options are compiled only into the
+ // compositions built with XRFG_FG_EXTRAS=1 (the "_extras" variants, which the
+@@ -115,8 +116,14 @@ static const uint kQualityHudGuard = 1u << 20;     // dcs_motion_hud_guard
+ #define XRFG_FG_EXTRAS 0
+ #endif
+ 
++// DCS Control (0126): XRFG_FG_EXTRAS=2 builds the "_light" compositions, with
++// light_single_image's spot detection alone (and the linear-input bit it
++// reads): every other option is a constant false there and compiles out, so
++// the light key on its own does not pay for the others' code.
+ bool quality_option(uint bit) {
+-#if XRFG_FG_EXTRAS
++#if XRFG_FG_EXTRAS == 2
++    return (UseGameMotion & bit & (kQualityLightSingle | kQualityLinearInput)) != 0u;
++#elif XRFG_FG_EXTRAS
+     return (UseGameMotion & bit) != 0u;
+ #else
+     return false;
+@@ -1546,6 +1553,161 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
+     return taken;
+ }
+ 
++
++#if XRFG_FG_EXTRAS
++// DCS Control (0126): light_single_image. A light seen from afar at night (nav
++// and strobe lights, an afterburner, a flare, sparks) is drawn after DCS's
++// G-buffer: it has no motion vector of its own (the MV there is the sky's or
++// the terrain's behind it), and the optical flow finds no match for a few
++// bright pixels on black. The composition then cross-fades the two real
++// frames there: two copies of the light, one at each frame's place.
++// Three steps, each cheap where nothing like a light is:
++//  1. here, in the _extras composition of output 0: where the MVs' two
++//     samples differ by a step and the brighter one sits on a small bright
++//     spot of its frame (a strict 3x3 maximum whose rings at 2, 3, 4 or 6 px
++//     are dark around it, dark in absolute terms too, and which the other
++//     frame does not show at the very same place: not still content, a HUD),
++//     that spot is appended to the view's list (64 at most) in
++//     DcsMotionCounters after the counters: its place in that frame (target
++//     pixels), which frame, its size, colour and peak;
++//  2. LightMatchVS, one instance per entry: each spot's partner in the other
++//     frame (the nearest of similar peak and colour within kLightReach px);
++//  3. LightRegionVS / LightCompositePS, after the composition, a small quad
++//     per light: both frames' copies taken out (each sample on a listed spot
++//     replaced by the other frame's sample there), and a light whose spots
++//     are each other's partner drawn once where it is at this instant (the
++//     two spots moved along their own displacement and cross-faded); a spot
++//     without a partner is kept only from the frame nearer in time (the
++//     current one at the middle): one image, moving at the real frames' rate.
++// The list is cleared by DcsMotionResampleCS (Flags bit 2) at every pair.
++// Layout, repeated as kLightList* in d3d12_frame_synthesizer.cpp: after the
++// counters (128 bytes), per view a header (the count) and 64 records of four
++// uints: x | y << 16; the frame (bit 31: the current one), the size code
++// (bits 24-25), the colour (encoded, 8 bits each); the match (best partner,
++// low 16 bits; the first record of the same frame and place, high 16 bits;
++// 0xffff none); the peak (encoded luma, 0..65535).
++static const uint kLightListBase = 128u;
++static const uint kLightCapacity = 64u;
++static const uint kLightViewBytes = 16u + kLightCapacity * 16u;
++static const uint kLightCurrentBit = 0x80000000u;
++static const uint kLightNone = 0xffffu;
++static const float kLightMinPeak = 40.0 / 255.0;   // encoded luma of the spot's peak
++static const float kLightMinStep = 12.0 / 255.0;   // between the MVs' two samples
++static const float kLightRingShare = 0.35;         // a ring sample is dark below this share of the peak
++static const float kLightRingFloor = 64.0 / 255.0; // and the ring's mean below this (dark surroundings)
++static const float kLightDark = 40.0 / 255.0;      // the dimmer of the MVs' two samples at most this (encoded luma)
++static const float kLightStillShare = 0.92;        // the other frame at the same place: still content (a HUD), not a trail copy
++static const float kLightReach = 48.0;             // px: how far a light may move between the real frames
++static const float kLightPlaceScale = 8.0;         // a place's x and y in eighths of a pixel (16 bits: 8191 px)
++static const float kLightCarried = 0.75;           // the other frame's share of the peak where the MVs put it: carried
++static const uint kLightCarriedFlag = 0x8000u;     // in the entry's "first" half: the MVs carry it, nothing to do
++
++uint light_view_base() {
++    return kLightListBase + ViewIndex * kLightViewBytes;
++}
++
++float light_luma(float4 color) {
++    return dot(quality_encoded_rgb(color.rgb), float3(0.2126, 0.7152, 0.0722));
++}
++
++// The encoded luma of one frame (`current`) at target point `at`; -1 outside it.
++CameraSample light_sample(bool current, float2 at) {
++    CameraSample s;
++    if (current) {
++        s = sample_current_target(at, Slice, ViewIndex);
++    } else {
++        s = sample_previous_target(at, Slice, ViewIndex);
++    }
++    return s;
++}
++
++float light_luma_at(bool current, float2 at) {
++    CameraSample s = light_sample(current, at);
++    return s.valid >= 0.5 ? light_luma(s.color) : -1.0;
++}
++
++float light_ring_radius(uint code) {
++    return code == 0u ? 2.0 : (code == 1u ? 3.0 : (code == 2u ? 4.0 : 6.0));
++}
++
++void light_detect(float2 pixel, float2 motion, float t, float4 previous, float4 current) {
++    float lp = light_luma(previous);
++    float lc = light_luma(current);
++    float step = abs(lp - lc);
++    // The dimmer sample dark and the brighter well above it: a light on dark
++    // surroundings. By day, and on textured ground at night, almost no pixel
++    // gets past this, so the composition pays next to nothing more there.
++    [branch] if (step >= kLightMinStep && max(lp, lc) >= kLightMinPeak && min(lp, lc) <= kLightDark &&
++        max(lp, lc) >= 2.0 * min(lp, lc) + kLightMinStep) {
++        bool from_current = lc > lp;
++        float2 q = floor((from_current ? pixel - (1.0 - t) * motion : pixel + t * motion) + 0.5);
++        float peak = light_luma_at(from_current, q);
++        bool spot = peak >= kLightMinPeak && q.x >= 1.0 && q.y >= 1.0;
++        // Small first, cheaply: three pixels out on both axes well below the
++        // peak (four samples) before the 3x3 and the rings.
++        [unroll] for (uint axis = 0u; axis < 4u; ++axis) {
++            float2 away = axis == 0u ? float2(3.0, 0.0) : (axis == 1u ? float2(-3.0, 0.0)
++                : (axis == 2u ? float2(0.0, 3.0) : float2(0.0, -3.0)));
++            spot = spot && light_luma_at(from_current, q + away) < 0.6 * peak;
++        }
++        // A strict 3x3 maximum (a tie goes to the first in scan order), and
++        // its place to a fraction of a pixel: the centroid of the 3x3 above
++        // half the peak.
++        float2 offset_sum = float2(0.0, 0.0);
++        float mass = max(peak * 0.5, 0.0);
++        [branch] if (spot) {
++        [unroll] for (int dy = -1; dy <= 1; ++dy) {
++            [unroll] for (int dx = -1; dx <= 1; ++dx) {
++                if (dx != 0 || dy != 0) {
++                    float v = light_luma_at(from_current, q + float2(dx, dy));
++                    bool earlier = dy < 0 || (dy == 0 && dx < 0);
++                    spot = spot && (earlier ? v < peak : v <= peak);
++                    float w = max(v - peak * 0.5, 0.0);
++                    offset_sum += w * float2(dx, dy);
++                    mass += w;
++                }
++            }
++        }
++        }
++        float2 place = q + clamp(offset_sum / max(mass, 1.0e-5), -0.5, 0.5);
++        uint code = 4u;
++        [branch] if (spot) {
++            static const float2 ring[8] = {
++                float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0),
++                float2(0.7071, 0.7071), float2(-0.7071, 0.7071), float2(0.7071, -0.7071), float2(-0.7071, -0.7071)};
++            // Its size: the first ring dark around it (one of eight samples
++            // may fall on a trail or a neighbour).
++            [loop] for (uint r = 0u; r < 4u && code == 4u; ++r) {
++                float radius = light_ring_radius(r);
++                uint dark = 0u;
++                float sum = 0.0;
++                [unroll] for (uint i = 0u; i < 8u; ++i) {
++                    float v = light_luma_at(from_current, q + ring[i] * radius);
++                    dark += v >= 0.0 && v < kLightRingShare * peak ? 1u : 0u;
++                    sum += max(v, 0.0);
++                }
++                code = dark >= 7u && sum <= 8.0 * kLightRingFloor ? r : 4u;
++            }
++            // Not still content: the other frame does not show it there.
++            float other = light_luma_at(!from_current, q);
++            [branch] if (code < 4u && other < kLightStillShare * peak) {
++                uint base = light_view_base();
++                uint index;
++                DcsMotionCounters.InterlockedAdd(base, 1u, index);
++                [branch] if (index < kLightCapacity) {
++                    CameraSample s = light_sample(from_current, q);
++                    uint3 c = uint3(saturate(quality_encoded_rgb(s.color.rgb)) * 255.0 + 0.5);
++                    uint info = (from_current ? kLightCurrentBit : 0u) | (code << 24) | (c.r << 16) | (c.g << 8) | c.b;
++                    DcsMotionCounters.Store4(base + 16u + index * 16u,
++                        uint4(uint(place.x * kLightPlaceScale + 0.5) | (uint(place.y * kLightPlaceScale + 0.5) << 16), info,
++                            0xffffffffu, uint(saturate(peak) * 65535.0 + 0.5)));
++                }
++            }
++        }
++    }
++}
++#endif
++
+ // The MVs' composition of the pixel at `position` at this instant (`color`) and how
+ // far it holds: 1 it alone, 0 the flow's as before, between the two blended.
+ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 color) {
+@@ -1606,6 +1768,12 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+                 [branch] if (previous.valid >= 0.5 && current.valid >= 0.5) {
+                     eligible = true;
+                     color = saturate(lerp(previous.color, current.color, t));
++#if XRFG_FG_EXTRAS
++                    // DCS Control (0126): light_single_image's spots (output 0 only).
++                    [branch] if (count && quality_option(kQualityLightSingle)) {
++                        light_detect(pixel, motion, t, previous.color, current.color);
++                    }
++#endif
+                     if ((UseGameMotion & 4u) != 0u) {
+                         weight = 1.0;
+                     } else {
+@@ -2749,3 +2917,315 @@ TripleOutputs SynthesizeNvidiaTripleFastBidirectionalMidpointPS(FullscreenVertex
+         synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true))
+     return output;
+ }
++
++#if XRFG_DCS_MOTION && XRFG_FG_EXTRAS
++// DCS Control (0126): light_single_image's steps 2 and 3 (see light_detect),
++// drawn after a view's composition with its root constants: LightMatchVS
++// (three vertices per list entry, all outside the view: it only writes the
++// entry's match), then LightRegionVS / LightCompositePS (a quad per light,
++// none for an entry drawn with another; the pixel shader discards every pixel
++// it leaves as the composition made it).
++uint4 light_record(uint base, uint index) {
++    return DcsMotionCounters.Load4(base + 16u + index * 16u);
++}
++
++uint light_count(uint base) {
++    return min(DcsMotionCounters.Load(base), kLightCapacity);
++}
++
++float2 light_place(uint4 record) {
++    return float2(float(record.x & 0xffffu), float(record.x >> 16)) / kLightPlaceScale;
++}
++
++bool light_from_current(uint4 record) {
++    return (record.y & kLightCurrentBit) != 0u;
++}
++
++float light_radius(uint4 record) {
++    return light_ring_radius((record.y >> 24) & 3u);
++}
++
++float3 light_chroma(uint4 record) {
++    float3 c = float3(float((record.y >> 16) & 0xffu), float((record.y >> 8) & 0xffu), float(record.y & 0xffu));
++    return c / max(c.r + c.g + c.b, 1.0);
++}
++
++// An entry's partner: the other frame's spot whose best match it is too
++// (kLightNone for none, or for an entry that repeats an earlier one).
++uint light_partner(uint base, uint index, uint4 record) {
++    uint best = record.z & 0xffffu;
++    uint partner = kLightNone;
++    [branch] if ((record.z >> 16) == index && best < kLightCapacity) {
++        uint4 other = light_record(base, best);
++        partner = (other.z & 0xffffu) == index && (other.z >> 16) == best ? best : kLightNone; // not carried, not a repeat
++    }
++    return partner;
++}
++
++// How much of a spot of `radius` px is at `distance_px` from its peak.
++float light_weight(float distance_px, float radius) {
++    return 1.0 - smoothstep(radius, radius + 2.0, distance_px);
++}
++
++// A spot the list has no partner for whose light the other frame shows close
++// by (copies that overlap: a light moving little against what is behind it,
++// whose other spot the MVs' samples could not tell apart): LightMatchVS
++// stores where, in quarter pixels in the peak word's upper half (0: none).
++bool light_image_partner(uint4 record, out float2 there) {
++    uint code = record.w >> 16;
++    there = light_place(record) + (float2(float(code & 0xffu), float(code >> 8)) - 128.0) * 0.25;
++    return code != 0u;
++}
++
++// The light an entry draws as a pair: a previous spot with its partner in the
++// list, or an entry with a partner found in the image. False otherwise.
++bool light_pair(uint base, uint index, uint4 record, out float2 previous_place, out float2 current_place,
++    out float radius) {
++    previous_place = light_place(record);
++    current_place = previous_place;
++    radius = light_radius(record);
++    bool pair = false;
++    [branch] if ((record.z >> 16) == index) {
++        uint partner = light_partner(base, index, record);
++        bool from_current = light_from_current(record);
++        float2 there;
++        [branch] if (partner != kLightNone) {
++            uint4 other = light_record(base, partner);
++            pair = !from_current;
++            current_place = light_place(other);
++            radius = max(radius, light_radius(other));
++        } else if (light_image_partner(record, there)) {
++            pair = true;
++            previous_place = from_current ? there : light_place(record);
++            current_place = from_current ? light_place(record) : there;
++        }
++    }
++    return pair;
++}
++
++FullscreenVertex LightMatchVS(uint vertex_id : SV_VertexID, uint instance : SV_InstanceID) {
++    FullscreenVertex output;
++    output.position = float4(2.0, 2.0, 0.0, 1.0);
++    uint base = light_view_base();
++    uint count = light_count(base);
++    [branch] if (vertex_id == 0u && instance < count) {
++        uint4 me = light_record(base, instance);
++        float2 at = light_place(me);
++        bool mine = light_from_current(me);
++        float peak = max(float(me.w & 0xffffu), 1.0);
++        float3 chroma = light_chroma(me);
++        uint first = instance;
++        uint best = kLightNone;
++        float best_cost = 1.0e30;
++        // A spot the MVs carry (a star with the sky, a runway light with the
++        // terrain): the other frame shows it where the MVs put it, and the
++        // composition has it right; it is flagged and left alone. The
++        // current frame's field at a current place c gives the previous
++        // place c + motion(c).
++        float2 carried_to = mine ? at + dcs_motion_field(at, ViewIndex * 3u).xy
++                                 : at - dcs_motion_field(at, ViewIndex * 3u).xy;
++        float carried_luma = light_luma_at(!mine, carried_to);
++        uint carried = carried_luma >= kLightCarried * (peak / 65535.0) ? kLightCarriedFlag : 0u;
++        [loop] for (uint j = 0u; j < count; ++j) {
++            uint4 other = light_record(base, j);
++            float2 there = light_place(other);
++            [branch] if (j == instance) {
++            } else if (light_from_current(other) == mine) {
++                // The same spot appended twice (two pixels led to it): the
++                // first entry stands for both.
++                first = first == instance && j < instance && all(there == at) ? j : first;
++            } else {
++                float distance_px = length(there - at);
++                float ratio = max(float(other.w & 0xffffu), 1.0) / peak;
++                float3 difference = abs(light_chroma(other) - chroma);
++                float hue = difference.r + difference.g + difference.b;
++                [branch] if (distance_px <= kLightReach && ratio >= 0.5 && ratio <= 2.0 && hue <= 0.3) {
++                    // Strictly lower: of repeated entries the first is taken.
++                    float cost = distance_px / kLightReach + 2.0 * abs(log2(ratio)) + hue;
++                    best = cost < best_cost ? j : best;
++                    best_cost = min(cost, best_cost);
++                }
++            }
++        }
++        DcsMotionCounters.Store(base + 16u + instance * 16u + 8u, best | ((first | carried) << 16));
++        // No candidate in the list: the other frame's own brightest pixel
++        // within 3 px of where the MVs put this spot, when it holds the light (at least 60 % of the peak),
++        // to a quarter pixel (3x3 centroid above half its value).
++        [branch] if (best == kLightNone && carried == 0u && first == instance) {
++            float found = -1.0;
++            float2 found_at = at;
++            [loop] for (int dy = -3; dy <= 3; ++dy) {
++                [loop] for (int dx = -3; dx <= 3; ++dx) {
++                    float2 probe = floor(carried_to + 0.5) + float2(dx, dy);
++                    float v = light_luma_at(!mine, probe);
++                    found_at = v > found ? probe : found_at;
++                    found = max(found, v);
++                }
++            }
++            [branch] if (found >= 0.6 * (peak / 65535.0) && found * 0.6 <= peak / 65535.0) {
++                float2 offset_sum = float2(0.0, 0.0);
++                float mass = found * 0.5;
++                [unroll] for (int cy = -1; cy <= 1; ++cy) {
++                    [unroll] for (int cx = -1; cx <= 1; ++cx) {
++                        float w = max(light_luma_at(!mine, found_at + float2(cx, cy)) - found * 0.5, 0.0);
++                        offset_sum += w * float2(cx, cy);
++                        mass += w;
++                    }
++                }
++                float2 there = found_at + clamp(offset_sum / max(mass, 1.0e-5), -0.5, 0.5);
++                int2 code = clamp(int2(round((there - at) * 4.0)), -127, 127) + 128;
++                DcsMotionCounters.Store(base + 16u + instance * 16u + 12u,
++                    (me.w & 0xffffu) | (uint(code.x) << 16) | (uint(code.y) << 24));
++            }
++        }
++    }
++    return output;
++}
++
++FullscreenVertex LightRegionVS(uint vertex_id : SV_VertexID, uint instance : SV_InstanceID) {
++    FullscreenVertex output;
++    output.position = float4(2.0, 2.0, 0.0, 1.0);
++    uint base = light_view_base();
++    uint count = light_count(base);
++    [branch] if (instance < count) {
++        uint4 me = light_record(base, instance);
++        uint partner = light_partner(base, instance, me);
++        bool current = light_from_current(me);
++        // One quad per light: none for a repeated entry, nor for a current
++        // spot drawn with its previous partner.
++        float2 image_there;
++        bool image = partner == kLightNone && light_image_partner(me, image_there);
++        [branch] if ((me.z >> 16) == instance && !(current && partner != kLightNone)) {
++            float t = synthesis_fraction();
++            uint slice = ViewIndex * 3u + 1u + dcs_motion_output();
++            float2 at = light_place(me);
++            float2 motion = dcs_motion_field(at, slice).xy;
++            // Where the composition put this frame's copy.
++            float2 copy = current ? at + (1.0 - t) * motion : at - t * motion;
++            float2 low = min(at, copy);
++            float2 high = max(at, copy);
++            float pad = light_radius(me) + 4.0;
++            [branch] if (partner != kLightNone) {
++                uint4 other = light_record(base, partner);
++                float2 there = light_place(other);
++                float2 there_copy = there + (1.0 - t) * dcs_motion_field(there, slice).xy;
++                low = min(low, min(there, there_copy));
++                high = max(high, max(there, there_copy));
++                pad = max(pad, light_radius(other) + 4.0);
++            } else if (image) {
++                float2 image_copy = current ? image_there - t * motion : image_there + (1.0 - t) * motion;
++                low = min(low, min(image_there, image_copy));
++                high = max(high, max(image_there, image_copy));
++            }
++            float4 rect = PreviousMappings[ViewIndex].TargetRect;
++            low = clamp(low - pad, rect.xy, rect.xy + rect.zw);
++            high = clamp(high + pad + 1.0, rect.xy, rect.xy + rect.zw);
++            static const float2 corners[6] = {
++                float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
++                float2(1.0, 0.0), float2(1.0, 1.0), float2(0.0, 1.0)};
++            float2 corner = lerp(low, high, corners[min(vertex_id, 5u)]);
++            float2 uv = (corner - rect.xy) / max(rect.zw, float2(1.0, 1.0));
++            output.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
++        }
++    }
++    return output;
++}
++
++float4 LightCompositePS(FullscreenVertex input) : SV_Target {
++    float2 pixel = floor(input.position.xy);
++    [branch] if (cockpit_mask_bound() && cockpit_masked(pixel)) {
++        discard; // the cockpit keeps its own composition
++    }
++    float t = synthesis_fraction();
++    float4 here = dcs_motion_field(pixel, ViewIndex * 3u + 1u + dcs_motion_output());
++    float2 motion = (uint(here.w) & 1u) != 0u && dot(here.xy, here.xy) > kDcsMotionSnap * kDcsMotionSnap
++        ? here.xy : float2(0.0, 0.0);
++    float2 at_previous = pixel + t * motion;
++    float2 at_current = pixel - (1.0 - t) * motion;
++    CameraSample previous = sample_previous_target(at_previous, Slice, ViewIndex);
++    CameraSample current = sample_current_target(at_current, Slice, ViewIndex);
++    [branch] if (previous.valid < 0.5 || current.valid < 0.5) {
++        discard;
++    }
++    uint base = light_view_base();
++    uint count = light_count(base);
++    // Both frames' copies out: a sample on a listed spot of its frame is the
++    // other frame's sample there (the darker of the two where both are).
++    float on_previous = 0.0;
++    float on_current = 0.0;
++    [loop] for (uint i = 0u; i < count; ++i) {
++        uint4 record = light_record(base, i);
++        [branch] if ((record.z >> 16) == i) {
++            bool from_current = light_from_current(record);
++            float w = light_weight(length((from_current ? at_current : at_previous) - light_place(record)),
++                light_radius(record));
++            on_previous = from_current ? on_previous : max(on_previous, w);
++            on_current = from_current ? max(on_current, w) : on_current;
++            float2 there;
++            [branch] if ((record.z & 0xffffu) == kLightNone && light_image_partner(record, there)) {
++                float v = light_weight(length((from_current ? at_previous : at_current) - there), light_radius(record));
++                on_previous = from_current ? max(on_previous, v) : on_previous;
++                on_current = from_current ? on_current : max(on_current, v);
++            }
++        }
++    }
++    float4 darker = min(previous.color, current.color);
++    float4 a = lerp(previous.color, on_current > 0.5 ? darker : current.color, on_previous);
++    float4 b = lerp(current.color, on_previous > 0.5 ? darker : previous.color, on_current);
++    float4 background = lerp(a, b, t);
++    float4 color = background;
++    bool changed = on_previous > 0.0 || on_current > 0.0;
++    // Each light once: a matched pair where it is at this instant; a spot
++    // alone only from the nearer frame, where that frame's copy is.
++    [loop] for (uint k = 0u; k < count; ++k) {
++        uint4 record = light_record(base, k);
++        [branch] if ((record.z >> 16) == k) {
++            bool from_current = light_from_current(record);
++            uint partner = light_partner(base, k, record);
++            float2 previous_place, current_place;
++            float radius;
++            float2 image_there;
++            bool alone = partner == kLightNone && !light_image_partner(record, image_there);
++            [branch] if (light_pair(base, k, record, previous_place, current_place, radius)) {
++                float2 d = current_place - previous_place;
++                float2 place = previous_place + t * d;
++                // Along its path between the two spots (and the pixels' own
++                // motion further) the composition may have left a copy where
++                // the flow half followed the light: the band is composed here
++                // too, the background along the MVs.
++                float2 along = pixel - previous_place;
++                float u = saturate(dot(along, d) / max(dot(d, d), 1.0e-4));
++                // Not at a surface's edge (the field's cell holds one
++                // surface): there the MVs' background is the cell's, coarser
++                // than the composition's.
++                changed = changed || ((uint(here.w) & 2u) != 0u && length(along - u * d) <= radius + 2.0 + length(motion));
++                float w = light_weight(length(pixel - place), radius);
++                [branch] if (w > 0.0) {
++                    float4 la = sample_previous_target(pixel - t * d, Slice, ViewIndex).color;
++                    float4 lb = sample_current_target(pixel + (1.0 - t) * d, Slice, ViewIndex).color;
++                    // Where the two frames' samples agree it is the light
++                    // itself (cross-faded); where they do not, what was
++                    // around it in one frame (the terrain below it, say):
++                    // the darker then, so nothing but the light is moved.
++                    float agree = 1.0 - smoothstep(0.15, 0.4, quality_relative_error(la, lb));
++                    float3 light = lerp(min(la.rgb, lb.rgb), lerp(la.rgb, lb.rgb, t), agree);
++                    color.rgb = max(color.rgb, lerp(background.rgb, light, w));
++                    changed = true;
++                }
++            } else if (alone && (from_current ? t >= 0.5 : t < 0.5)) {
++                float w = light_weight(length((from_current ? at_current : at_previous) - light_place(record)),
++                    light_radius(record));
++                [branch] if (w > 0.0) {
++                    color.rgb = max(color.rgb,
++                        lerp(background.rgb, (from_current ? current.color : previous.color).rgb, w));
++                    changed = true;
++                }
++            }
++        }
++    }
++    [branch] if (!changed) {
++        discard;
++    }
++    return foveated_alpha(input.position.xy, saturate(color));
++}
++#endif
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index ff657de..5cad0c4 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -4357,6 +4357,8 @@ void test_nvidia_serialized_eye_context_stress(
+ #define XRFG_BENCH_FG_EXTRAS 1 // DCS Control (0123): this tree has the quality keys
+ #include "fg_triple_bench.inc" // DCS Control (0123)
+ #include "fg_extras_async.inc" // DCS Control (0125)
++#include "fg_scene.inc" // DCS Control (0126)
++#include "fg_lights.inc" // DCS Control (0126)
+ 
+ }  // namespace
+ 
+@@ -6904,7 +6906,8 @@ int main() {
+                  "XRFG_TEST_COCKPIT_DEPTH_BENCH", "XRFG_TEST_OCCLUSION_BENCH", "XRFG_TEST_TRIPLE_BENCH",
+                  "XRFG_TEST_CURSOR_BENCH", "XRFG_TEST_WARM_ONE_BENCH", // 0059
+                  "XRFG_TEST_FOVEATED_BENCH", "XRFG_TEST_FOVEATED_QUALITY", "XRFG_TEST_FG_TRIPLE_BENCH", // 0123
+-                 "XRFG_TEST_FG_EXTRAS_ASYNC"}) { // 0125
++                 "XRFG_TEST_FG_EXTRAS_ASYNC", // 0125
++                 "XRFG_TEST_FG_LIGHTS_BENCH"}) { // DCS Control (0126)
+             if (GetEnvironmentVariableA(bench, nullptr, 0) && !nvidia_hardware_present()) {
+                 std::cout << bench << " skipped: no NVIDIA hardware adapter\n";
+                 return kSkipped;
+@@ -6959,6 +6962,23 @@ int main() {
+             std::cout << "D3D12 DCS motion tests passed\n";
+             return 0;
+         }
++        // DCS Control (0126): light_single_image's cost at a headset's eye image.
++        if (GetEnvironmentVariableA("XRFG_TEST_FG_LIGHTS_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            bench_fg_lights(bench_fixture, 5424, 5356);
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
++        // DCS Control (0126): light_single_image's fixtures (tests/fg_lights.inc).
++        if (GetEnvironmentVariableA("XRFG_TEST_FG_LIGHTS", nullptr, 0)) {
++            if (!nvidia_hardware_present()) {
++                std::cout << "D3D12 FG lights tests skipped: no NVIDIA hardware adapter\n";
++                return kSkipped;
++            }
++            run_fg_lights_fixtures();
++            std::cout << "D3D12 FG lights tests passed\n";
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_BENCH", nullptr, 0)) {
+             D3D12WarpFixture bench_fixture(true);
+             bench_dcs_motion_composition(bench_fixture, 5424, 5356);
+diff --git a/tests/fg_lights.inc b/tests/fg_lights.inc
+new file mode 100644
+index 0000000..701fc0c
+--- /dev/null
++++ b/tests/fg_lights.inc
+@@ -0,0 +1,638 @@
++// DCS Control (0126): light_single_image ([ofxr] key, kFgQualityLightSingle)
++// against the pilot's night complaint (validation round 08): a distant aircraft
++// seen only as its lights (a spot of about 3 px, ~79 codes over a sky of 0-1)
++// came out of frame generation as two copies of the light 5-7 px apart in every
++// generated frame (ghostW 0.98: a full cross-fade), because a light drawn after
++// DCS's G-buffer has no MV of its own and the optical flow finds no match for a
++// few bright pixels on black. XRFG_TEST_FG_LIGHTS=1 (ctest
++// xrfg_d3d12_fg_lights, NVIDIA hardware, skipped without). Each case is a
++// scene of fg_scene.inc (MVs and classes from its opaque layers, the
++// cockpit mask) with lights added in linear light: moving lights (no MVs,
++// optionally with DCS's own fading trail of copies behind them), stars carried
++// by the sky and runway lights carried by the terrain (their layer's MVs), a
++// light crossing from the sky over a dark terrain edge, a sun glint by day, a
++// HUD over the night sky. Every case is composed with the key off and on, in
++// 2X (1/2), at 1/3 alone, in 3X (1/3 and 2/3 in one pass) and on an sRGB view.
++// Per moving light, against the true frame at the instant:
++//   error    |generated - truth| around the light's three places (A, B, the
++//            instant), over the light's own energy there: 0 exact, about 1
++//            for a cross-fade of copies apart
++//   present  the light's peak at its true place, over the truth's
++//   ghostW   fg_ghostfree.py's double-image index along the motion (0: the
++//            correct interpolation, 1: a plain cross-fade), from the exact
++//            light layers (the real-frame control here is the truth itself: 0)
++// Required: with the key the copies gone (<= a quarter of the key off's and
++// <= 0.12) and the light present (>= 0.7) on every moving case; every pixel
++// further than 16 px from a light's places byte for byte the key off's image;
++// the static cases (stars, runway, glint, HUD) byte for byte the key off's.
++// XRFG_TEST_FG_LIGHTS_DUMP=<folder>: the first eye of every frame as raw RGBA
++// with a json of the places, for fg_ghostfree.py's own measures.
++
++struct FlLight {
++    double x0, y0;                // screen px at s = 0
++    double dx, dy;                // px per pair (a real frame to the next)
++    double peak;                  // encoded code (0-255) of its peak over black
++    std::array<double, 3> colour; // relative, the largest 1
++    double sigma{0.75};           // px
++    int trail{};                  // DCS's fading copies behind it, one per earlier frame
++    double fade{0.7};             // each copy's intensity over the one before
++};
++
++// A light fixed in an opaque layer's texture (a star in the sky, a runway
++// light in the terrain): it moves with that layer, as its MVs say.
++struct FlSpot {
++    int shape;                    // the layer it is fixed in (kFeFull with class 0x80: the sky; kFeTerrain)
++    double u, v;                  // texture point
++    double peak;
++    std::array<double, 3> colour;
++    double sigma{0.6};
++};
++
++struct FlCase {
++    std::string name;
++    std::vector<FeLayer> layers;
++    std::vector<FlLight> lights;
++    std::vector<FlSpot> spots;
++};
++
++double fl_decode(double code) {
++    const double e = std::clamp(code / 255.0, 0.0, 1.0);
++    return e <= 0.04045 ? e / 12.92 : std::pow((e + 0.055) / 1.055, 2.4);
++}
++
++double fl_encode(double linear) {
++    const double l = std::clamp(linear, 0.0, 1.0);
++    return 255.0 * (l <= 0.0031308 ? l * 12.92 : 1.055 * std::pow(l, 1.0 / 2.4) - 0.055);
++}
++
++std::array<double, 2> fl_light_place(const FlLight& light, double s) {
++    return {light.x0 + light.dx * s, light.y0 + light.dy * s};
++}
++
++int fl_layer_of(const FlCase& scene, int shape) {
++    for (std::size_t index = 0; index < scene.layers.size(); ++index) {
++        const FeLayer& layer = scene.layers[index];
++        if (!layer.opaque) continue;
++        if (shape == kFeFull ? (layer.klass & 0x80U) != 0U : layer.shape == shape) return static_cast<int>(index);
++    }
++    return -1;
++}
++
++// The scene at instant s, lights added in linear light (`with_lights` false:
++// the background alone), the same image in both eyes.
++StereoPattern fl_frame(const FlCase& scene, UINT width, UINT height, double s, bool with_lights = true) {
++    FeFrame frame = fe_frame(scene.layers, width, height, s);
++    if (!with_lights) return frame.image;
++    const double w = width, h = height;
++    std::vector<double> linear(static_cast<std::size_t>(width) * height * 3U);
++    for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
++        for (int c = 0; c < 3; ++c) linear[i * 3 + c] = fl_decode(frame.image[0][i * kBytesPerPixel + c]);
++    }
++    const int cockpit = fl_layer_of(scene, kFeCockpit);
++    const auto add = [&](double x, double y, double amplitude, const std::array<double, 3>& colour, double sigma,
++                         int only_on) {
++        const int reach = static_cast<int>(std::ceil(4.0 * sigma)) + 1;
++        for (int py = static_cast<int>(y) - reach; py <= static_cast<int>(y) + reach; ++py) {
++            for (int px = static_cast<int>(x) - reach; px <= static_cast<int>(x) + reach; ++px) {
++                if (px < 0 || py < 0 || px >= int(width) || py >= int(height)) continue;
++                const int front = fe_opaque_at(scene.layers, px + 0.5, py + 0.5, s, w, h);
++                if (only_on >= 0 ? front != only_on : front == cockpit) continue;
++                const double dx = px + 0.5 - x, dy = py + 0.5 - y;
++                const double g = amplitude * std::exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma));
++                const std::size_t i = static_cast<std::size_t>(py) * width + px;
++                for (int c = 0; c < 3; ++c) linear[i * 3 + c] += g * colour[c];
++            }
++        }
++    };
++    for (const FlSpot& spot : scene.spots) {
++        const int index = fl_layer_of(scene, spot.shape);
++        if (index < 0) continue;
++        const auto at = fe_screen_point(scene.layers[static_cast<std::size_t>(index)], spot.u, spot.v, s, w, h);
++        add(at[0], at[1], fl_decode(spot.peak), spot.colour, spot.sigma, index);
++    }
++    for (const FlLight& light : scene.lights) {
++        double amplitude = fl_decode(light.peak);
++        for (int k = 0; k <= light.trail; ++k) {
++            const auto at = fl_light_place(light, s - k);
++            add(at[0], at[1], amplitude, light.colour, light.sigma, -1);
++            amplitude *= light.fade;
++        }
++    }
++    for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
++        for (int c = 0; c < 3; ++c) {
++            frame.image[0][i * kBytesPerPixel + c] = static_cast<std::uint8_t>(fl_encode(linear[i * 3 + c]) + 0.5);
++        }
++    }
++    frame.image[1] = frame.image[0];
++    return frame.image;
++}
++
++// A night scene: a near-black sky (codes 0-2), dark terrain below a sloped
++// horizon rolling 1.5 degrees a pair, the cockpit's strut and panel; `hud` a
++// still green HUD over it (no MVs).
++std::vector<FeLayer> fl_night_layers(bool hud, double sky = 0.012, double terrain = 0.06) {
++    const double pi = 3.14159265358979;
++    const double roll = 1.5 * pi / 180.0;
++    std::vector<FeLayer> layers;
++    if (hud) layers.push_back({0, 1.0, 0.0, 0.0, 0.0, kFeHud, 0, 1.0, false, {30.0, 200.0, 45.0}});
++    layers.push_back({2, 1.0, 0.0, 0.0, 0.0, kFeCockpit, 5, 1.0, true, {0.05, 0.05, 0.055}});
++    layers.push_back({0, 1.0, roll, 6.0, 9.0, kFeTerrain, 0, 1.0, true, {terrain, terrain, terrain}});
++    layers.push_back({3, 0.35, roll, 0.0, 0.0, kFeFull, 0x80, 1.0, true, {sky, sky, 1.2 * sky}});
++    return layers;
++}
++
++std::vector<FlCase> fl_cases(UINT width, UINT height) {
++    const double w = width, h = height;
++    std::vector<FlCase> cases;
++    // The pilot's case: a white light of 79 codes, 6 px a pair; a red one
++    // brighter and faster the other way.
++    const FlLight white{w * 0.55, h * 0.16, 6.0, 1.0, 79.0, {1.0, 1.0, 1.0}};
++    const FlLight red{w * 0.30, h * 0.22, -9.0, 2.0, 170.0, {1.0, 0.25, 0.2}, 0.9};
++    cases.push_back({"night lights", fl_night_layers(false), {white, red}, {}});
++    FlLight white_trail = white, red_trail = red;
++    white_trail.trail = red_trail.trail = 5;
++    cases.push_back({"night lights+trail", fl_night_layers(false), {white_trail, red_trail}, {}});
++    // Slow (2 px a pair: the copies overlap) and fast (30 px a pair).
++    cases.push_back({"night light slow+fast", fl_night_layers(false),
++        {FlLight{w * 0.62, h * 0.12, 2.0, 0.5, 120.0, {1.0, 1.0, 1.0}},
++            FlLight{w * 0.25, h * 0.10, 30.0, -3.0, 140.0, {0.3, 1.0, 0.3}}}, {}});
++    // Static stars over the sky (carried by its MVs) and a lit runway on the
++    // terrain (carried by its MVs): nothing to do, byte for byte.
++    std::vector<FlSpot> stars;
++    for (int i = 0; i < 40; ++i) {
++        stars.push_back({kFeFull, w * (0.15 + 0.7 * std::fmod(i * 0.618034, 1.0)),
++            h * (0.04 + 0.28 * std::fmod(i * 0.414214, 1.0)), 40.0 + 6.0 * (i % 12), {1.0, 1.0, 1.0}});
++    }
++    cases.push_back({"night stars", fl_night_layers(false), {}, stars});
++    std::vector<FlSpot> runway;
++    for (int i = 0; i < 24; ++i) {
++        runway.push_back({kFeTerrain, w * 0.42 + i * 9.0, h * 0.68 + i * 1.5, 150.0, {1.0, 0.85, 0.6}});
++        runway.push_back({kFeTerrain, w * 0.42 + i * 9.0, h * 0.72 + i * 1.5, 150.0, {1.0, 0.85, 0.6}});
++    }
++    cases.push_back({"night runway", fl_night_layers(false), {}, runway});
++    // Stars and a runway with a moving light among them.
++    {
++        FlCase mixed{"night stars+runway+light", fl_night_layers(false), {white, red}, stars};
++        mixed.spots.insert(mixed.spots.end(), runway.begin(), runway.end());
++        cases.push_back(mixed);
++    }
++    // A light crossing from the sky over the dark terrain's edge (the horizon
++    // at x: h * 0.45 + 0.08 * (x - w / 2), before the roll).
++    cases.push_back({"night light over terrain edge", fl_night_layers(false),
++        {FlLight{w * 0.70, h * 0.45 + 0.08 * (w * 0.20) - 4.0, -1.0, 7.0, 110.0, {1.0, 0.95, 0.85}}}, {}});
++    // The HUD over the night sky, still; a light passing beside its box.
++    cases.push_back({"night HUD", fl_night_layers(true), {}, {}});
++    cases.push_back({"night HUD+light", fl_night_layers(true),
++        {FlLight{w * 0.36, h * 0.27, 6.0, 1.0, 100.0, {1.0, 1.0, 1.0}}}, {}});
++    // By day: the sun's glint, a bright spot moving over the bright sky, and a
++    // small hard one: never touched.
++    cases.push_back({"day glint", fe_flight_case("day", 1.0, false).layers,
++        {FlLight{w * 0.70, h * 0.15, 5.0, 1.0, 255.0, {1.0, 1.0, 0.95}, 4.0},
++            FlLight{w * 0.40, h * 0.12, 6.0, 0.0, 255.0, {1.0, 1.0, 1.0}, 0.8}}, {}});
++    return cases;
++}
++
++struct FlVariant {
++    std::string name;
++    std::vector<double> instants;  // one: a pair with one synthetic; two: 3X in one pass
++    DXGI_FORMAT view{kFormat};
++};
++
++// The pair (a, b) composed at the variant's instants, with the key or without.
++std::vector<StereoPattern> fl_synthesize(D3D12WarpFixture& fixture, const StereoPattern& a, const StereoPattern& b,
++    UINT width, UINT height, const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>& masks,
++    const FlVariant& variant, bool light, std::uint64_t* light_draws = nullptr) {
++    const ReprojectionViews views = make_reprojection_views();
++    const DXGI_FORMAT saved_texture_format = g_test_texture_format;
++    g_test_texture_format = variant.view == kFormat ? kFormat : DXGI_FORMAT_R8G8B8A8_TYPELESS;
++    std::array<ComPtr<ID3D12Resource>, 2> sources{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    std::array<ComPtr<ID3D12Resource>, 2> currents{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    g_test_texture_format = saved_texture_format;
++    const bool triple = variant.instants.size() == 2U;
++    std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 2> current_out{currents[0].Get(), currents[1].Get()};
++    std::array<ID3D12Resource*, 2> synthetic_out{synthetics[0].Get(), synthetics[1].Get()};
++    upload_pattern(fixture, sources[0].Get(), a);
++    upload_pattern(fixture, sources[1].Get(), b);
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require_hresult(history->initialize(fixture.device(), fixture.queue(), input, D3D12_RESOURCE_STATE_RENDER_TARGET),
++        "fg lights history");
++    xrfg::D3D12NvidiaOpticalFlowOptions options{};
++    options.occlusion_aware = 1; // the app's default for Medium
++    options.cockpit_mask = true;
++    options.dcs_motion = true;
++    options.fg_quality = light ? xrfg::kFgQualityLightSingle : 0U;
++    xrfg::D3D12FrameSynthesizer synth;
++    require_hresult(synth.initialize(fixture.device(), fixture.queue(), history,
++                        std::span<ID3D12Resource* const>(current_out.data(), current_out.size()),
++                        std::span<ID3D12Resource* const>(synthetic_out.data(), triple ? 2U : 1U), variant.view,
++                        D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::nvidia, options),
++        "fg lights initialize");
++    xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
++    xrfg::D3D12FrameSynthesisTicket output{};
++    require_hresult(history->capture(0, &ca), "fg lights A");
++    require_hresult(history->commit(ca), "fg lights commit A");
++    synth.set_cockpit_mask(masks[0]);
++    require_hresult(synth.submit_prime(ca, views, 0, &output), "fg lights prime");
++    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
++    require_hresult(history->capture(1, &cb), "fg lights B");
++    require_hresult(history->commit(cb), "fg lights commit B");
++    synth.set_cockpit_mask(masks[1]);
++    const HRESULT submitted = triple
++        ? synth.submit_pair(cb, views, views, 0, 0, &output, std::nullopt, {}, false,
++              static_cast<float>(variant.instants[0]), xrfg::D3D12ExtraSynthetic{1, static_cast<float>(variant.instants[1])})
++        : synth.submit_pair(cb, views, views, 0, 0, &output, std::nullopt, {}, false,
++              static_cast<float>(variant.instants[0]));
++    require_hresult(submitted, "fg lights pair");
++    std::vector<StereoPattern> images;
++    for (std::size_t index = 0; index < variant.instants.size(); ++index) {
++        images.push_back(readback_pattern(fixture, synthetics[index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
++    }
++    require_hresult(synth.wait_for_idle(), "fg lights drain");
++    if (light_draws != nullptr) *light_draws = synth.fg_settings().light_draws;
++    // XRFG_TEST_FG_LIGHTS_LIST=1: the list the pair left, view 0.
++    if (light && GetEnvironmentVariableA("XRFG_TEST_FG_LIGHTS_LIST", nullptr, 0) != 0) {
++        const auto words = synth.light_list_for_tests();
++        if (!words.empty()) {
++            const std::uint32_t count = std::min<std::uint32_t>(words[0], 64U);
++            std::cout << "  list (" << variant.name << "): " << words[0] << " entries";
++            for (std::uint32_t i = 0; i < count; ++i) {
++                const std::uint32_t* r = &words[4U + i * 4U];
++                char text[160]{};
++                std::snprintf(text, sizeof(text), " | #%u %s (%.2f,%.2f) r%u peak %.0f best %d first %u", i,
++                    (r[1] & 0x80000000U) != 0U ? "B" : "A", (r[0] & 0xffffU) / 8.0, (r[0] >> 16) / 8.0, (r[1] >> 24) & 3U,
++                    r[3] / 65535.0 * 255.0, (r[2] & 0xffffU) == 0xffffU ? -1 : int(r[2] & 0xffffU), r[2] >> 16);
++                std::cout << text;
++            }
++            std::cout << std::endl;
++        }
++    }
++    fixture.require_no_debug_errors();
++    return images;
++}
++
++double fl_luma(const StereoPattern& image, UINT width, UINT x, UINT y) {
++    const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++    return 0.2126 * image[0][i] + 0.7152 * image[0][i + 1] + 0.0722 * image[0][i + 2];
++}
++
++struct FlMeasure {
++    double copies{};
++    double present{};
++    double ghost_w{};
++    double lead{}; // light ahead of its true place (the leading copy of a cross-fade), over its own energy
++};
++
++// One moving light's measures in a synthetic at instant t (see the top).
++FlMeasure fl_measure(const FlCase& scene, std::size_t which, const StereoPattern& generated, double t, UINT width,
++    UINT height) {
++    const FlLight& light = scene.lights[which];
++    FlCase alone{scene.name, scene.layers, {light}, {}};
++    alone.lights[0].trail = 0;
++    // The light's own layer (the truth less the background, encoded codes
++    // as the images hold them), at A, B and the instant.
++    const StereoPattern background = fl_frame(scene, width, height, t, false);
++    const StereoPattern truth = fl_frame(scene, width, height, t);
++    const StereoPattern only_t = fl_frame(alone, width, height, t);
++    const StereoPattern only_a = fl_frame(alone, width, height, 0.0);
++    const StereoPattern only_b = fl_frame(alone, width, height, 1.0);
++    const StereoPattern bg_a = fl_frame(alone, width, height, 0.0, false);
++    const StereoPattern bg_b = fl_frame(alone, width, height, 1.0, false);
++    const auto pa = fl_light_place(light, 0.0), pb = fl_light_place(light, 1.0), pt = fl_light_place(light, t);
++    const double radius = std::max(4.0, 3.0 * light.sigma + 1.5);
++    const auto close_to = [&](const std::array<double, 2>& p, double x, double y) {
++        return std::hypot(x + 0.5 - p[0], y + 0.5 - p[1]) <= radius;
++    };
++    FlMeasure m;
++    double lead_energy = 0.0;
++    double copy_energy = 0.0, own = 0.0, peak_truth = 0.0, peak_generated = 0.0, num = 0.0, den = 0.0;
++    const int x0 = int(std::min({pa[0], pb[0], pt[0]}) - radius - 2), x1 = int(std::max({pa[0], pb[0], pt[0]}) + radius + 2);
++    const int y0 = int(std::min({pa[1], pb[1], pt[1]}) - radius - 2), y1 = int(std::max({pa[1], pb[1], pt[1]}) + radius + 2);
++    for (int y = std::max(y0, 0); y <= std::min(y1, int(height) - 1); ++y) {
++        for (int x = std::max(x0, 0); x <= std::min(x1, int(width) - 1); ++x) {
++            const double bg = fl_luma(background, width, x, y);
++            const double g = fl_luma(generated, width, x, y) - bg;
++            const double ref = fl_luma(only_t, width, x, y) - bg;
++            const double tr = fl_luma(truth, width, x, y) - bg;
++            if (close_to(pt, x, y)) {
++                peak_truth = std::max(peak_truth, tr);
++                peak_generated = std::max(peak_generated, g);
++            }
++            if (close_to(pt, x, y) || close_to(pa, x, y) || close_to(pb, x, y)) {
++                own += std::max(tr, 0.0);
++                copy_energy += std::abs(g - tr);
++            }
++            {
++                const double mx = light.dx, my = light.dy, len = std::max(std::hypot(mx, my), 1.0e-6);
++                const double ahead = ((x + 0.5 - pt[0]) * mx + (y + 0.5 - pt[1]) * my) / len;
++                const double across = std::abs((x + 0.5 - pt[0]) * my - (y + 0.5 - pt[1]) * mx) / len;
++                if (ahead > radius - 1.0 && across <= radius) lead_energy += std::max(g - std::max(tr, 0.0), 0.0);
++            }
++            // ghostW: EG - ref against the cross-fade's regressor (cA + cB).
++            const double oa = fl_luma(only_a, width, x, y) - fl_luma(bg_a, width, x, y);
++            const double ob = fl_luma(only_b, width, x, y) - fl_luma(bg_b, width, x, y);
++            const double c = (1.0 - t) * (oa - ref) + t * (ob - ref);
++            num += (g - ref) * c;
++            den += c * c;
++        }
++    }
++    m.copies = own > 0.0 ? copy_energy / own : 0.0;
++    m.present = peak_truth > 0.0 ? peak_generated / peak_truth : 0.0;
++    m.ghost_w = den > 1.0e-9 ? num / den : 0.0;
++    m.lead = own > 0.0 ? lead_energy / own : 0.0;
++    return m;
++}
++
++// Whether pixel (x, y) is within `reach` px of any light's place at A, B or the
++// instant (and its trail's copies).
++bool fl_near_light(const FlCase& scene, double x, double y, double reach) {
++    for (const FlLight& light : scene.lights) {
++        for (int k = 0; k <= light.trail + 1; ++k) {
++            for (double s : {0.0, 1.0}) {
++                const auto a = fl_light_place(light, s - k);
++                const auto b = fl_light_place(light, s - k + 1.0);
++                // The segment between two consecutive places.
++                const double vx = b[0] - a[0], vy = b[1] - a[1];
++                const double len2 = vx * vx + vy * vy;
++                double u = len2 > 0.0 ? ((x - a[0]) * vx + (y - a[1]) * vy) / len2 : 0.0;
++                u = std::clamp(u, 0.0, 1.0);
++                if (std::hypot(x - a[0] - u * vx, y - a[1] - u * vy) <= reach) return true;
++            }
++        }
++    }
++    return false;
++}
++
++void fl_dump(const char* folder, const std::string& name, const StereoPattern& image, UINT width, UINT height) {
++    std::string file = std::string(folder) + "\\" + name + ".rgba";
++    for (char& c : file) if (c == ' ' || c == '+' || c == '/') c = '_';
++    std::ofstream out(file, std::ios::binary);
++    out.write(reinterpret_cast<const char*>(image[0].data()), static_cast<std::streamsize>(width) * height * kBytesPerPixel);
++}
++
++void run_fg_lights_fixtures() {
++    D3D12WarpFixture fixture(true);
++    constexpr UINT width = 640, height = 480;
++    const ReprojectionViews views = make_reprojection_views();
++    char dump_folder[512]{};
++    const bool dump = GetEnvironmentVariableA("XRFG_TEST_FG_LIGHTS_DUMP", dump_folder, sizeof(dump_folder)) != 0;
++    std::ofstream places;
++    if (dump) {
++        places.open(std::string(dump_folder) + "\\places.json");
++        places << "{\"width\": " << width << ", \"height\": " << height << ", \"runs\": [\n";
++    }
++    bool first_place = true;
++    const std::vector<FlVariant> variants{{"2X", {0.5}}, {"t1/3", {1.0 / 3.0}},
++        {"3X", {1.0 / 3.0, 2.0 / 3.0}}, {"2X srgb", {0.5}, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB}};
++    auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
++    std::vector<std::string> failures; // every case runs; the first failure fails the test at the end
++    const auto check = [&](bool ok, const std::string& what) {
++        if (!ok) failures.push_back(what);
++    };
++    for (const FlCase& scene : fl_cases(width, height)) {
++        const StereoPattern a = fl_frame(scene, width, height, 0.0);
++        const StereoPattern b = fl_frame(scene, width, height, 1.0);
++        // Both frames' MVs and classes from the opaque layers (lights have none).
++        const auto previous = fe_mask_frame(fixture, scene.layers, width, height, 10, 10, views, 1000, 500, true,
++            counters, 0.0, -1.0);
++        const auto current = fe_mask_frame(fixture, scene.layers, width, height, 10, 10, views, 2000, 1000, true,
++            counters, 1.0, 0.0);
++        if (dump) {
++            fl_dump(dump_folder, scene.name + " A", a, width, height);
++            fl_dump(dump_folder, scene.name + " B", b, width, height);
++        }
++        double worst_off = 0.0; // the most doubled light without the key, 2X
++        for (const FlVariant& variant : variants) {
++            const auto off = fl_synthesize(fixture, a, b, width, height, {previous, current}, variant, false);
++            std::uint64_t draws = 0;
++            const auto on = fl_synthesize(fixture, a, b, width, height, {previous, current}, variant, true, &draws);
++            for (std::size_t index = 0; index < variant.instants.size(); ++index) {
++                const double t = variant.instants[index];
++                const std::string label = "fg lights " + scene.name + " " + variant.name +
++                    (variant.instants.size() > 1U ? (index == 0U ? " (1/3)" : " (2/3)") : "");
++                std::size_t changed = 0, changed_far = 0;
++                for (UINT y = 0; y < height; ++y) {
++                    for (UINT x = 0; x < width; ++x) {
++                        const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                        bool same = true;
++                        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                            for (int c = 0; c < 4; ++c) same = same && on[index][eye][i + c] == off[index][eye][i + c];
++                        }
++                        if (same) continue;
++                        ++changed;
++                        if (!fl_near_light(scene, x + 0.5, y + 0.5, 16.0)) ++changed_far;
++                    }
++                }
++                const StereoPattern truth = fl_frame(scene, width, height, t);
++                const auto all = [](UINT, UINT, UINT) { return true; };
++                const DepthTestError error_off = depth_test_error(off[index], truth, width, height, all);
++                const DepthTestError error_on = depth_test_error(on[index], truth, width, height, all);
++                std::cout << label << ": " << changed << " px changed (" << changed_far << " far from a light), "
++                          << draws << " light draws, all mae " << error_off.mae << " -> " << error_on.mae;
++                for (std::size_t which = 0; which < scene.lights.size(); ++which) {
++                    const FlMeasure m_off = fl_measure(scene, which, off[index], t, width, height);
++                    const FlMeasure m_on = fl_measure(scene, which, on[index], t, width, height);
++                    const FlMeasure m_truth = fl_measure(scene, which, truth, t, width, height);
++                    char text[256]{};
++                    std::snprintf(text, sizeof(text),
++                        " | light %zu error %.2f -> %.2f present %.2f -> %.2f ghostW %.2f -> %.2f (truth %.2f) lead %.2f -> %.2f",
++                        which, m_off.copies, m_on.copies, m_off.present, m_on.present, m_off.ghost_w, m_on.ghost_w,
++                        m_truth.ghost_w, m_off.lead, m_on.lead);
++                    std::cout << text;
++                    // The day glint is never a light here (bright surroundings):
++                    // it stays as the key off leaves it (checked below).
++                    if (scene.name.rfind("day", 0) == 0) continue;
++                    // With DCS's trail every real frame holds copies behind the
++                    // light (at the other frame's places: ghostW and the error
++                    // see them too); there the leading copy is what must go.
++                    const FlLight& light = scene.lights[which];
++                    if (variant.view == kFormat && variant.instants.size() == 1U && t == 0.5) {
++                        worst_off = std::max(worst_off, m_off.ghost_w);
++                    }
++                    if (light.trail == 0) {
++                        // Copies at least 4 px apart and clearly doubled without
++                        // the key: nearly gone; closer (they overlap, a slow
++                        // light) or a light the flow half followed: not worse.
++                        if (std::hypot(light.dx, light.dy) >= 4.0 && m_off.ghost_w >= 0.3) {
++                            check(m_on.ghost_w <= std::min(0.2, 0.5 * m_off.ghost_w), label + ": the light is still doubled");
++                        } else {
++                            check(m_on.ghost_w <= std::max(m_off.ghost_w, 0.15), label + ": the light is more doubled");
++                        }
++                        check(m_on.copies <= m_off.copies + 0.02, label + ": the light's error grew");
++                    }
++                    // Ahead of the light: the leading copy gone (half at most),
++                    // or, where there was little to begin with (the
++                    // composition's own edge error at a horizon), no more than
++                    // 0.08 more (the 2/3 instant there: 0.14 -> 0.20).
++                    check(m_on.lead <= std::max(0.1, 0.5 * m_off.lead) || m_on.lead <= m_off.lead + 0.08,
++                        label + ": a copy ahead of the light remains");
++                    check(m_on.present >= 0.7, label + ": the light is not where it is at the instant");
++                }
++                std::cout << std::endl;
++                check(changed_far == 0, label + ": pixels away from every light changed");
++                if (scene.lights.empty() || scene.name.rfind("day", 0) == 0) {
++                    check(changed == 0, label + ": a scene without a moving light changed");
++                }
++                if (dump) {
++                    const std::string stem = scene.name + " " + variant.name + " " + std::to_string(index);
++                    fl_dump(dump_folder, stem + " off", off[index], width, height);
++                    fl_dump(dump_folder, stem + " on", on[index], width, height);
++                    fl_dump(dump_folder, stem + " truth", truth, width, height);
++                    fl_dump(dump_folder, stem + " bg", fl_frame(scene, width, height, t, false), width, height);
++                    places << (first_place ? "" : ",\n") << "{\"case\": \"" << scene.name << "\", \"variant\": \""
++                           << variant.name << "\", \"index\": " << index << ", \"t\": " << t << ", \"lights\": [";
++                    first_place = false;
++                    for (std::size_t which = 0; which < scene.lights.size(); ++which) {
++                        const FlLight& l = scene.lights[which];
++                        places << (which ? ", " : "") << "{\"x0\": " << l.x0 << ", \"y0\": " << l.y0 << ", \"dx\": " << l.dx
++                               << ", \"dy\": " << l.dy << ", \"sigma\": " << l.sigma << ", \"trail\": " << l.trail << "}";
++                    }
++                    places << "]}";
++                }
++            }
++        }
++        // The fixture shows the pilot's double light without the key (2X):
++        // at least one light per night case a cross-fade more than half.
++        if (!scene.lights.empty() && scene.name.rfind("night", 0) == 0) {
++            check(worst_off >= 0.5, "fg lights " + scene.name + ": no light doubled without the key (the fixture)");
++        }
++    }
++    if (dump) places << "\n]}\n";
++    for (const std::string& failure : failures) std::cout << "FAILED " << failure << std::endl;
++    require(failures.empty(), failures.empty() ? std::string() : failures.front());
++    fixture.require_no_debug_errors();
++}
++
++// DCS Control (0126): light_single_image's GPU cost at a headset's eye image
++// (XRFG_TEST_FG_LIGHTS_BENCH, label bench). Two synthesizers on the same night
++// frames (two moving lights, stars, a runway), interleaved pair by pair: the
++// key off and on, in 2X and in 3X. The composition's time includes the
++// resample, the scatter and the light passes, as the layer logs it.
++void bench_fg_lights(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    constexpr UINT kFrames = 4;
++    constexpr int kPairs = 240;
++    std::vector<FlCase> cases = fl_cases(width, height);
++    FlCase scene = cases[5]; // stars, a runway and two moving lights
++    const double factor = double(width) / 640.0;
++    for (FeLayer& layer : scene.layers) {
++        layer.dx *= factor;
++        layer.dy *= factor;
++    }
++    for (FlLight& light : scene.lights) {
++        light.dx *= factor;
++        light.dy *= factor;
++    }
++    const UINT divisor = 9;
++    const ReprojectionViews views = make_reprojection_views();
++    const StereoPattern a = fl_frame(scene, width, height, 0.0);
++    const StereoPattern b = fl_frame(scene, width, height, 1.0);
++    for (const bool triple : {false, true}) {
++        struct Pipeline {
++            std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++            std::array<ComPtr<ID3D12Resource>, 2> currents{};
++            std::array<ComPtr<ID3D12Resource>, 2> synthetics{};
++            std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++            std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++            std::vector<std::uint64_t> composition;
++            std::vector<std::uint64_t> total;
++        };
++        auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
++        std::array<Pipeline, 2> pipelines{};
++        for (UINT index = 0; index < pipelines.size(); ++index) {
++            Pipeline& pipeline = pipelines[index];
++            for (UINT frame = 0; frame < kFrames; ++frame) {
++                pipeline.sources[frame] = create_source_texture(fixture, width, height);
++                upload_pattern(fixture, pipeline.sources[frame].Get(), frame % 2U == 0U ? a : b);
++            }
++            for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++            for (auto& s : pipeline.synthetics) s = create_source_texture(fixture, width, height);
++            std::array<ID3D12Resource*, kFrames> source_pointers{};
++            for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = pipeline.sources[i].Get();
++            std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++            std::array<ID3D12Resource*, 2> synthetic_pointers{pipeline.synthetics[0].Get(), pipeline.synthetics[1].Get()};
++            pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++            require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                        std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                        D3D12_RESOURCE_STATE_RENDER_TARGET)), "fg lights bench: history");
++            xrfg::D3D12NvidiaOpticalFlowOptions options{};
++            options.occlusion_aware = 1;
++            options.cockpit_mask = true;
++            options.dcs_motion = true;
++            options.fg_quality = index == 1 ? xrfg::kFgQualityLightSingle : 0U;
++            pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++            require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                        pipeline.history,
++                        std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                        std::span<ID3D12Resource* const>(synthetic_pointers.data(), triple ? 2U : 1U),
++                        kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                        xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "fg lights bench: synthesizer");
++        }
++        const auto with_b =
++            fe_mask_frame(fixture, scene.layers, width, height, divisor, divisor, views, 0, 0, true, counters);
++        const auto with_a =
++            fe_mask_frame(fixture, scene.layers, width, height, divisor, divisor, views, 0, 0, true, counters, 0.0, 1.0);
++        for (int frame = 0; frame <= kPairs; ++frame) {
++            const UINT slot = static_cast<UINT>(frame) % kFrames;
++            for (Pipeline& pipeline : pipelines) {
++                xrfg::D3D12HistoryCaptureTicket capture{};
++                xrfg::D3D12FrameSynthesisTicket ticket{};
++                require(operation_succeeded(pipeline.history->capture(slot, &capture)) &&
++                            operation_succeeded(pipeline.history->commit(capture)), "fg lights bench: capture");
++                const auto& source = slot % 2U == 0U ? with_a : with_b;
++                auto mask = std::make_shared<xrfg::D3D12CockpitMaskFrame>();
++                mask->texture = source->texture;
++                mask->ready_fence = source->ready_fence;
++                mask->ready_value = source->ready_value;
++                mask->views = source->views;
++                mask->motion_texture = source->motion_texture;
++                mask->motion_class_texture = source->motion_class_texture;
++                mask->motion = frame > 0;
++                mask->motion_class = true;
++                mask->motion_views = source->motion_views;
++                mask->motion_slot_flags = source->motion_slot_flags;
++                mask->counters = counters;
++                mask->display_time = 1000 + frame;
++                mask->motion_previous_display_time = 999 + frame;
++                pipeline.synthesizer->set_cockpit_mask(mask);
++                const HRESULT submitted = frame == 0
++                    ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                    : triple
++                    ? pipeline.synthesizer->submit_pair(capture, views, views, 0, 1, &ticket, std::nullopt, {}, false,
++                          1.0F / 3.0F, xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
++                    : pipeline.synthesizer->submit_pair(capture, views, views, 0,
++                          static_cast<std::uint32_t>(frame % 2), &ticket, std::nullopt, {}, false, 0.5F);
++                require(operation_succeeded(submitted), "fg lights bench: submission");
++                require_frame_start_gate(*pipeline.synthesizer, "fg lights bench: frame-start gate");
++                xrfg::D3D12NvidiaGpuTiming timing{};
++                while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                    if (timing.previous_serial == 0) continue;
++                    pipeline.composition.push_back(timing.composition_microseconds);
++                    pipeline.total.push_back(timing.total_microseconds);
++                }
++            }
++        }
++        require(operation_succeeded(pipelines[0].synthesizer->wait_for_idle()) &&
++                    operation_succeeded(pipelines[1].synthesizer->wait_for_idle()), "fg lights bench: idle");
++        const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++            if (values.empty()) return 0;
++            std::sort(values.begin(), values.end());
++            return values[values.size() / 2];
++        };
++        const auto p90 = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++            if (values.empty()) return 0;
++            std::sort(values.begin(), values.end());
++            return values[values.size() * 9 / 10];
++        };
++        std::cout << "fg lights bench " << width << "x" << height << " x2 " << (triple ? "3X" : "2X")
++                  << ": composition median " << median(pipelines[0].composition) << " us key off, "
++                  << median(pipelines[1].composition) << " us on (p90 " << p90(pipelines[0].composition) << " / "
++                  << p90(pipelines[1].composition) << "); whole pair median " << median(pipelines[0].total) << " / "
++                  << median(pipelines[1].total) << " us (" << pipelines[0].composition.size() << "/"
++                  << pipelines[1].composition.size() << " pairs timed; light draws "
++                  << pipelines[1].synthesizer->fg_settings().light_draws << ")" << std::endl;
++    }
++}
+diff --git a/tests/fg_scene.inc b/tests/fg_scene.inc
+new file mode 100644
+index 0000000..9a78046
+--- /dev/null
++++ b/tests/fg_scene.inc
+@@ -0,0 +1,321 @@
++// DCS Control (0126): the synthetic flight scene light_single_image's fixtures
++// (fg_lights.inc) are drawn in. Every scene is drawn exactly at the previous
++// capture (s = 0), the current one (s = 1) and in between (the truth), from
++// rigid layers (front first), with what DCS's G-buffer holds of it: the opaque
++// layers' motion vectors at the render resolution (`divisor` output pixels a
++// texel; 10 is the periphery's MVs where the composed image shows the focus
++// view), their class (stencil composition, bit 7 the sky) and the cockpit mask
++// at the same resolution. Transparent layers (smoke, particles, the HUD) have
++// none. (Taken from the 0.7.1 development series' engine-data fixtures, which
++// were removed with its occlusion fill.)
++
++struct FeLayer {
++    int texture;       // occlusion_texture's layer
++    double scale;      // texture coordinates per pixel
++    double roll;       // radians at s = 1, about the image centre
++    double dx, dy;     // pixels at s = 1
++    int shape;         // fe_cover
++    std::uint8_t klass;
++    double alpha;      // 1 opaque; below, transparent
++    bool opaque;       // in the G-buffer (MVs, class)
++    std::array<double, 3> tint;
++};
++
++// Region ids of FeFrame::front's layers are their indices; these name the shapes.
++enum FeShape : int {
++    kFeFull = 0, kFeWires = 1, kFeModelLow = 2, kFeModelHigh = 3, kFeSmoke = 4, kFeTerrain = 5,
++    kFeCockpit = 6, kFeHud = 7, kFeParticles = 8,
++};
++
++double fe_cover(int shape, double u, double v, double w, double h) {
++    switch (shape) {
++    case kFeWires: {
++        const double line1 = h * 0.40 + 0.06 * (u - w * 0.5);
++        const double line2 = h * 0.58 - 0.04 * (u - w * 0.5);
++        return std::abs(v - line1) < 0.9 || std::abs(v - line2) < 0.7 ? 1.0 : 0.0;
++    }
++    case kFeModelLow: { // an aircraft over the terrain: fuselage and wings
++        const double cx = w * 0.36, cy = h * 0.70;
++        const bool body = std::abs(v - cy) < 9.0 && std::abs(u - cx) < 52.0;
++        const bool wing = std::abs(u - cx + 6.0) < 12.0 + 0.0 * v && std::abs(v - cy) < 40.0;
++        const bool tail = std::abs(u - cx + 46.0) < 6.0 && std::abs(v - cy) < 18.0;
++        return body || wing || tail ? 1.0 : 0.0;
++    }
++    case kFeModelHigh: { // another one in the sky
++        const double cx = w * 0.62, cy = h * 0.22;
++        const bool body = std::abs(v - cy) < 7.0 && std::abs(u - cx) < 40.0;
++        const bool wing = std::abs(u - cx + 4.0) < 9.0 && std::abs(v - cy) < 30.0;
++        return body || wing ? 1.0 : 0.0;
++    }
++    case kFeSmoke: {
++        const double r = std::hypot(u - w * 0.58, v - h * 0.55) / 70.0;
++        return r < 1.0 ? (1.0 - r * r) : 0.0;
++    }
++    case kFeTerrain: // terrain below a sloped horizon
++        return v > h * 0.45 + 0.08 * (u - w * 0.5) ? 1.0 : 0.0;
++    case kFeCockpit: { // a canopy strut and the panel's top edge
++        const bool strut = u > w * 0.12 - 0.25 * (v - h * 0.5) && u < w * 0.12 - 0.25 * (v - h * 0.5) + 14.0;
++        const bool panel = v > h * 0.86 + 0.02 * (u - w * 0.5);
++        return strut || panel ? 1.0 : 0.0;
++    }
++    case kFeHud: {
++        const bool box = u >= w * 0.40 && u < w * 0.60 && v >= h * 0.30 && v < h * 0.46 &&
++            (u < w * 0.40 + 2.0 || u >= w * 0.60 - 2.0 || v < h * 0.30 + 2.0 || v >= h * 0.46 - 2.0);
++        const bool cross = (std::abs(u - w * 0.5) < 1.0 && std::abs(v - h * 0.38) < 14.0) ||
++            (std::abs(v - h * 0.38) < 1.0 && std::abs(u - w * 0.5) < 14.0);
++        return box || cross ? 1.0 : 0.0;
++    }
++    case kFeParticles: { // a cluster of 3 px sparks
++        for (int i = 0; i < 36; ++i) {
++            const double px = w * 0.72 + 70.0 * std::sin(i * 2.399), py = h * 0.66 + 45.0 * std::cos(i * 1.711);
++            if (std::abs(u - px) < 1.5 && std::abs(v - py) < 1.5) return 1.0;
++        }
++        return 0.0;
++    }
++    default:
++        return 1.0;
++    }
++}
++
++std::array<double, 2> fe_texture_point(const FeLayer& layer, double x, double y, double s, double w, double h) {
++    const double a = -layer.roll * s;
++    const double px = x - w * 0.5 - layer.dx * s;
++    const double py = y - h * 0.5 - layer.dy * s;
++    return {std::cos(a) * px - std::sin(a) * py + w * 0.5, std::sin(a) * px + std::cos(a) * py + h * 0.5};
++}
++
++std::array<double, 2> fe_screen_point(const FeLayer& layer, double u, double v, double s, double w, double h) {
++    const double a = layer.roll * s;
++    const double px = u - w * 0.5, py = v - h * 0.5;
++    return {std::cos(a) * px - std::sin(a) * py + w * 0.5 + layer.dx * s,
++        std::sin(a) * px + std::cos(a) * py + h * 0.5 + layer.dy * s};
++}
++
++// A layer's colour at texture point (u, v).
++std::array<double, 3> fe_colour(const FeLayer& layer, double u, double v) {
++    if (layer.shape == kFeHud || layer.shape == kFeParticles) return layer.tint;
++    const auto texel = occlusion_texture(u * layer.scale, v * layer.scale, layer.texture);
++    return {texel[0] * layer.tint[0], texel[1] * layer.tint[1], texel[2] * layer.tint[2]};
++}
++
++// Cameras. The scene's layers live in the reference
++// camera's image (the current frame's, identity orientation); a frame drawn by
++// a camera turned by `orientation` (its pose) sees, at its pixel, what the
++// reference image holds at the same direction. Per eye, by its field of view.
++struct FeCamera {
++    const ReprojectionViews* views{};    // the fields of view (the same in every camera)
++    xrfg::Quaternion orientation{0.0F, 0.0F, 0.0F, 1.0F};
++    [[nodiscard]] bool turned() const noexcept {
++        return views != nullptr && std::abs(orientation.w) < 0.9999999F;
++    }
++};
++
++std::array<double, 4> fe_tangents(const ReprojectionViews& views, UINT eye) {
++    const auto& fov = views[eye].fov;
++    return {std::tan(fov.angle_left), std::tan(fov.angle_right), std::tan(fov.angle_up), std::tan(fov.angle_down)};
++}
++
++// A pixel of camera `camera` (eye `eye`) to the reference image's pixel, or
++// the other way (`inverse`); false behind the camera.
++bool fe_map_pixel(const FeCamera& camera, UINT eye, double x, double y, double w, double h, bool inverse,
++    double& out_x, double& out_y) {
++    if (!camera.turned()) {
++        out_x = x;
++        out_y = y;
++        return true;
++    }
++    const auto t = fe_tangents(*camera.views, eye);
++    const double tx = t[0] + x / w * (t[1] - t[0]), ty = t[2] - y / h * (t[2] - t[3]);
++    xrfg::Quaternion q = camera.orientation;
++    if (inverse) {
++        q = {-q.x, -q.y, -q.z, q.w};
++    }
++    const xrfg::Vec3 d = depth_test_rotate(q, {static_cast<float>(tx), static_cast<float>(ty), -1.0F});
++    if (!(d.z < -1.0e-6F)) return false;
++    const double rx = d.x / -d.z, ry = d.y / -d.z;
++    out_x = (rx - t[0]) / (t[1] - t[0]) * w;
++    out_y = (t[2] - ry) / (t[2] - t[3]) * h;
++    return true;
++}
++
++struct FeFrame {
++    StereoPattern image;
++    std::vector<std::int8_t> front; // the front layer's index (a transparent one where it covers > 0.3)
++};
++
++// The colour and front layer at reference-image point (cx, cy), instant s.
++std::array<double, 3> fe_shade(const std::vector<FeLayer>& layers, double cx, double cy, double s, double w, double h,
++    std::int8_t& front_out) {
++    std::array<double, 3> colour{0.0, 0.0, 0.0};
++    std::size_t base = layers.size();
++    for (std::size_t index = 0; index < layers.size(); ++index) {
++        const FeLayer& layer = layers[index];
++        if (!layer.opaque) continue;
++        const auto uv = fe_texture_point(layer, cx, cy, s, w, h);
++        if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) {
++            colour = fe_colour(layer, uv[0], uv[1]);
++            base = index;
++            break;
++        }
++    }
++    std::int8_t front = static_cast<std::int8_t>(base);
++    for (std::size_t index = base; index-- > 0;) {
++        const FeLayer& layer = layers[index];
++        if (layer.opaque) continue;
++        const auto uv = fe_texture_point(layer, cx, cy, s, w, h);
++        const double cover = fe_cover(layer.shape, uv[0], uv[1], w, h) * layer.alpha;
++        if (cover > 0.0) {
++            const auto overlay = fe_colour(layer, uv[0], uv[1]);
++            for (int c = 0; c < 3; ++c) colour[c] += (overlay[c] - colour[c]) * cover;
++            if (cover > 0.3) front = static_cast<std::int8_t>(index);
++        }
++    }
++    front_out = front;
++    return colour;
++}
++
++// The image at instant s seen by `camera` (the reference camera by default).
++FeFrame fe_frame(const std::vector<FeLayer>& layers, UINT width, UINT height, double s, const FeCamera& camera = {}) {
++    FeFrame frame;
++    frame.front.assign(static_cast<std::size_t>(width) * height, -1);
++    const double w = width, h = height;
++    const UINT eyes = camera.turned() ? kEyeCount : 1U;
++    for (UINT eye = 0; eye < eyes; ++eye) {
++        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                double cx = x + 0.5, cy = y + 0.5;
++                std::int8_t front = -1;
++                std::array<double, 3> colour{0.0, 0.0, 0.0};
++                if (fe_map_pixel(camera, eye, x + 0.5, y + 0.5, w, h, false, cx, cy)) {
++                    colour = fe_shade(layers, cx, cy, s, w, h, front);
++                }
++                if (eye == 0) frame.front[static_cast<std::size_t>(y) * width + x] = front;
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                for (int c = 0; c < 3; ++c) bytes[i + c] = static_cast<std::uint8_t>(std::clamp(colour[c], 0.0, 255.0) + 0.5);
++                bytes[i + 3] = 255;
++            }
++        }
++        frame.image[eye] = bytes;
++    }
++    if (eyes == 1U) frame.image[1] = frame.image[0];
++    return frame;
++}
++
++// The front opaque layer at reference point (x, y), instant s (-1 none).
++int fe_opaque_at(const std::vector<FeLayer>& layers, double x, double y, double s, double w, double h) {
++    for (std::size_t index = 0; index < layers.size(); ++index) {
++        const FeLayer& layer = layers[index];
++        if (!layer.opaque) continue;
++        const auto uv = fe_texture_point(layer, x, y, s, w, h);
++        if (fe_cover(layer.shape, uv[0], uv[1], w, h) > 0.5) return static_cast<int>(index);
++    }
++    return -1;
++}
++
++// A frame's mask frame as the consumer hands it on: the cockpit mask and,
++// `with_motion`, the MVs and classes at the render resolution (`divisor`),
++// pointing at `previous_display_time`; the frame is the scene at s = `from`
++// seen by `camera`, the frame its MVs point at the scene at `to` seen by
++// `to_camera` (DCS's MVs carry the head's turn: the content's place in that
++// frame's own image less its place in this one).
++std::shared_ptr<xrfg::D3D12CockpitMaskFrame> fe_mask_frame(D3D12WarpFixture& fixture, const std::vector<FeLayer>& layers,
++    UINT width, UINT height, UINT divisor, UINT mask_divisor, const ReprojectionViews& views, std::int64_t display_time,
++    std::int64_t previous_display_time, bool with_motion, const std::shared_ptr<xrfg::CockpitMaskPairCounters>& counters,
++    double from = 1.0, double to = 0.0, const FeCamera& camera = {}, const FeCamera& to_camera = {}) {
++    const double w = width, h = height;
++    std::vector<std::uint8_t> cockpit(static_cast<std::size_t>(width) * height, 0);
++    for (UINT y = 0; y < height; ++y) {
++        for (UINT x = 0; x < width; ++x) {
++            double rx = 0.0, ry = 0.0;
++            if (!fe_map_pixel(camera, 0, x + 0.5, y + 0.5, w, h, false, rx, ry)) continue;
++            const int index = fe_opaque_at(layers, rx, ry, from, w, h);
++            cockpit[static_cast<std::size_t>(y) * width + x] =
++                index >= 0 && (layers[static_cast<std::size_t>(index)].klass & 7U) == 5U ? 1 : 0;
++        }
++    }
++    auto frame = make_cockpit_mask_frame(fixture, width, height, cockpit, mask_divisor, views);
++    frame->display_time = display_time;
++    frame->counters = counters;
++    if (!with_motion) return frame;
++    const UINT d = divisor;
++    const UINT rw = (width + d - 1U) / d, rh = (height + d - 1U) / d;
++    std::vector<std::uint8_t> motion(static_cast<std::size_t>(rw) * kEyeCount * rh * 4U, 0);
++    std::vector<std::uint8_t> classes(static_cast<std::size_t>(rw) * kEyeCount * rh, 0);
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        for (UINT j = 0; j < rh; ++j) {
++            for (UINT i = 0; i < rw; ++i) {
++                const double x = (i + 0.5) * d, y = (j + 0.5) * d;
++                float mx = 0.0F, my = 0.0F;
++                std::uint8_t klass = 7;
++                double rx = 0.0, ry = 0.0;
++                if (fe_map_pixel(camera, eye, x, y, w, h, false, rx, ry)) {
++                    const int index = fe_opaque_at(layers, rx, ry, from, w, h);
++                    if (index >= 0) {
++                        const FeLayer& layer = layers[static_cast<std::size_t>(index)];
++                        const auto uv = fe_texture_point(layer, rx, ry, from, w, h);
++                        const auto then = fe_screen_point(layer, uv[0], uv[1], to, w, h);
++                        double px = then[0], py = then[1];
++                        if (fe_map_pixel(to_camera, eye, then[0], then[1], w, h, true, px, py)) {
++                            mx = static_cast<float>((px - x) / d);
++                            my = static_cast<float>((py - y) / d);
++                        }
++                        klass = layer.klass;
++                    }
++                }
++                const std::size_t texel = static_cast<std::size_t>(j) * rw * kEyeCount + eye * rw + i;
++                const std::uint16_t hx = dcs_motion_half(mx), hy = dcs_motion_half(my);
++                std::memcpy(&motion[texel * 4U], &hx, 2);
++                std::memcpy(&motion[texel * 4U + 2U], &hy, 2);
++                classes[texel] = klass;
++            }
++        }
++    }
++    frame->motion_texture = upload_depth_test_texture(fixture, rw * kEyeCount, rh, DXGI_FORMAT_R16G16_FLOAT, 4, motion);
++    frame->motion_class_texture = upload_depth_test_texture(fixture, rw * kEyeCount, rh, DXGI_FORMAT_R8_UINT, 1, classes);
++    frame->motion = true;
++    frame->motion_class = true;
++    frame->motion_previous_display_time = previous_display_time;
++    frame->motion_slot_flags = 0x80U | 0x40U | 0x3U;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        const auto& fov = views[eye].fov;
++        const float left = std::tan(fov.angle_left), right = std::tan(fov.angle_right);
++        const float up = std::tan(fov.angle_up), down = std::tan(fov.angle_down);
++        auto& view = frame->motion_views[eye];
++        view.valid = true;
++        view.x = eye * rw;
++        view.y = 0;
++        view.width = rw;
++        view.height = rh;
++        // The rect's edges: the last texel may reach past the image.
++        view.fov_tan = {left, left + (right - left) * float(rw * d) / float(width), up,
++            up - (up - down) * float(rh * d) / float(height)};
++    }
++    return frame;
++}
++struct FeCase {
++    const char* name;
++    std::vector<FeLayer> layers;
++};
++
++// The flight scene, day (`dark` 1) or night (0.22): sky, terrain, wires, two
++// aircraft, the cockpit's strut and panel, with or without the effects (HUD,
++// smoke, particles). The world rolls 1.5 degrees a pair and slides.
++FeCase fe_flight_case(const char* name, double dark, bool effects) {
++    const double pi = 3.14159265358979;
++    const double roll = 1.5 * pi / 180.0;
++    const std::array<double, 3> grey{dark, dark, dark};
++    FeCase scene{name, {}};
++    if (effects) {
++        scene.layers.push_back({0, 1.0, 0.0, 0.0, 0.0, kFeHud, 0, 1.0, false, {40.0, 255.0, 60.0}});
++        scene.layers.push_back({0, 1.0, 0.0, 34.0, -22.0, kFeParticles, 0, 1.0, false, {255.0, 220.0, 150.0}});
++        scene.layers.push_back({1, 0.5, 0.0, -14.0, 3.0, kFeSmoke, 0, 0.6, false, {1.2 * dark, 1.2 * dark, 1.2 * dark}});
++    }
++    scene.layers.push_back({2, 1.0, 0.0, 0.0, 0.0, kFeCockpit, 5, 1.0, true, {0.5 * dark, 0.5 * dark, 0.55 * dark}});
++    scene.layers.push_back({1, 1.0, roll, 26.0, -6.0, kFeModelLow, 1, 1.0, true, {0.8 * dark, 0.8 * dark, 0.9 * dark}});
++    scene.layers.push_back({1, 1.0, roll, -30.0, 8.0, kFeModelHigh, 1, 1.0, true, {0.6 * dark, 0.6 * dark, 0.65 * dark}});
++    scene.layers.push_back({1, 1.0, roll, 14.0, 7.0, kFeWires, 0, 1.0, true, {0.3 * dark, 0.3 * dark, 0.3 * dark}});
++    scene.layers.push_back({0, 1.0, roll, 6.0, 9.0, kFeTerrain, 0, 1.0, true, grey});
++    scene.layers.push_back({3, 0.35, roll, 0.0, 0.0, kFeFull, 0x80, 1.0, true, {0.6 * dark, 0.75 * dark, 1.1 * dark}});
++    return scene;
++}
+diff --git a/tests/layer_manual_disarm_tests.cpp b/tests/layer_manual_disarm_tests.cpp
+index b303cc8..77d2fbb 100644
+--- a/tests/layer_manual_disarm_tests.cpp
++++ b/tests/layer_manual_disarm_tests.cpp
+@@ -301,7 +301,7 @@ int main(int argc, char** argv) {
+             require(live_diag_vram != nullptr && live_diag_vram() == 1, "live ini: diag_vram taken in live");
+             // DCS Control (0123): the live contract DCS Control looks for.
+             const auto* contract = reinterpret_cast<const char*>(GetProcAddress(module, "OFXR_LiveFgContract"));
+-            require(contract != nullptr && std::string(contract) == "DCSC-OFXR-LIVE-FG/2",
++            require(contract != nullptr && std::string(contract) == "DCSC-OFXR-LIVE-FG/3",
+                 "live ini: the live contract marker");
+             for (int i = 0; i < 6; ++i) {
+                 if (g_flight_simulator_mode) {
