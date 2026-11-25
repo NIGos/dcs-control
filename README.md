@@ -62,7 +62,7 @@ After each flight the Overview shows a **Last flight** summary.
 ## Requirements
 
 - **Windows 10 or 11, 64-bit** (tested on 11) and **DCS World 2.9** (tested on 2.9.30 and 2.9.31), Steam or standalone.
-- **Engine Optimizations and CPU Boost** run with any graphics card. On AMD Radeon cards the multi-threaded shadows and G-buffer stay off by default (the driver lacks D3D11 command lists), so the gain is smaller; an opt-in runs them on lists Windows emulates. Radeon cards have not been tested yet.
+- **Engine Optimizations and CPU Boost** run with any graphics card. On AMD Radeon cards the driver lacks D3D11 command lists, so the multi-threaded shadows and G-buffer run on lists Windows emulates (on by default), with a smaller gain than on NVIDIA. Tested on a Radeon RX 7900 XTX.
 - **For the VR features:** an NVIDIA RTX graphics card, and either a Pimax headset with Pimax Play (or SteamVR with the Sboys driver), or a Meta Quest 3 with Virtual Desktop.
 - **For DLSS 5:** your own NVIDIA-signed `nvngx_dlssnr.dll`, version 310.8 (tested most) or 310.9. It is not included: NVIDIA does not offer it for download on its own, and DCS Control cannot provide it or point you to one.
 - The setup installs the Microsoft WebView2 Runtime and the Visual C++ x64 runtime from Microsoft if they are missing.

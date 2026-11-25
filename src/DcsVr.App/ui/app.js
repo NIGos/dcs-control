@@ -862,9 +862,9 @@ function buildFields() {
   const engine = p => p.engineOptimizations;
   c = card('engineControls','Engine Optimizations',['More FPS from the same CPU; the image does not change.','About 50 to 60% more FPS on a busy airfield in VR, until the GPU is the limit.']);
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30 and 2.9.31, single player.'],'toggle');
-  // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
-  // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
-  field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threading without driver support',['Multi-threaded shadows and G-buffer for AMD Radeon and other cards without D3D11 command lists. A smaller gain than on NVIDIA.','Runs them on the command lists Windows emulates. Applies at the next DCS start.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
+  // [Model] RecordersEmulatedLists, on by default: shown only where it can matter (EngineOptimizations.ShowsEmulatedListsOption):
+  // an AMD-only PC or a module log with DriverCommandLists=0. With driver command lists the module ignores it. Read when DCS starts, so not live.
+  field(c,'engineRecordersEmulatedLists','Multi-threading without driver support',['Multi-threaded shadows and G-buffer for AMD Radeon and other cards without D3D11 command lists. A smaller gain than on NVIDIA.','Runs them on the command lists Windows emulates. Tested on a Radeon RX 7900 XTX. Applies at the next DCS start.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
   // The parts, biggest measured gain first, folded: all on is the tested set.
   // The fold counts like the Engine row on the Overview: the terrain prefetch fix is one more part when it skips repeats.
   more = disclosure(c,'Individual optimizations','All on is best. Turn one off only if a problem points to it.',p => `${ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0)} of ${ENGINE_PARTS.length + 1} on`);
@@ -1203,8 +1203,8 @@ async function refreshEngine() {
 }
 const ENGINE_STATE = {'not-installed':'Not installed', installed:'Installed', loaded:'Loaded', failed:'Load failed'};
 /** Multi-threaded shadows and G-buffer without driver support: hidden unless it can matter (as
- *  EngineOptimizations.ShowsEmulatedListsOption): AMD-only graphics, the module's last log with DriverCommandLists=0, or on. */
-function emulatedListsHidden(p) { return !(p.engineRecordersEmulatedLists || state?.gpu?.amdOnly || engineStatus?.noDriverCommandLists); }
+ *  EngineOptimizations.ShowsEmulatedListsOption): AMD-only graphics or the module's last log with DriverCommandLists=0. */
+function emulatedListsHidden() { return !(state?.gpu?.amdOnly || engineStatus?.noDriverCommandLists); }
 function renderEngine() {
   const s = engineStatus, box = $('engineStatus'); if (!box) return;
   if (!s) { box.innerHTML = '<p class="fine">Select the DCS settings file on the DCS &amp; headset page first.</p>'; return; }

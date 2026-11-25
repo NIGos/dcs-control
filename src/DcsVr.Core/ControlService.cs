@@ -576,7 +576,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
-        var atStart = IniFile.Parse(ConfigurationWriters.DcsQvCull(applied.Profile.ForLaunch(), ShaderCacheDirectoryFor(inventory.OptionsPath)));
+        var atStart = IniFile.Parse(ConfigurationWriters.DcsQvCull(applied.Profile.ForLaunch(), ShaderCacheDirectoryFor(inventory.OptionsPath),
+            EngineOptimizations.EmulatedListsMatter(inventory.OptionsPath is null ? null : EngineOptimizations.ModuleDirectory(inventory.OptionsPath))));
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var updates = new List<LiveFileUpdate>();
         var rechecks = new List<LiveRecheck>();

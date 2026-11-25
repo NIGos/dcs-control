@@ -2856,28 +2856,36 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     Require(EngineShaderCache.InUse(state, options) == (cache, null) && EngineShaderCache.InUse(state, null) == (null, null), "Used: the state folder");
     Directory.Delete(module, true);
 });
-Test("Recorders on emulated command lists: [Model] RecordersEmulatedLists only when on, not live, shown only where it can matter", () =>
+Test("Recorders on emulated command lists: on by default, [Model] RecordersEmulatedLists only where it can matter, not live, shown only where it can matter", () =>
 {
     var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
-    Require(!on.EngineRecordersEmulatedLists && !JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineRecordersEmulatedLists, "off by default, also for an older profile");
-    Require(JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineRecordersEmulatedLists\":true}")!.UsesRecordersEmulatedLists, "loads from profile.json");
-    Require(!IniFile.Parse(ConfigurationWriters.DcsQvCull(on)).ContainsKey("Model.RecordersEmulatedLists") && !ConfigurationWriters.DcsQvCull(on).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "off: the key is not written");
-    var text = ConfigurationWriters.DcsQvCull(on with { EngineRecordersEmulatedLists = true });
+    Require(on.EngineRecordersEmulatedLists && on.UsesRecordersEmulatedLists && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineRecordersEmulatedLists, "on by default, also for a profile without the key");
+    Require(!JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineRecordersEmulatedLists\":false}")!.EngineRecordersEmulatedLists, "an explicit false loads as false (the one-time migration turns 0.7.0's on)");
+    Require(JsonData.Serialize(on).Contains("\"engineRecordersEmulatedLists\": true", StringComparison.Ordinal) && JsonData.Serialize(on with { EngineRecordersEmulatedLists = false }).Contains("\"engineRecordersEmulatedLists\": false", StringComparison.Ordinal),
+        "saved with its value either way, under the key 0.7.0 knows");
+    // On a PC with driver command lists (the default of the writer, Launch passes EmulatedListsMatter) the file is as before.
+    var off = on with { EngineRecordersEmulatedLists = false };
+    Require(ConfigurationWriters.DcsQvCull(on) == ConfigurationWriters.DcsQvCull(off) && !ConfigurationWriters.DcsQvCull(on).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "driver command lists: on writes nothing, the file equals off's");
+    Require(!ConfigurationWriters.DcsQvCull(off, emulatedListsMatter: true).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "off: the key is not written");
+    var text = ConfigurationWriters.DcsQvCull(on, emulatedListsMatter: true);
     Require(IniFile.Parse(text).GetValueOrDefault("Model.RecordersEmulatedLists") == "1"
         && text.IndexOf("RecordersEmulatedLists=1", StringComparison.Ordinal) > text.IndexOf("[Model]", StringComparison.Ordinal)
-        && text.IndexOf("RecordersEmulatedLists=1", StringComparison.Ordinal) < text.IndexOf("[Texture]", StringComparison.Ordinal), "on: RecordersEmulatedLists=1 under [Model]");
-    Require(!ConfigurationWriters.DcsQvCull(on with { EngineRecordersEmulatedLists = true, EngineShadowRecorder = false, EngineGBufferRecorder = false }).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "both recorders off: nothing to write");
-    Require(!ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false, DepthBoost = true, EngineRecordersEmulatedLists = true }).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "Perception only: not written");
+        && text.IndexOf("RecordersEmulatedLists=1", StringComparison.Ordinal) < text.IndexOf("[Texture]", StringComparison.Ordinal), "on where it matters: RecordersEmulatedLists=1 under [Model]");
+    Require(!ConfigurationWriters.DcsQvCull(on with { EngineShadowRecorder = false, EngineGBufferRecorder = false }, emulatedListsMatter: true).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "both recorders off: nothing to write");
+    Require(!ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false, DepthBoost = true }, emulatedListsMatter: true).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "Perception only: not written");
     Require(LiveSettings.Find("engineRecordersEmulatedLists") is null && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.RecordersEmulatedLists", "1", "0"), "read when a recorder installs: waits for the next launch");
-    Require(!ProfileValidation.Validate(on with { EngineRecordersEmulatedLists = true }).Any(i => i.Message.Contains("emulated", StringComparison.OrdinalIgnoreCase) || i.Message.Contains("EXPERIMENTAL", StringComparison.Ordinal)), "no warning for the opt-in");
+    Require(!ProfileValidation.Validate(on).Any(i => i.Message.Contains("emulated", StringComparison.OrdinalIgnoreCase) || i.Message.Contains("EXPERIMENTAL", StringComparison.Ordinal)), "no warning for it");
 
     GpuAdapter nvidia = new("NVIDIA GeForce RTX 5090", "NVIDIA", "32.0.16.2114"), radeon = new("AMD Radeon RX 7900 XTX", "AMD", "32.0.12011.1036"), apu = new("AMD Radeon(TM) Graphics", "AMD", "31.0"), intel = new("Intel(R) UHD Graphics", "Intel", "31.0");
-    Require(!EngineOptimizations.ShowsEmulatedListsOption([nvidia], false, false) && !EngineOptimizations.ShowsEmulatedListsOption([apu, nvidia], false, false), "hidden on NVIDIA with command lists, also next to an AMD integrated GPU");
-    Require(EngineOptimizations.ShowsEmulatedListsOption([radeon], false, false) && EngineOptimizations.ShowsEmulatedListsOption([apu, radeon], false, false), "shown on an AMD-only PC");
-    Require(EngineOptimizations.ShowsEmulatedListsOption([nvidia], true, false) && EngineOptimizations.ShowsEmulatedListsOption([intel], true, false) && !EngineOptimizations.ShowsEmulatedListsOption([intel], false, false), "shown when the module's log says DriverCommandLists=0");
-    Require(EngineOptimizations.ShowsEmulatedListsOption([nvidia], false, true) && !EngineOptimizations.ShowsEmulatedListsOption([], false, false), "shown while on (to turn it off); unknown adapters: hidden");
+    Require(!EngineOptimizations.ShowsEmulatedListsOption([nvidia], false) && !EngineOptimizations.ShowsEmulatedListsOption([apu, nvidia], false), "hidden on NVIDIA with command lists (also while on), also next to an AMD integrated GPU");
+    Require(EngineOptimizations.ShowsEmulatedListsOption([radeon], false) && EngineOptimizations.ShowsEmulatedListsOption([apu, radeon], false), "shown on an AMD-only PC");
+    Require(EngineOptimizations.ShowsEmulatedListsOption([nvidia], true) && EngineOptimizations.ShowsEmulatedListsOption([intel], true) && !EngineOptimizations.ShowsEmulatedListsOption([intel], false), "shown when the module's log says DriverCommandLists=0");
+    Require(!EngineOptimizations.ShowsEmulatedListsOption([], false), "unknown adapters: hidden");
+    Require(EngineOptimizations.EmulatedListsMatter([radeon], false) && EngineOptimizations.EmulatedListsMatter([nvidia], true) && EngineOptimizations.EmulatedListsMatter([], false)
+        && !EngineOptimizations.EmulatedListsMatter([nvidia], false) && !EngineOptimizations.EmulatedListsMatter([apu, nvidia], false), "the ini key: AMD only, log without lists, or unknown adapters (inert with lists); never on NVIDIA with lists");
     Require(EngineOptimizations.HasNoDriverCommandLists(["08:00:00.000 env: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002), driver 32.0.12011.1036; DriverCommandLists=0 (the recorders do not run); feature level b100"])
         && EngineOptimizations.HasNoDriverCommandLists(["shadow recorder: the driver lacks command lists; unavailable"])
+        && EngineOptimizations.HasNoDriverCommandLists(["gbuffer recorder: no driver command lists; RecordersEmulatedLists on (ini key or flag file): recording on the runtime's emulated lists"])
         && !EngineOptimizations.HasNoDriverCommandLists(["09:08:42.087 env: GPU NVIDIA GeForce RTX 5090 (DCS's device, vendor 0x10de); DriverCommandLists=1; feature level b100"]), "the module log's DriverCommandLists");
 
     // The Engine page's status carries the log's answer.
@@ -2888,9 +2896,51 @@ Test("Recorders on emulated command lists: [Model] RecordersEmulatedLists only w
     File.WriteAllText(log, "loader: starting payload\nenv: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002); DriverCommandLists=0 (the recorders do not run)\n");
     File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(1));
     Require(EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: no driver command lists");
+    // Launch's ini on this PC: the tests' adapter is an RTX 4090, so the log decides.
+    Require(EngineOptimizations.EmulatedListsMatter(module), "NVIDIA whose log says DriverCommandLists=0: the key is written");
     File.WriteAllText(log, "loader: starting payload\nenv: GPU NVIDIA GeForce RTX 5090 (DCS's device, vendor 0x10de); DriverCommandLists=1\n");
-    File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(1));
+    File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(2));
     Require(!EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: driver command lists");
+    Require(!EngineOptimizations.EmulatedListsMatter(module) && !EngineOptimizations.EmulatedListsMatter((string?)null), "NVIDIA with lists, or no module folder: not written");
+    var adapters = GpuInfo.Adapters;
+    try
+    {
+        GpuInfo.Adapters = () => [radeon]; Require(EngineOptimizations.EmulatedListsMatter(module) && EngineOptimizations.EmulatedListsMatter((string?)null), "AMD only: written, whatever the log says");
+        GpuInfo.Adapters = () => []; Require(EngineOptimizations.EmulatedListsMatter(module), "adapters unknown: written (inert with lists)");
+    }
+    finally { GpuInfo.Adapters = adapters; }
+});
+Test("Profile migration: Multi-threading without driver support turned on once in the draft and presets of 0.7.0, a later choice kept", () =>
+{
+    var state = Path.GetFullPath(Path.Combine(root, "migration-emulated-lists")); if (Directory.Exists(state)) Directory.Delete(state, true);
+    Directory.CreateDirectory(Path.Combine(state, "presets"));
+    // As 0.7.0 saved them: every value written, this one false.
+    var old = new VrProfile { EngineOptimizations = true, EngineRecordersEmulatedLists = false };
+    var oldJson = JsonData.Serialize(old);
+    var drafts = new DraftStore(state); drafts.Save(old, @"C:\DCS\bin\DCS.exe", null);
+    var presets = new PresetStore(state);
+    File.WriteAllText(presets.PathOf("Airfield"), oldJson);
+    File.WriteAllText(presets.PathOf("Already on"), JsonData.Serialize(old with { EngineRecordersEmulatedLists = true }));
+    File.WriteAllText(presets.PathOf("Broken"), "{ not json");
+    var keysBefore = System.Text.Json.Nodes.JsonNode.Parse(oldJson)!.AsObject().Select(p => p.Key).ToList();
+    var ran = ProfileMigrations.Run(state);
+    Require(ran.SequenceEqual([ProfileMigrations.EmulatedListsOn]), "runs once on a state folder without the record");
+    var draft = drafts.Load()!;
+    Require(draft.Profile.EngineRecordersEmulatedLists && draft.Dcs == @"C:\DCS\bin\DCS.exe" && draft.Profile with { EngineRecordersEmulatedLists = false } == ProfileValidation.ResolveFeatures(old), "the draft: on, everything else as it was");
+    var preset = File.ReadAllText(presets.PathOf("Airfield"));
+    Require(JsonData.Deserialize<VrProfile>(preset).EngineRecordersEmulatedLists && preset == oldJson.Replace("\"engineRecordersEmulatedLists\": false", "\"engineRecordersEmulatedLists\": true", StringComparison.Ordinal),
+        "a preset: only that value changes, byte for byte");
+    Require(System.Text.Json.Nodes.JsonNode.Parse(preset)!.AsObject().Select(p => p.Key).SequenceEqual(keysBefore), "no key added or removed: 0.7.0 still reads the file");
+    Require(File.ReadAllText(presets.PathOf("Broken")) == "{ not json", "a file that is not JSON is left alone");
+    // A choice made after the update is kept: the record says it ran.
+    drafts.Save(draft.Profile with { EngineRecordersEmulatedLists = false }, null, null);
+    File.WriteAllText(presets.PathOf("Airfield"), oldJson);
+    Require(ProfileMigrations.Run(state).Count == 0 && !drafts.Load()!.Profile.EngineRecordersEmulatedLists && File.ReadAllText(presets.PathOf("Airfield")) == oldJson, "never again: the pilot's off stays off");
+    Require(File.Exists(ProfileMigrations.MarkerPath(state)) && !File.Exists(Path.Combine(state, "presets", "migrations.json")), "recorded next to the draft, outside what Go back swaps");
+    // A new installation: nothing to change, recorded at once.
+    var fresh = Path.GetFullPath(Path.Combine(root, "migration-fresh")); if (Directory.Exists(fresh)) Directory.Delete(fresh, true);
+    Require(ProfileMigrations.Run(fresh).Count == 1 && File.Exists(ProfileMigrations.MarkerPath(fresh)) && ProfileMigrations.Run(fresh).Count == 0, "a new installation: recorded, nothing else");
+    Directory.Delete(state, true); Directory.Delete(fresh, true);
 });
 Test("Engine shader warm-up: settings in DcsQvCull.ini and warmup.json for the Engine page", () =>
 {
@@ -5467,7 +5517,7 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
     }
     foreach (var p in profiles)
     {
-        Add("Cheeky", ConfigurationWriters.Cheeky(p)); Add("DcsQvCull", ConfigurationWriters.DcsQvCull(p, "C:/cache"));
+        Add("Cheeky", ConfigurationWriters.Cheeky(p)); Add("DcsQvCull", ConfigurationWriters.DcsQvCull(p, "C:/cache", emulatedListsMatter: true)); // every key, as on an AMD PC
         Add("Ofxr", ConfigurationWriters.Ofxr(p, "C:/bin")); Add("PupilShift", ConfigurationWriters.PupilShift(p, 64)); Add("QuadViews", ConfigurationWriters.QuadViews(p));
     }
     var listPath = Path.Combine(workspace, "scripts/written-keys.txt");
@@ -5611,8 +5661,9 @@ Test("The engine module's invariant fixtures are what the app writes for every E
             prop.SetValue(o, on);
         return (VrProfile)o;
     }
-    // [Model] ShadowRecorderHelpers follows this PC's processor count: the fixture holds the value for more than 8.
-    static string Fixture(VrProfile p) => System.Text.RegularExpressions.Regex.Replace(ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n"), @"(?m)^ShadowRecorderHelpers=\d+$", "ShadowRecorderHelpers=3");
+    // [Model] ShadowRecorderHelpers follows this PC's processor count: the fixture holds the value for more than 8. Written as on a PC
+    // without driver command lists (AMD), so [Model] RecordersEmulatedLists is in the all-on fixture.
+    static string Fixture(VrProfile p) => System.Text.RegularExpressions.Regex.Replace(ConfigurationWriters.DcsQvCull(p, emulatedListsMatter: true).ReplaceLineEndings("\n"), @"(?m)^ShadowRecorderHelpers=\d+$", "ShadowRecorderHelpers=3");
     var folder = Path.Combine(workspace, "native/dcsqvcull/test/app_ini");
     var stale = new List<string>();
     foreach (var (name, profile) in new[] { ("engine_all_off.ini", Engine(false)), ("engine_all_on.ini", Engine(true)) })

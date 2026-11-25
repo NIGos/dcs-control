@@ -473,9 +473,12 @@ public sealed record VrProfile
     public bool EngineGBufferRecorder { get; init; } = true;
     /// <summary>[Model] RecordersEmulatedLists: the shadow and G-buffer recorders also run when the graphics driver has no
     /// D3D11 command lists (typically AMD Radeon), on the lists the D3D11 runtime emulates, with copy-based constant
-    /// uploads. A smaller gain than with driver lists; not yet tested on a Radeon. Read when a recorder installs (DCS
-    /// start), so it waits for the next launch. Off by default; written only when on.</summary>
-    public bool EngineRecordersEmulatedLists { get; init; }
+    /// uploads. Tested on a Radeon RX 7900 XTX (GitHub #27): a whole flight without errors, about 7 % more FPS than with
+    /// the recorders off; a smaller gain than with driver lists. Read when a recorder installs (DCS start), so it waits
+    /// for the next launch. On by default since the version after 0.7.0; profiles saved earlier store false and are
+    /// turned on once (<see cref="ProfileMigrations"/>). Written to DcsQvCull.ini only where it can matter
+    /// (<see cref="EngineOptimizations.EmulatedListsMatter"/>): a PC with driver command lists keeps its file unchanged.</summary>
+    public bool EngineRecordersEmulatedLists { get; init; } = true;
     /// <summary>It matters: <see cref="EngineRecordersEmulatedLists"/> with Engine Optimizations and a recorder on.</summary>
     public bool UsesRecordersEmulatedLists => EngineRecordersEmulatedLists && EngineOptimizations && (EngineShadowRecorder || EngineGBufferRecorder);
     /// <summary>[Model] PlainTriangleCounter: a statistics-only triangle counter updated without a locked instruction.</summary>

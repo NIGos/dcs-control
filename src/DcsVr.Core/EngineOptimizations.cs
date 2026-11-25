@@ -187,20 +187,58 @@ public static class EngineOptimizations
     }
 
     /// <summary>The module's log says DCS's device has no driver command lists: its GPU line or a recorder's line with
-    /// DriverCommandLists=0, or the line of a module before 0.5.7.</summary>
+    /// DriverCommandLists=0, a recorder's line when it ran on emulated lists, or the line of a module before 0.5.7.</summary>
     public static bool HasNoDriverCommandLists(IEnumerable<string> lines) =>
-        lines.Any(l => l.Contains("DriverCommandLists=0", StringComparison.Ordinal) || l.Contains("the driver lacks command lists", StringComparison.Ordinal));
+        lines.Any(l => l.Contains("DriverCommandLists=0", StringComparison.Ordinal) || l.Contains("the driver lacks command lists", StringComparison.Ordinal)
+            || l.Contains("recorder: no driver command lists", StringComparison.Ordinal));
 
     /// <summary>The PC's graphics are AMD only (no NVIDIA adapter), so DCS runs on an AMD driver, which has no D3D11 command
     /// lists. An AMD integrated GPU next to an NVIDIA card does not count: DCS runs on the NVIDIA card.</summary>
     public static bool AmdOnly(IReadOnlyList<GpuAdapter> adapters) =>
         adapters.Any(a => a.Vendor == "AMD") && !adapters.Any(a => a.Vendor == "NVIDIA");
 
-    /// <summary>The Engine page shows "Multi-threading without driver support" only where it can matter:
-    /// the GPU is AMD, or the latest module log says DriverCommandLists=0, or it is already on (so it can be turned off).
-    /// Hidden on NVIDIA with command lists. The interface applies the same rule (app.js, engineRecordersEmulatedLists).</summary>
-    public static bool ShowsEmulatedListsOption(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists, bool on) =>
-        on || logNoDriverCommandLists || AmdOnly(adapters);
+    /// <summary>The Engine page shows "Multi-threading without driver support" only where it can matter: the GPU is AMD,
+    /// or the latest module log says DriverCommandLists=0. Hidden on NVIDIA with command lists, where the module ignores
+    /// it (on by default, so showing it while on would show it on every PC). The interface applies the same rule
+    /// (app.js, emulatedListsHidden).</summary>
+    public static bool ShowsEmulatedListsOption(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists) =>
+        logNoDriverCommandLists || AmdOnly(adapters);
+
+    /// <summary>Whether DcsQvCull.ini gets [Model] RecordersEmulatedLists=1 when the option is on: where the option shows
+    /// (<see cref="ShowsEmulatedListsOption"/>), or when the adapters could not be read. With driver command lists the
+    /// module ignores the key (deferred_rec.h RecorderMode picks the offset ring whenever DriverCommandLists=1), so a PC
+    /// with them keeps the file earlier versions wrote. An NVIDIA PC whose device lacks the lists (Threaded optimization
+    /// Off, MFAA On) gets it from the launch after the module first logs DriverCommandLists=0.</summary>
+    public static bool EmulatedListsMatter(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists) =>
+        adapters.Count == 0 || ShowsEmulatedListsOption(adapters, logNoDriverCommandLists);
+
+    /// <summary><see cref="EmulatedListsMatter(IReadOnlyList{GpuAdapter}, bool)"/> for this PC's adapters and the module's
+    /// latest log in <paramref name="module"/> (Scripts\DcsQvCull); null: no module folder known.</summary>
+    public static bool EmulatedListsMatter(string? module)
+    {
+        var adapters = GpuInfo.Adapters();
+        if (adapters.Count == 0 || AmdOnly(adapters)) return true;
+        return module is not null && LogSaysNoDriverCommandLists(ModuleLog(module));
+    }
+
+    private static readonly Lock LogCacheLock = new();
+    private static (string Path, DateTime Written, long Length, bool NoLists)? _logCache;
+    /// <summary><see cref="HasNoDriverCommandLists"/> for a module log, read again only when it changed (every Launch and
+    /// preview plans the ini).</summary>
+    private static bool LogSaysNoDriverCommandLists(string log)
+    {
+        try
+        {
+            var info = new FileInfo(log);
+            if (!info.Exists) return false;
+            lock (LogCacheLock)
+                if (_logCache is { } c && c.Path == info.FullName && c.Written == info.LastWriteTimeUtc && c.Length == info.Length) return c.NoLists;
+            var noLists = ReadShared(log) is { } lines && HasNoDriverCommandLists(lines);
+            lock (LogCacheLock) _logCache = (info.FullName, info.LastWriteTimeUtc, info.Length, noLists);
+            return noLists;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
+    }
 
     /// <summary>Why DCS's device has no D3D11 command lists, and what to do. NVIDIA's Threaded optimization is not named:
     /// Off did not remove them in a live test (RTX 5090, driver 32.0.16.2114, the module logged DriverCommandLists=1).</summary>

@@ -1,3 +1,7 @@
+# Unreleased
+
+**Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: on a Radeon RX 7900 XTX it gave about 7 % more FPS with no errors (GitHub #27). Profiles from earlier versions get it turned on once; on NVIDIA nothing changes.
+
 # 0.7.0 preview
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.

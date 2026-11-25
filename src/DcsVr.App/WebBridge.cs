@@ -24,6 +24,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     /// settings on screen are the ones DCS will launch with.</summary>
     private void ShowAppliedProfile()
     {
+        // Defaults this version changed in profiles saved before (the draft and the presets), once per PC.
+        var migrated = ProfileMigrations.Run(service.StateRoot, AppLog.Info);
         var applied = service.ReadAppliedProfile();
         if (applied is not null)
         {
@@ -32,6 +34,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             if (applied.Executable is { } executable) _dcs = executable;
             if (applied.OptionsPath is { } options) _options = options;
             _status = "Showing the applied profile. Launch DCS uses it as it is.";
+            // Without a draft, the applied profile of an earlier version gets the same change, kept as the draft so the
+            // next start shows it too; the next Launch applies it.
+            if (migrated.Contains(ProfileMigrations.EmulatedListsOn) && !applied.Profile.EngineRecordersEmulatedLists && !File.Exists(Drafts.Path))
+            {
+                _profile = applied.Profile with { EngineRecordersEmulatedLists = true };
+                lock (_draftLock) Drafts.Save(_profile, _dcs, _options);
+            }
         }
         // The draft left on screen last time wins over the applied profile when it differs (settings, DCS install or
         // options.lua); Reset to applied is one click.

@@ -226,7 +226,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 // A .csv goes only as a pattern (RuntimeFiles.Allowed): DcsQvCull_water*.csv for the water skip's verify file.
                 runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCull.*.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log", "warmup.json", "warmup.json.tmp", "motion_*.csv", "rotation_*.csv", "timeline_*.csv", "events_*.csv", "fbc_*.csv", "run_profile.flag", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", "recorders_emulated_lists.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp"), "gbrec_states*.jsonl", Path.Combine("tone_probe", "*.f32"), "DcsQvCull_water*.csv", "water_timing_*.csv", "early_census_*.csv", "three_views_timing_*.csv", "three_views.log" }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
-            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory), "DCS engine optimization settings");
+            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory, EngineOptimizations.EmulatedListsMatter(module)), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
             Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
         }
