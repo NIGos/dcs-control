@@ -323,6 +323,7 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
   b->lastUseQpc.store(now, std::memory_order_relaxed);
   g_cnt.armedBlocks.fetch_add(1, std::memory_order_relaxed);
   g_cnt.activeLastBlock.store(blk.hrtfVoices, std::memory_order_relaxed);
+  g_cnt.ownedWideNow.store(blk.wideVoices, std::memory_order_relaxed);
   audr::BudgetTick(*b, g_cnt, g_ev, {rt.cpuBudget, rt.maxObjects}, frames, blk.dspTicks, now, freq);
   // ED's overrun counter counts any slow block, ours or not (a system or DCS hitch). An overrun is held against binaural
   // only when our own work took a real share of this block or the one before (half the CPU budget or more); our usual
@@ -679,9 +680,13 @@ void Bind(void* rend, const char* how) {
   b->renderer = rend;
   b->rate = static_cast<uint32_t>(rate);
   b->core = core;
-  // 3 x kMaxFrames: the voice's two channels, then the onset buffer (audr::Binding::onset)
-  b->scratch = static_cast<float*>(_aligned_malloc(sizeof(float) * 3 * audr::kMaxFrames, 64));
+  // One allocation: the voice's two channels (2 x kMaxFrames), the onset buffer and the delayed side's input
+  // (kMaxFrames each), then every slot's side history (kSlots x kSideHist; each slot zeroes its own before its first use).
+  b->scratch = static_cast<float*>(
+      _aligned_malloc(sizeof(float) * (4 * audr::kMaxFrames + static_cast<size_t>(audv::kSlots) * audr::kSideHist), 64));
   b->onset = b->scratch ? b->scratch + 2 * audr::kMaxFrames : nullptr;
+  b->side = b->scratch ? b->scratch + 3 * audr::kMaxFrames : nullptr;
+  b->sideHist = b->scratch ? b->scratch + 4 * audr::kMaxFrames : nullptr;
   b->overrun = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rend) + audv::off::kROverrun);
   if (!b->scratch) {
     audr::CoreDelete(core);
@@ -923,17 +928,29 @@ void LogVoicesTick() {
   if (exists && (static_cast<uint64_t>(fa.nFileSizeHigh) << 32 | fa.nFileSizeLow) > (8ull << 20)) return;
   FILE* f = nullptr;
   if (_wfopen_s(&f, g_voicesCsv.c_str(), L"ab") || !f) return;
-  // flags: meta_flags (audio_voice.h): 8 under 1.5 m (kept wide), 32 a stereo wave, 64 auto_width (kept wide).
-  if (!exists) fprintf(f, "time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags\r\n");
+  // flags: meta_flags (audio_voice.h), added: 1 owned, 2 owned from its creation, 4 head pose valid, 8 near (under
+  // 1.4 m, until past 1.6 m), 16 head position valid, 32 a stereo wave, 64 auto_width (informational).
+  // Then the render side's view of that voice in its last block (Counters::VoiceView; empty when we did not render it):
+  // comp the loudness factor, diffuse 0/1, wide 0/1 (DCS's side kept: near or diffuse), panLevel DCS's level for the
+  // direction, power the smoothed per-frame power of m L', m R' (the point / wide energy share: sum power by wide).
+  if (!exists) fprintf(f, "time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags,comp,diffuse,wide,panLevel,power\r\n");
   SYSTEMTIME st;
   GetLocalTime(&st);
   for (int s = 0; s < audv::kSlots; ++s) {
     if (!g_meta.voice[s].load()) continue;
     audv::MetaData d;
     if (!audv::MetaRead(g_meta.slot[s], &d)) continue;
-    fprintf(f, "%02d:%02d:%02d.%03d,%d,%u,%u,%d,%.3f,%.3f,%.3f,%.3f,%.6g,%.6g,%.6g,%u\r\n", st.wHour, st.wMinute, st.wSecond,
+    fprintf(f, "%02d:%02d:%02d.%03d,%d,%u,%u,%d,%.3f,%.3f,%.3f,%.3f,%.6g,%.6g,%.6g,%u", st.wHour, st.wMinute, st.wSecond,
             st.wMilliseconds, s, d.gen, d.ctx, (d.flags & audv::meta_flags::kOwned) ? 1 : 0, d.pos[0], d.pos[1], d.pos[2],
             d.dist, d.mTag, d.gL, d.gR, d.flags);
+    const audr::Counters::VoiceView& vv = g_cnt.view[s];
+    const uint32_t vs = vv.state.load(std::memory_order_relaxed);
+    if ((vs & audr::Counters::kViewTagged) && vv.gen.load(std::memory_order_relaxed) == d.gen)
+      fprintf(f, ",%.4f,%d,%d,%.4f,%.4g\r\n", vv.comp.load(std::memory_order_relaxed),
+              (vs & audr::Counters::kViewDiffuse) ? 1 : 0, (vs & audr::Counters::kViewWide) ? 1 : 0,
+              vv.panLevel.load(std::memory_order_relaxed), vv.power.load(std::memory_order_relaxed));
+    else
+      fprintf(f, ",,,,,\r\n");
   }
   fclose(f);
 }
@@ -1091,16 +1108,16 @@ void ControlTick() {
       const uint64_t pc = g_cnt.poseBlocks.load();
       const char* pose = !g_cfgRead.cfg.lateHeadTracking ? "unused" : pc != L.statsPose ? "on" : "off";
       L.statsPose = pc;
-      // The sounds' make-up: mono waves, stereo ones (a point source at the stereo's loudness), and of those the ones
-      // whose sdef asks for width (auto_width: DCS's own side around a binaural mid).
+      // The sounds' make-up: mono waves, stereo ones, and the voices kept wide in the last block (DCS's own side around
+      // the binaural mid: under 1.4 / 1.6 m, or a diffuse bed by its own signal; mono or stereo waves alike).
       const uint32_t owned = g_cnt.ownedNow.load(), st = std::min(owned, g_cnt.ownedStereoNow.load());
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
-          "%u; mono %u, stereo %u (wide %u); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "
+          "%u; mono %u, stereo %u; wide %u (near or diffuse); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "
           "pan solves %llu (median %llu, mismatch "
           "%llu), overruns %llu; head pose %s",
           owned, P99Ms(), g_cfgRead.cfg.cpuBudgetPercent, budgetMs,
           std::min<uint32_t>(g_cnt.limitNow.load(), static_cast<uint32_t>(g_cfgRead.cfg.maxObjects)), owned - st, st,
-          std::min(st, g_cnt.ownedWideNow.load()),
+          std::min(owned, g_cnt.ownedWideNow.load()),
           static_cast<unsigned long long>(g_cnt.fadeIns.load()), static_cast<unsigned long long>(g_cnt.fadeOuts.load()),
           static_cast<unsigned long long>(g_cnt.repanCalls.load()), static_cast<unsigned long long>(g_cnt.coreRejected.load()),
           static_cast<unsigned long long>(g_meta.torn.load()), static_cast<unsigned long long>(g_cnt.tornSnaps.load()),

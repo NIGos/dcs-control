@@ -130,18 +130,15 @@ inline bool Own(Sim& s, Rec& r, const Env& e, bool initial) {
   return true;
 }
 
-// The owned set's make-up for the "audio: running" line (stereo waves, and those of them kept wide).
+// The owned set's make-up for the "audio: running" line (stereo waves). Which voices are kept wide is the render
+// side's decision (distance and its own diffuse detector): Counters::ownedWideNow.
 inline void StoreOwnedCounts(Sim& s) {
-  uint32_t st = 0, wide = 0;
+  uint32_t st = 0;
   const Rec* t = s.own.rec[s.own.cur];
   for (uint32_t i = 0; i < Owner::kRecCap; ++i)
-    if (t[i].voice && t[i].owned && t[i].chans == 2) {
-      ++st;
-      wide += t[i].wide ? 1u : 0u;
-    }
+    if (t[i].voice && t[i].owned && t[i].chans == 2) ++st;
   s.cnt->ownedNow.store(static_cast<uint32_t>(s.own.owned), std::memory_order_relaxed);
   s.cnt->ownedStereoNow.store(st, std::memory_order_relaxed);
-  s.cnt->ownedWideNow.store(wide, std::memory_order_relaxed);
 }
 
 // The sim stops tagging the voice; its slot waits for the render side's acknowledgement.
@@ -396,6 +393,10 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
     r->loud = m;
     r->chans = static_cast<uint8_t>(chans);
     r->wide = chans == 2 && Rd<uint8_t>(sound, off::kSndAutoWidth) != 0;
+    // Near with hysteresis (audr::kNearInM / kNearOutM), kept per voice; its first frame decides at kNearM.
+    const bool wasNear = r->nearState == 2, known = r->nearState != 0;
+    const bool isNear = known ? dist < (wasNear ? audr::kNearOutM : audr::kNearInM) : dist < audr::kNearM;
+    r->nearState = isNear ? 2 : 1;
   }
   if (!q) {
     if (refuse >= 0) s.cnt->refused[refuse].fetch_add(1, std::memory_order_relaxed);
@@ -423,7 +424,7 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   d.gen = o.slotGen[r->slot];
   d.flags = meta_flags::kOwned | (r->initialOwned ? meta_flags::kInitial : 0u) |
             (e.poseValid ? meta_flags::kPoseValid : 0u) | (e.poseValid && e.posValid ? meta_flags::kPosValid : 0u) |
-            (dist < audr::kNearM ? meta_flags::kNear : 0u) | (stereo ? meta_flags::kStereo : 0u) |
+            (r->nearState == 2 ? meta_flags::kNear : 0u) | (stereo ? meta_flags::kStereo : 0u) |
             (stereo && r->wide ? meta_flags::kWide : 0u);
   d.frame = o.frame;
   d.ctx = ctxId;

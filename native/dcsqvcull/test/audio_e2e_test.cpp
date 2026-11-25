@@ -9,7 +9,9 @@
 //      left / right, the far ear quieter;
 //   2. the radio (a sound in a 2D context) next to an owned 3D source: exactly centred and bit-identical to DCS's own
 //      mix at its frequency, while the 3D source is panned by the core;
-//   3. no heap allocation on the simulation / render thread with the real core, every sample finite.
+//   3. no heap allocation on the simulation / render thread with the real core, every sample finite;
+//   4. stereo waves (point sources, loudness, kill switch) and wide voices: the kept side reaches each ear with the HRTF
+//      mid, ITD / ILD at the sides, level against DCS's own output by direction, no click between point and wide.
 // Built as DcsQvCullAudioE2ETests (ctest); the module's own scenarios run against the stand-in core in DcsQvCullTests.
 #include "../src/main.cpp"
 #include "audio_fake_core.h"  // only the real-time allocation counter (audio_rt_alloc.cpp) is linked here
@@ -451,6 +453,143 @@ void Stereo() {
                    "faded in at its input)");
 }
 
+// ---- 4. wide voices (review round 5) ---------------------------------------------------------------------------------
+// One stereo sound driven through the hooks with a position per block (pos(k, p)), the hooked and DCS's own output after
+// `settle` blocks, the voice's own channels L, R (the fake voice's generator with the same seed: before DCS's gains),
+// and the module's count of voices kept wide after each block.
+struct Path {
+  std::vector<float> hooked, stock, l, r;
+  std::vector<uint32_t> wide;
+};
+template <typename PosFn>
+Path HoldPath(Kind kind, PosFn pos, int settle, int blocks, uint32_t seed = 31, double hz = 0, float amp = 0.3f) {
+  Rig r;
+  RigUp(r, kIni);
+  AddBoth(r, 0, true, 2, kind, amp, hz, 1.0f, seed);
+  float p[3];
+  pos(0, p);
+  PosBoth(r, 0, p[0], p[1], p[2]);
+  CreateVoice(r, 0);
+  // The generator: a copy of the voice's signal state (as Circle does for a mono wave).
+  std::vector<uint8_t> gen(kVoiceSize, 0);
+  memcpy(gen.data(), r.ref.voices[0], kVoiceSize);  // kind, amplitude, phase, step and noise state as created
+  std::vector<float> a(2 * kFrames), b(2 * kFrames);
+  Path t;
+  for (int k = -1; k < settle + blocks; ++k) {
+    if (k >= 0) {
+      pos(k, p);
+      PosBoth(r, 0, p[0], p[1], p[2]);
+      SimFrame(r);
+    }
+    Block(r, a.data(), b.data(), kFrames);
+    if (k < 0) Tick();  // the first block binds the renderer
+    std::vector<float> gl(kFrames), gr(kFrames);
+    for (uint32_t i = 0; i < kFrames; ++i) gl[i] = NextSample(gen.data(), &gr[i]);
+    if (k < settle) continue;
+    t.hooked.insert(t.hooked.end(), a.begin(), a.end());
+    t.stock.insert(t.stock.end(), b.begin(), b.end());
+    t.l.insert(t.l.end(), gl.begin(), gl.end());
+    t.r.insert(t.r.end(), gr.begin(), gr.end());
+    t.wide.push_back(audio::g_cnt.ownedWideNow.load());
+  }
+  RigDown(r);
+  return t;
+}
+// The lag (samples, 0..kMax) at which x best explains channel ch of `lr` (largest |cross-correlation|).
+int BestLag(const std::vector<float>& lr, int ch, const std::vector<double>& x) {
+  constexpr int kMax = 120;
+  const size_t n = lr.size() / 2;
+  double best = -1;
+  int lag = 0;
+  for (int k = 0; k <= kMax; ++k) {
+    double s = 0;
+    for (size_t i = kMax; i < n; ++i) s += static_cast<double>(lr[2 * i + ch]) * x[i - k];
+    if (std::fabs(s) > best) best = std::fabs(s), lag = k;
+  }
+  return lag;
+}
+
+void Wide() {
+  char err[160] = {};
+  binaural::HrtfSet* set = binaural::LoadHrtf(g_set.data(), g_set.size() * 4, kRate, err, sizeof(err));
+  const double radius = binaural_config::PilotItdRadiusM(set ? binaural::DescribeHrtf(set).datasetHeadRadiusM : 0.0f, kCircumferenceCm);
+  if (set) binaural::ReleaseHrtf(set);
+  // 1. Mid / side alignment: two independent noises (M and S uncorrelated) 1 m away (near: wide). At each ear the side
+  // must arrive with the HRTF mid: the lag of S in that ear's output equals the lag of M (before round 5 the side came
+  // undelayed, 24-48 samples early: comb notches from ~1 kHz wherever M and S correlate).
+  {
+    const float where[4][3] = {{1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {-1, 0, 0}};
+    const char* names[] = {"ahead", "right", "left", "behind"};
+    int worst = 0;
+    bool wideAll = true;
+    for (int p = 0; p < 4; ++p) {
+      const Path t = HoldPath(kNoise, [&](int, float* q) { memcpy(q, where[p], sizeof(float) * 3); }, 20, 100);
+      std::vector<double> m(t.l.size()), s(t.l.size());
+      for (size_t i = 0; i < t.l.size(); ++i) m[i] = 0.5 * (t.l[i] + t.r[i]), s[i] = 0.5 * (t.l[i] - t.r[i]);
+      int lm[2], ls[2];
+      for (int ch = 0; ch < 2; ++ch) lm[ch] = BestLag(t.hooked, ch, m), ls[ch] = BestLag(t.hooked, ch, s);
+      printf("     wide %s 1 m: mid lag L %d R %d, side lag L %d R %d samples (undelayed side: 0)\n", names[p], lm[0], lm[1],
+             ls[0], ls[1]);
+      worst = std::max({worst, std::abs(lm[0] - ls[0]), std::abs(lm[1] - ls[1])});
+      wideAll = wideAll && t.wide.back() == 1 && lm[0] >= 12 && lm[1] >= 12;
+    }
+    Check(wideAll && worst <= 2,
+          "audio e2e wide: a wide voice's side reaches each ear with its HRTF mid (lags equal within 2 samples ahead, "
+          "right, left, behind; the mid itself 12 samples or more late), so mid and side do not comb");
+  }
+  // 2. ITD / ILD at the sides of a wide voice (channels correlated in part, 1 m): the interaural cues are the source's.
+  {
+    const float right[3] = {0, 0, 1}, left[3] = {0, 0, -1};
+    const Path tr = HoldPath(kPartial, [&](int, float* q) { memcpy(q, right, 12); }, 20, 100, 31, 500);
+    const Path tl = HoldPath(kPartial, [&](int, float* q) { memcpy(q, left, 12); }, 20, 100, 31, 500);
+    const Cue cr = Measure(tr.hooked.data(), tr.hooked.size() / 2), cl = Measure(tl.hooked.data(), tl.hooked.size() / 2);
+    const double side = Woodworth(90, radius);
+    printf("     wide 1 m: right %.1f us %.2f dB, left %.1f us %.2f dB (Woodworth far field %.1f us); kept wide %u / %u\n",
+           cr.itd * 1e6, cr.ild, cl.itd * 1e6, cl.ild, side * 1e6, tr.wide.back(), tl.wide.back());
+    Check(tr.wide.back() == 1 && tl.wide.back() == 1 && cr.itd >= 0.8 * side && cl.itd <= -0.8 * side && cr.ild >= 3.0 &&
+              cl.ild <= -3.0 && std::fabs(cr.itd + cl.itd) <= 30e-6,
+          "audio e2e wide: a wide voice at the sides keeps the source's ITD (at least 80 % of Woodworth's, mirror-equal "
+          "within 30 us) and the far ear at least 3 dB quieter");
+  }
+  // 3. Level against DCS's own output by direction, wide voices (two low tones, 250 / 325 Hz, uncorrelated: diffuse and,
+  // at 1 m, near): within 1 dB at 1 m and at 5 m, ahead, right, behind, left, above.
+  {
+    const float dirs[5][3] = {{1, 0, 0}, {0, 0, 1}, {-1, 0, 0}, {0, 0, -1}, {0.2f, 0.98f, 0}};
+    const char* names[] = {"ahead", "right", "behind", "left", "above"};
+    double worst = 0;
+    bool wideAll = true;
+    for (float dist : {1.0f, 5.0f})
+      for (int p = 0; p < 5; ++p) {
+        const Path t = HoldPath(kSine, [&](int, float* q) {
+          for (int c = 0; c < 3; ++c) q[c] = dirs[p][c] * dist;
+        }, 20, 100, 31, 250);
+        const double db = 10 * std::log10(Energy(t.hooked) / Energy(t.stock));
+        printf("     wide %s %.0f m: %+.2f dB vs DCS's own output\n", names[p], dist, db);
+        worst = std::max(worst, std::fabs(db));
+        wideAll = wideAll && t.wide.back() == 1;
+      }
+    Check(wideAll && worst <= 1.0,
+          "audio e2e wide: a wide (diffuse) low sound is as loud as DCS's own output within 1 dB in every direction, "
+          "near and far");
+  }
+  // 4. Point <-> wide: a stereo DC with a side (left 1, right 1/4) moving between 1.0 and 2.4 m on the right every 40
+  // blocks (wide under 1.4 m, a point past 1.6 m): no step beyond the same motion with no side (left = right).
+  {
+    auto path = [](int k, float* q) {
+      q[0] = 0.0f, q[1] = 0.0f, q[2] = (k / 40) % 2 ? 2.4f : 1.0f;
+    };
+    const Path split = HoldPath(kDcSplit, path, 20, 320, 31, 0, 1.0f), dc = HoldPath(kDc, path, 20, 320, 31, 0, 1.0f);
+    uint32_t switches = 0;
+    for (size_t k = 1; k < split.wide.size(); ++k) switches += split.wide[k] != split.wide[k - 1];
+    const double d2 = MaxD2(split.hooked), d2dc = MaxD2(dc.hooked);
+    printf("     point <-> wide every 40 blocks: %u switches, largest second difference %.2e (same motion without a side "
+           "%.2e)\n", switches, d2, d2dc);
+    Check(switches >= 6 && d2 <= d2dc + 1e-3 && AllFinite(split.hooked),
+          "audio e2e wide: switching a voice between point and wide (1.0 <-> 2.4 m) makes no click: no step above "
+          "-60 dBFS beyond the motion's own (the side's share and its delay crossfaded)");
+  }
+}
+
 }  // namespace e2e
 
 int main() {
@@ -462,6 +601,7 @@ int main() {
   e2e::Circle();
   e2e::Radio();
   e2e::Stereo();
+  e2e::Wide();
   audio::g_testNoThread = false;
   printf("%d failure(s)\n", g_fail);
   return g_fail ? 1 : 0;

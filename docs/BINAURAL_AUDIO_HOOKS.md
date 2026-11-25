@@ -544,7 +544,10 @@ sounds or the second output's. Most of DCS's 3D sounds are stereo files. Everyth
   average is DCS's own stereo-to-mono rule. The voice render re-reads `0xec4` for every kernel run (`0x169ac`).
 - **Same panner, same gains.** The panner (`sub_1c1c0`) never reads the channel count: a stereo voice gets exactly the
   gains of a mono one (§2.1), `ch0 = (gL, 0)`, `ch1 = (0, gR)` on the stereo pair.
-- **Kernels.** 3D stereo: `0x183e0` (scalar) and `0x14de0` (SIMD), chosen at `0x16a1c..0x16a2c`. In `0x183e0` the two
+- **Kernels.** Two pairs for a 3D voice, each SIMD or scalar by the same `.data` byte `0x3a338` (1 in the file; its
+  writer not traced), read at `0x16a05` (mono) and `0x16a1c` (stereo), after the channel count test at `0x16a00`:
+  3D mono `0x12dd0` (SIMD, adds in double, §2) or `0x16aa0` (scalar, its loop `0x17024..0x17166`); 3D stereo `0x14de0`
+  (SIMD) or `0x183e0` (scalar), chosen at `0x16a1c..0x16a2c`. In `0x183e0` the two
   resampled channels go through a width stage first (`0x185ac..0x186a9`): `M = (L + R) 0.5`, `S = (L - R) 0.5`,
   `L' = M + w S`, `R' = M - w S`, with `w` a ramp at `voice+0x610..0x620` (start, target, current, step) whose
   target is the snapshot's `voice+0xd4` (pending `+0x24`, set up at `0x16771..0x1678e`). Each channel is then filtered
@@ -574,8 +577,10 @@ sounds or the second output's. Most of DCS's 3D sounds are stereo files. Everyth
 ### 10.3 Design: what the binaural renderer gets
 
 Evidence from the sound data (read only): of the module sdefs that name resolvable waves, without the crew voice packs,
-957 play stereo files and 221 mono ones; `auto_width = true` is set in 4 of them (distant engine whine, take-off
-rumble, afterburner crackle: wide sounds by design), `inner_radius` is mostly the boilerplate 10 m. The core sounds
+957 play stereo files and 221 mono ones; `inner_radius` is mostly the boilerplate 10 m. `auto_width = true` was counted
+in 4 of those sdefs, but a review of a later flight's sound log counted it on 56 % of the owned voices, every cockpit voice among
+them (the core sounds in `Sounds.edce` set it too). What it does (§10.1): it only NARROWS a sound with distance; inside
+`inner_radius` such a sound plays at width 1 like any stereo sound. It is therefore not a reason to keep a sound wide. The core sounds
 (`Sounds.edce`) are not readable. Decoding the 838 stereo files of those sdefs: 35 % are exactly dual mono (L = R),
 56 % have a channel correlation of 0.99 or more, 15 % under 0.5; the mid `(L + R) / 2` is as loud as the stereo in
 the median (0.0 dB), 1.8 dB quieter or more for 10 %, 3 dB or more for 5 %, at worst 9 dB (switch clicks recorded
@@ -600,27 +605,46 @@ So, for every owned 3D voice (mono or stereo wave):
   Its loudness is kept: the HRTF part's gain is `c = sqrt((P_M + P_S) / P_M)` of the voice's mid and side powers
   (smoothed over 50 ms, 1 to 2, ramped by the core across each call). A stereo recording of a point source has no
   physical width: its side is dropped.
-- **A wide sound.** DCS's own side stays: `T = HRTF(M) + SidePan(S)`, SidePan putting `S` back with DCS's gains (`+gL`
-  left, `-gR` right), no loudness factor (mid and side together are DCS's power). Wide are:
-  - the sdef's `auto_width` (the width the sound designer asked for; DCS's own width narrows it with distance to the
-    point source, `w = 0` past `inner_radius + 1200` m);
-  - a source under 1.5 m (cockpit sounds: a cockpit-wide stereo bed is not a point at the head, and the near-field
-    gain would scale it with head motion);
+- **A wide sound.** DCS's own side stays: `T = HRTF(M) + SidePan(S delayed)`, SidePan putting `S` back with DCS's
+  gains (`+gL` left, `-gR` right), no loudness factor (mid and side together are DCS's power). The side is delayed per
+  ear by that ear's HRTF delay (the core's onset / ITD delay plus its 12-sample look-ahead, `Renderer::SourceDelays`,
+  whole samples, a change crossfaded across the block): undelayed it led the mid by 0.5-1 ms (24-48 samples), a comb
+  from about 1 kHz wherever mid and side correlate, and the precedence effect pulled the image toward DCS's panning.
+  It carries the mid's level trim and late-translation gain. Its weight goes on the delay's input, so every ramp is
+  continuous at the output; in a voice's last block (faded back to DCS or ended: the slot is acknowledged and never
+  processed again) that ramp ends the longest delay early, so no delayed tail is left to be cut (the kill switch on a
+  wide stereo wave stepped 1e-2 before this). DCS's width stage stays in `L'`, `R'` whatever the
+  decision (an auto_width sound narrowed with distance has a smaller side, and a point source's loudness factor follows
+  it). Wide are:
+  - a source near the head: under 1.4 m, kept until past 1.6 m (per voice; a voice's first frame decides at 1.5 m):
+    cockpit sounds, a cockpit-wide stereo bed is not a point at the head, and the near-field gain would scale it with
+    head motion;
   - a diffuse bed, by its own signal: `c` above 1.3 (`P_S / P_M` above 0.69) for 200 ms, back to a point under 1.15 for
     200 ms; a voice's first block decides at once. About 15 % of the readable stereo files have an L / R correlation
     under 0.5 (wind, rain, cabin ambience).
-  A change between point and wide is crossfaded across one block. Two virtual sources at `±angle` were not taken:
+  A change between point and wide is crossfaded across one block; a new voice starts at its own decision (its side is
+  not faded in from 0). A core refusal in the middle of a stream moves the mid's share to the re-pan at once (no HRTF
+  output is left to fade from) and ramps the side from its delayed to its undelayed part across the block. Two virtual
+  sources at `±angle` were not taken:
   nothing in the data gives an angle, DCS's width is not an angle, and a second core slot per voice would halve
   MaxObjects.
 - **Head-locked sounds.** Sounds at the listener (under 5 cm) stay DCS's as before; 2D sounds and 2D contexts too.
-- **Fallbacks are DCS's stereo.** `T = h HRTF(c' M) + (1 - h) RePan(M) + ((1 - h) + h q) SidePan(S)` (q = 0 point,
-  1 wide): the kill switch, a core refusal or off for the session (`h = 0`) give `M gL + S gL`, `M gR - S gR` = DCS's
-  `L' gL`, `R' gR` exactly.
+- **Fallbacks are DCS's stereo.** `T = h HRTF(c' M) + (1 - h) RePan(M) + (1 - h) SidePan(S) + h q g SidePan(S delayed)`
+  (q = 0 point, 1 wide; g the level trim times the late-translation gain): the kill switch, a core refusal or off for
+  the session (`h = 0`) give `M gL + S gL`, `M gR - S gR` = DCS's `L' gL`, `R' gR` exactly.
+- **DCS's level for the direction (PanLevel).** `c'` also carries `sqrt((gL² + gR²) / 2) / m` of the voice's own DCS
+  gains: the HRTF is normalised to the front and about as loud from every direction at low frequencies, DCS's
+  level-only pan law is not (about -1.3 dB at the sides, -2.5 dB above, -6 dB behind on the ±60° pair), so the kill
+  switch keeps the level. `m` is DCS's gain for `c = 0.5` on both channels (a source ahead on a ±60° pair); the level is
+  taken from the actual gains, so another speaker pair is carried as it is (±30°: the front at `(1.87 WA + WB) / m`). It
+  is clamped to 0.25 .. 4/3 (4/3: `(2 WA + WB) / (1.5 WA + WB)` at most, whatever the speaker directions).
 - **Fading in a fresh core source:** when the core's source starts from reset with an HRTF weight rising from 0 (the
   kill switch back on, a fade in, off for the session over), the weight goes on the core's input (`Binding::onset`),
   not its output: with empty delay lines an output weight lets the later ear start d samples late at weight
   d / frames, a step (the e2e kill-switch test measured a second difference of 2e-2 against 3e-4 steady).
-- **Counts.** The running line says `mono <n>, stereo <n> (wide <n>)` after the limit (`wide`: auto_width); the idle
+- **Counts.** The running line says `mono <n>, stereo <n>; wide <n> (near or diffuse)` after the limit (`wide`: every
+  voice kept wide in the last block, mono waves near the head included; the sound log has the per-voice decision,
+  loudness factor, PanLevel and power, BINAURAL_AUDIO.md §8.6); the idle
   line's `not mono` is now `channels` (waves of more than two channels), and `no wave yet` counts stream voices before
   their first chunk (`0xec4` still 0: ED sets it from the first chunk, `0x16107..0x16130`, or to 1 on the refill path
   at `0x16419..0x16423`).
@@ -642,6 +666,13 @@ estimate; no allocation with stereo voices. `DcsQvCullAudioE2ETests` (real core)
 ahead / right / left (no interaural difference ahead, Woodworth's ITD at the sides, far ear 3 dB quieter), loudness
 ahead against DCS's stereo within 1 dB (partly correlated, dual mono, decorrelated bed), a dual-mono stereo wave equal
 to the same mono wave, and the kill switch every 0.5 s on stereo and mono waves with no click (second difference).
+Review round 5: `DcsQvCullTests` checks the kept side delayed per ear by the delays the core reports (20 / 33 samples)
+and a delay change crossfaded, a new wide voice's side from its first sample, a mid-stream core refusal ramping a point
+voice's side in across the block, the level trim on the side, kNear's 1.4 / 1.6 m band and PanLevel's 4/3 guard, and an
+auto_width wave inside its inner radius played as a point source. `DcsQvCullAudioE2ETests` (real core): the side's lag
+equals the HRTF mid's at each ear (ahead, right, left, behind, 1 m), a wide voice's ITD / ILD at the sides, a wide low
+sound within 1 dB of DCS's output in five directions at 1 m and 5 m, and a voice moving between 1.0 and 2.4 m (point
+<-> wide) with no click beyond the motion's own.
 
 ### 10.5 What the next live flight must show
 
@@ -650,6 +681,8 @@ to the same mono wave, and the kill switch every 0.5 s on stereo and mono waves 
 - No level jump when the kill switch flips (engine and cockpit sounds about as loud binaural as stock).
 - `click.rate` with binaural on near the off part's. The round-8 clicks (9 per minute in the on part) all fell in the
   recording's first 5 s while no voice was owned, i.e. with DCS's own calls untouched; they must not grow now.
-- Whether DCS's own core sounds set auto_width (the `wide` count, auto_width only); cockpit-near and diffuse stereo
-  beds keep DCS's side whatever it says.
+- The point / wide energy share from the sound log (`power` summed by `wide`), and that auto_width voices beyond
+  1.6 m that are not diffuse now play as points (flag 64 without `wide`).
+- Cockpit stereo sounds kept wide: no hollow or phasey colour against the kill switch (the side now arrives with the
+  mid), and the image not pulled toward DCS's panning.
 - Wind, rain and cabin ambiences still wide (not collapsed to a point) with binaural on.

@@ -37,12 +37,15 @@
 // two channels are first recovered from DCS's known gain ramps (RecoverChannels: fades, torn and half-written snapshots
 // alike). The point source is the mid M = (L' + R') / 2, DCS's own stereo-to-mono rule; the side S = (L' - R') / 2 is
 // what DCS's stereo adds on top (zero for a mono wave):
-//   T = h HRTF(c' M) + (1-h) RePan(M) + ((1-h) + h q) SidePan(S)
+//   T = h HRTF(c' M) + (1-h) RePan(M) + (1-h) SidePan(S) + h q g SidePan(S delayed per ear by the HRTF's delay)
 // where SidePan puts S back with DCS's gains (+gL left, -gR right), so h = 0 is DCS's stock stereo exactly. q = 0, a
-// point source: c' = c (Loudness, 1..2) keeps the stereo's loudness. q = 1, a wide sound (the sdef's auto_width, a
-// source under kNearM, or a diffuse bed by its own mid / side powers): c' = 1, DCS's side stays around a binaural mid.
-// A change of q is crossfaded across one block. c' also carries DCS's own level for the direction (PanLevel below:
-// the HRTF part is as loud as DCS's own panning of that voice, the HRTF adds the direction's cues).
+// point source: c' = c (Loudness, 1..2) keeps the stereo's loudness. q = 1, a wide sound (a source near the head:
+// kNear, under 1.4 m until past 1.6 m; or a diffuse bed by its own mid / side powers): c' = 1, DCS's side stays around
+// a binaural mid, delayed per ear by that ear's HRTF delay (SideDelayed: they arrive together, no comb) and with the
+// mid's level trim and late-translation gain g. The sdef's auto_width is not a reason for wide: ED's flag only narrows a
+// sound with distance, and its width stays in L', R'. A change of q is crossfaded across one block (a new voice starts
+// at its own q). c' also carries DCS's own level for the direction (PanLevel below: the HRTF part is as loud as DCS's
+// own panning of that voice, the HRTF adds the direction's cues).
 #pragma once
 
 #include <immintrin.h>
@@ -62,7 +65,10 @@ namespace audr {
 using audv::MetaData;
 
 constexpr uint32_t kMaxFrames = binaural::kMaxFramesPerCall;  // longer device blocks pass through (counted)
-constexpr float kNearM = 1.5f;                                 // late-translation gain below this distance
+constexpr float kNearM = 1.5f;                                 // a voice's first frame: near (kNear) below this
+// Near (meta_flags::kNear: kept wide, the late-translation gain) with hysteresis per voice: entered under kNearInM,
+// left past kNearOutM (a cockpit sound moving around 1.5 m does not toggle between point and wide).
+constexpr float kNearInM = 1.4f, kNearOutM = 1.6f;
 constexpr float kTransMin = 0.70794578f, kTransMax = 1.41253754f;  // -3 / +3 dB
 constexpr double kMaxLateRad = 1.0471975511965976;             // a late correction beyond 60 deg is not trusted
 constexpr double kMaxLateTransM = 0.3;                         // a late head translation is clamped to 30 cm
@@ -87,6 +93,7 @@ inline bool CoreRender(binaural::Renderer* r, uint32_t slot, const binaural::Sou
   return r->Render(slot, u, in, frames, w0, w1, out);
 }
 inline void CoreResetSource(binaural::Renderer* r, uint32_t slot) { r->ResetSource(slot); }
+inline bool CoreDelays(const binaural::Renderer* r, uint32_t slot, float out[2]) { return r->SourceDelays(slot, out); }
 inline void CoreEnd(binaural::Renderer* r) { r->EndBlock(); }
 inline binaural::Stats CoreStats(const binaural::Renderer* r) { return r->GetStats(); }
 inline binaural::HrtfSet* CoreLoadHrtf(const void* d, size_t n, uint32_t rate, char* e, size_t en) {
@@ -112,6 +119,7 @@ inline bool CoreRender(binaural::Renderer*, uint32_t, const binaural::SourceUpda
   return false;
 }
 inline void CoreResetSource(binaural::Renderer*, uint32_t) {}
+inline bool CoreDelays(const binaural::Renderer*, uint32_t, float*) { return false; }
 inline void CoreEnd(binaural::Renderer*) {}
 inline binaural::Stats CoreStats(const binaural::Renderer*) { return binaural::Stats{}; }
 inline binaural::HrtfSet* CoreLoadHrtf(const void*, size_t, uint32_t, char* e, size_t en) {
@@ -210,7 +218,19 @@ struct Counters {
       voiceEnded{0}, unarmedCalls{0}, overruns{0}, poseBlocks{0}, tornSnaps{0}, passBlocks{0}, stereoCalls{0};
   std::atomic<uint64_t> panCalls{0}, panSolves{0}, panMismatch{0}, panMedian{0}, ownedVoiceFrames{0}, simFrames{0};
   std::atomic<uint32_t> ownedNow{0}, limitNow{binaural::kMaxSources}, activeLastBlock{0};
-  std::atomic<uint32_t> ownedStereoNow{0}, ownedWideNow{0};  // of ownedNow: stereo waves, and those kept wide
+  std::atomic<uint32_t> ownedStereoNow{0};  // of ownedNow: stereo waves (the sim)
+  std::atomic<uint32_t> ownedWideNow{0};    // tagged voices kept wide in the last armed block (under 1.4 / 1.6 m or diffuse)
+  // What the render side did with each slot's voice in its last block (the sound log, control thread): relaxed, each
+  // field on its own (a row may mix two blocks; gen names the voice).
+  struct VoiceView {
+    std::atomic<uint32_t> gen{0};
+    std::atomic<uint32_t> state{0};       // kViewTagged | kViewDiffuse | kViewWide; 0: not rendered by us
+    std::atomic<float> comp{1.0f};        // the loudness factor sqrt((P_M + P_S) / P_M)
+    std::atomic<float> panLevel{1.0f};    // DCS's level for the direction (PanLevel)
+    std::atomic<float> power{0.0f};       // smoothed P_M + P_S of m L', m R' (per frame): the point / wide energy share
+  };
+  static constexpr uint32_t kViewTagged = 1, kViewDiffuse = 2, kViewWide = 4;
+  VoiceView view[audv::kSlots];
   // Block time of our own DSP, microseconds x 10, the last 1024 armed blocks (single writer: the render thread).
   std::atomic<uint32_t> timeRing[1024];
   std::atomic<uint32_t> timeHead{0};
@@ -225,6 +245,10 @@ struct Counters {
     ownedNow.store(0, std::memory_order_relaxed);
     ownedStereoNow.store(0, std::memory_order_relaxed);
     ownedWideNow.store(0, std::memory_order_relaxed);
+    for (VoiceView& v : view) {
+      v.gen.store(0, std::memory_order_relaxed);
+      v.state.store(0, std::memory_order_relaxed);
+    }
     limitNow.store(binaural::kMaxSources, std::memory_order_relaxed);
     activeLastBlock.store(0, std::memory_order_relaxed);
     timeHead.store(0, std::memory_order_relaxed);
@@ -244,7 +268,7 @@ struct PoseNow {
 // A meta's listener-frame position with the head motion since DCS's frame applied (when both poses are valid, in one
 // base space, and the turn is plausible). The translation only when both poses have a position (a missing one is
 // stored as zero: the whole head offset from the origin would move every sound), clamped to kMaxLateTransM.
-// *gainOut: the late-translation gain for sources under 1.5 m.
+// *gainOut: the late-translation gain for sources near the head (meta_flags::kNear).
 inline void CorrectedPosition(const MetaData& m, const PoseNow& now, bool late, float pos[3], float* gainOut) {
   pos[0] = m.pos[0];
   pos[1] = m.pos[1];
@@ -329,6 +353,64 @@ inline uint32_t SidePan(const float* a, const float* b, uint32_t frames, float w
   return bad;
 }
 
+// The side of a wide voice next to its HRTF mid, delayed per ear by that ear's HRTF delay (the core's onset / ITD
+// delay plus its 12 samples of look-ahead, Renderer::SourceDelays): both reach each ear together. Undelayed, DCS's
+// side led the mid by 0.5-1 ms (24-48 samples at 48 kHz): comb notches from about 1 kHz wherever mid and side are
+// correlated, and the precedence effect pulled the image toward DCS's own panning. Whole samples: half a sample of
+// error is 10 us, a notch above 48 kHz.
+//   u(k) = v(k) s(k), s = (a - b) / 2, v linear v0 -> v1 across the call (the weight goes on the input, so a fade, a
+//   refusal or a delay change is a continuous signal at the output); with `rampEnd` < frames, v reaches v1 at that
+//   frame and stays there (a voice's last block: its ramp to 0 ends `delay` frames early, so no tail is left in the
+//   history when the slot goes back to DCS);
+//   y_e(i) = (1 - t) u(i - D0_e) + t u(i - D1_e), t = i / frames (a changed delay is crossfaded across the call);
+//   out_L += y_L rL(i), out_R -= y_R rR(i), the ratios linear as in SidePan.
+// `hist` holds u of the kSideHist samples before this call (oldest first) and receives this call's; `u` is scratch of
+// `frames` floats. *zeroRun counts the zero samples at the history's end (>= kSideHist: all zero, the call is skipped
+// when v stays 0). Returns the non-finite count (those samples enter as 0).
+constexpr uint32_t kSideHist = 512;  // > 4 ms (kMaxDelayMs) + 12 samples at 96 kHz
+inline uint32_t SideDelayed(const float* a, const float* b, uint32_t frames, float v0, float v1, const int d0[2],
+                            const int d1[2], float rL0, float rL1, float rR0, float rR1, float* u, float* hist,
+                            uint32_t* zeroRun, float* out, uint32_t rampEnd = 0xffffffffu) {
+  if (!frames || (v0 == 0.0f && v1 == 0.0f && *zeroRun >= kSideHist)) return 0;
+  const float inv = 1.0f / static_cast<float>(frames);
+  const uint32_t re = rampEnd < frames ? rampEnd : frames;
+  const float invRamp = re ? 1.0f / static_cast<float>(re) : 0.0f;
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < frames; ++i) {
+    const float v = i >= re ? v1 : v0 + (v1 - v0) * static_cast<float>(i) * invRamp;
+    const float x = v * 0.5f * (a[2 * i] - b[2 * i]);
+    if (!std::isfinite(x)) {
+      ++bad;
+      u[i] = 0.0f;
+    } else {
+      u[i] = x;
+    }
+  }
+  auto at = [&](int32_t k) { return k >= 0 ? u[k] : hist[static_cast<int32_t>(kSideHist) + k]; };
+  for (uint32_t i = 0; i < frames; ++i) {
+    const float t = static_cast<float>(i) * inv;
+    const int32_t n = static_cast<int32_t>(i);
+    const float yl = d0[0] == d1[0] ? at(n - d0[0]) : (1.0f - t) * at(n - d0[0]) + t * at(n - d1[0]);
+    const float yr = d0[1] == d1[1] ? at(n - d0[1]) : (1.0f - t) * at(n - d0[1]) + t * at(n - d1[1]);
+    out[2 * i] += yl * (rL0 + (rL1 - rL0) * t);
+    out[2 * i + 1] -= yr * (rR0 + (rR1 - rR0) * t);
+  }
+  if (frames >= kSideHist) {
+    memcpy(hist, u + (frames - kSideHist), sizeof(float) * kSideHist);
+  } else {
+    memmove(hist, hist + frames, sizeof(float) * (kSideHist - frames));
+    memcpy(hist + (kSideHist - frames), u, sizeof(float) * frames);
+  }
+  *zeroRun = v0 == 0.0f && v1 == 0.0f ? (*zeroRun > kSideHist ? kSideHist : *zeroRun) + frames : 0;
+  return bad;
+}
+// An ear delay (samples) as the history's whole-sample delay: rounded, 0 .. kSideHist - 1.
+inline int SideDelaySamples(float d) {
+  if (!(d > 0.0f)) return 0;
+  const float r = std::floor(d + 0.5f);
+  return r >= static_cast<float>(kSideHist - 1) ? static_cast<int>(kSideHist - 1) : static_cast<int>(r);
+}
+
 // The loudness of a stereo voice's mid against its stereo: (P_M + P_S) / P_M of this block's m L', m R'. The mid alone
 // keeps DCS's own stereo-to-mono rule (M = (L + R) / 2, what its stream decoder does at 0x16260 and its width stage
 // gives at w = 0) and is as loud as the stereo when the channels are equal (most of DCS's stereo waves); for
@@ -348,7 +430,7 @@ inline void BlockMidSide(const float* lr, uint32_t frames, double* pm, double* p
 }
 
 // A stereo wave whose channels stay this decorrelated is a diffuse bed (wind, rain, cabin noise), not a point: its
-// side keeps DCS's stereo (as auto_width does). Entered when the loudness factor stays above kDiffuseOn for
+// side keeps DCS's stereo around the binaural mid (wide). Entered when the loudness factor stays above kDiffuseOn for
 // kDiffuseHoldS, left when it stays under kDiffuseOff as long; the change is crossfaded over one block (Rs::qW).
 constexpr float kDiffuseOn = 1.3f;     // P_S / P_M above 0.69
 constexpr float kDiffuseOff = 1.15f;   // P_S / P_M under 0.32
@@ -361,9 +443,12 @@ constexpr double kDiffuseHoldS = 0.2;
 // every direction (SADIE II KU100, 100-400 Hz: within 1.7 dB of the front all round). So the HRTF part carries DCS's
 // own level for the direction and the HRTF adds the interaural and spectral cues: the kill switch keeps the level
 // (flight of 2026-11-25: cockpit sounds behind and above the pilot came out 2.3-2.8 dB louder with the mid at m).
-// 1 for a frontal source, at most kPanLevelMax; non-finite ratios give 1.
+// m is DCS's gain for c = 0.5 on both channels (the frontal gain of a +-60 degree speaker pair, audio_voice.h
+// SolveMono); the level is computed from DCS's actual gains, so other speaker directions are carried as they are (a
+// pair at +-30 degrees plays the front at (1.87 WA + WB) / m, above 1). The cap is only a guard: with any speaker
+// direction (c <= 1) a gain is at most (2 WA + WB) / (1.5 WA + WB) <= 4/3 of m. Non-finite ratios give 1.
 constexpr float kPanLevelMin = 0.25f;   // -12 dB (the pan law's own floor is about -6 dB)
-constexpr float kPanLevelMax = 1.0f;    // the front is the pan law's loudest direction
+constexpr float kPanLevelMax = 4.0f / 3.0f;
 inline float PanLevel(float rL, float rR) {
   const float p = 0.5f * (rL * rL + rR * rR);
   if (!std::isfinite(p)) return 1.0f;
@@ -448,6 +533,15 @@ struct Rs {
   bool haveSnap = false;
   Loudness loud;            // the mid / side estimate (loudness factor, diffuse)
   float qW = 0;             // the side's share at the end of the last block: 0 point source, 1 wide (DCS's side kept)
+  bool haveQ = false;       // qW holds a decision (else a new voice starts at its own: no fade of its side from 0)
+  // The side's two parts at the end of the last block (where this block's ramps start, whatever happened since):
+  bool haveSide = false;
+  float sideRp = 0;         // the re-panned share's side (DCS's, undelayed)
+  float sideV = 0;          // the HRTF share's side (delayed with the HRTF, input weight of SideDelayed)
+  bool haveD = false;
+  int sideD[2] = {0, 0};    // the ears' whole-sample delays of the last HRTF block
+  bool histClean = false;   // the slot's side history is valid (else zeroed before its next use)
+  uint32_t sideZero = 0;    // SideDelayed's zeroRun
   MetaData meta{};          // the last consistent read
   MetaData prev{};          // the one before (pairs a snapshot written before the newest metadata)
 };
@@ -458,6 +552,8 @@ struct Binding {
   binaural::Renderer* core = nullptr;
   float* scratch = nullptr;  // 2 x kMaxFrames, 64-byte aligned (one allocation with `onset`)
   float* onset = nullptr;    // kMaxFrames: a source's first HRTF block from silence, faded in at the input
+  float* side = nullptr;     // kMaxFrames: SideDelayed's u (same allocation)
+  float* sideHist = nullptr; // kSlots x kSideHist: each slot's delayed side history (same allocation; null: undelayed)
   uint32_t* overrun = nullptr;  // ED's overrun counter of this WASAPI renderer
   uint32_t lastOverrun = 0;
   bool haveOverrun = false;
@@ -486,6 +582,7 @@ struct Block {
   bool coreBegun = false;
   int64_t dspTicks = 0;     // QPC ticks spent in our DSP this block
   uint32_t hrtfVoices = 0;
+  uint32_t wideVoices = 0;  // tagged voices kept wide (Counters::ownedWideNow)
 };
 
 struct MxcsrScope {  // FTZ | DAZ for our DSP, the caller's mode back afterwards
@@ -556,6 +653,16 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     cnt.passCandidates.fetch_add(1, std::memory_order_relaxed);
     rs.hW = hTarget;
     rs.tornS0 = 0.0f;
+    // DCS's own output. A fade out just before left the delayed side's last samples in its history (up to the HRTF
+    // delay, at the fade's last weights): they are played out here, or the fade would end in a step of about delay /
+    // frames of the side. Then the history starts from zero again.
+    if (rs.haveSide && rs.histClean && rs.sideZero < kSideHist && b.sideHist && b.side) {
+      const int d[2] = {rs.sideD[0], rs.sideD[1]};
+      SideDelayed(scratch, scratch + 1, frames, 0.0f, 0.0f, d, d, rs.rL, rs.rL, rs.rR, rs.rR, b.side,
+                  b.sideHist + static_cast<size_t>(slot) * kSideHist, &rs.sideZero, out);
+    }
+    rs.haveSide = rs.haveD = rs.histClean = false;
+    cnt.view[slot].state.store(0, std::memory_order_relaxed);
     if (!owned || ended) ackGen[slot].store(meta.gen, std::memory_order_release);
     if (ended && rs.live) {
       audr::CoreResetSource(b.core, static_cast<uint32_t>(slot));
@@ -595,18 +702,23 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   const float* bb = scratch + 1;
   const float scale = 0.5f;
   rs.loud.Update(scratch, frames, b.rate);
-  // The side's share: a point source drops it, a wide sound keeps DCS's (auto_width, a cockpit-near source, a diffuse
-  // bed); a change is crossfaded across this block.
-  const bool wideNow = (pm.flags & (audv::meta_flags::kWide | audv::meta_flags::kNear)) != 0 || rs.loud.diffuse;
-  const float q0 = rs.qW, q1 = wideNow ? 1.0f : 0.0f;
+  // The side's share: a point source drops it, a wide sound keeps DCS's: a source near the head (kNear, under 1.4 m and
+  // until past 1.6 m: a cockpit-wide stereo bed is not a point at the head) or a diffuse bed by its own signal. The
+  // sdef's auto_width is not a reason: ED's flag only narrows a sound with distance (w < 1 past inner_radius, hook spec
+  // 10.1), inside it the sound plays at width 1 like any stereo sound, and the width DCS gives it stays in L', R' (the
+  // point source's loudness factor follows it). A change is crossfaded across this block; a voice's first decision
+  // starts where it is (no fade of its side from 0).
+  const bool wideNow = (pm.flags & audv::meta_flags::kNear) != 0 || rs.loud.diffuse;
+  const float q1 = wideNow ? 1.0f : 0.0f, q0 = rs.haveQ ? rs.qW : q1;
+  if (wideNow) ++blk.wideVoices;
   // HRTF part: weight w(i) h(i). Only one of the two ramps moves in a block, so the product stays linear. Its gain: the
   // stereo's loudness for a point source (the side is not there), 1 with the side kept; the core ramps it.
   const float hw0 = w0 * h0, hw1 = w1 * h1;
   float rpw0 = w0 * (1.0f - h0), rpw1 = w1 * (1.0f - h1);
   bool hrtfDone = false;
+  float gT = 1.0f;  // the late-translation gain (kNear): the mid's and the kept side's alike
   if (hw0 > 0.0f || hw1 > 0.0f) {
     binaural::SourceUpdate u{};
-    float gT = 1.0f;
     CorrectedPosition(pm, blk.pose, blk.late, u.position, &gT);
     u.gain = blk.trim * gT * panLevel * ((1.0f - q1) * rs.loud.comp + q1);
     // Near field on/off is the core's own (Renderer::SetNearField fades it); no per-source exclusion here.
@@ -650,15 +762,65 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     if (bad) cnt.nonFinite.fetch_add(bad, std::memory_order_relaxed);
     cnt.repanCalls.fetch_add(1, std::memory_order_relaxed);
   }
-  // The side (zero for a mono wave) with DCS's own gains: the re-panned share always (so h = 0 is DCS's stereo), plus
-  // the HRTF share times q (a wide sound keeps DCS's side around its binaural mid).
+  // The side (zero for a mono wave), in two parts:
+  //  - the re-panned share's, with DCS's own gains, undelayed (so h = 0 is DCS's stereo exactly);
+  //  - the HRTF share times q (a wide sound keeps DCS's side around its binaural mid), with the same level trim and
+  //    late-translation gain as the mid, delayed per ear by the HRTF's own delay (SideDelayed).
+  // Each part ramps from where it ended in the last block, so a core refusal in the middle of a stream (its share moves
+  // to the re-pan at once for the mid, which has no HRTF output left to fade from) crossfades the side from the delayed
+  // to the undelayed part across the block instead of stepping it at the block's first sample.
   {
-    const float e0 = hrtfDone ? hw0 : 0.0f, e1 = hrtfDone ? hw1 : 0.0f;
-    const float sw0 = rpw0 + e0 * q0, sw1 = rpw1 + e1 * q1;
-    const uint32_t bad = SidePan(a, bb, frames, sw0, sw1, rs.rL, rL1, rs.rR, rR1, out);
+    const float rp1 = rpw1;
+    const float rp0 = rs.haveSide ? rs.sideRp : rpw0;
+    const float gS = blk.trim * gT;
+    const float v1 = hrtfDone ? hw1 * q1 * gS : 0.0f;
+    const float v0 = rs.haveSide ? rs.sideV : (hrtfDone ? hw0 * q0 * gS : 0.0f);
+    uint32_t bad = SidePan(a, bb, frames, rp0, rp1, rs.rL, rL1, rs.rR, rR1, out);
+    float* hist = b.sideHist && b.side ? b.sideHist + static_cast<size_t>(slot) * kSideHist : nullptr;
+    if (hist) {
+      if (!rs.histClean) {
+        memset(hist, 0, sizeof(float) * kSideHist);
+        rs.sideZero = kSideHist;
+        rs.histClean = true;
+      }
+      int d1[2] = {rs.haveD ? rs.sideD[0] : 0, rs.haveD ? rs.sideD[1] : 0};
+      float dd[2];
+      if (hrtfDone && audr::CoreDelays(b.core, static_cast<uint32_t>(slot), dd)) {
+        d1[0] = SideDelaySamples(dd[0]);
+        d1[1] = SideDelaySamples(dd[1]);
+      }
+      const int d0[2] = {rs.haveD ? rs.sideD[0] : d1[0], rs.haveD ? rs.sideD[1] : d1[1]};
+      // The voice's last block (faded back to DCS, or it ended): the slot is acknowledged now and never comes back to
+      // this function, so the delayed side must be silent by the block's end: its ramp to 0 ends the longest delay
+      // early (a 10 ms block: about 1 ms early; nothing is left in the history to be cut).
+      uint32_t rampEnd = frames;
+      if ((!tagged || ended) && v1 == 0.0f) {
+        const int dmax = std::max(std::max(d0[0], d0[1]), std::max(d1[0], d1[1]));
+        rampEnd = frames > static_cast<uint32_t>(dmax) ? frames - static_cast<uint32_t>(dmax) : 0u;
+      }
+      bad += SideDelayed(a, bb, frames, v0, v1, d0, d1, rs.rL, rL1, rs.rR, rR1, b.side, hist, &rs.sideZero, out, rampEnd);
+      rs.sideD[0] = d1[0], rs.sideD[1] = d1[1];
+      rs.haveD = rs.haveD || hrtfDone;
+    } else {
+      bad += SidePan(a, bb, frames, v0, v1, rs.rL, rL1, rs.rR, rR1, out);
+    }
     if (bad) cnt.nonFinite.fetch_add(bad, std::memory_order_relaxed);
+    rs.sideRp = rp1;
+    rs.sideV = v1;
+    rs.haveSide = true;
+  }
+  {
+    Counters::VoiceView& vv = cnt.view[slot];
+    vv.gen.store(meta.gen, std::memory_order_relaxed);
+    vv.comp.store(rs.loud.comp, std::memory_order_relaxed);
+    vv.panLevel.store(panLevel, std::memory_order_relaxed);
+    vv.power.store(static_cast<float>(rs.loud.powM + rs.loud.powS), std::memory_order_relaxed);
+    vv.state.store(Counters::kViewTagged | (rs.loud.diffuse ? Counters::kViewDiffuse : 0u) |
+                       (wideNow ? Counters::kViewWide : 0u),
+                   std::memory_order_relaxed);
   }
   rs.qW = q1;
+  rs.haveQ = true;
   rs.hW = h1;
   rs.rL = rL1;
   rs.rR = rR1;
@@ -671,6 +833,8 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     rs.live = false;
     rs.prevTagged = false;
     rs.tornS0 = 0.0f;
+    rs.haveSide = rs.haveD = rs.histClean = false;
+    cnt.view[slot].state.store(0, std::memory_order_relaxed);
     ackGen[slot].store(meta.gen, std::memory_order_release);
     cnt.voiceEnded.fetch_add(1, std::memory_order_relaxed);
   }

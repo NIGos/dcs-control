@@ -26,6 +26,8 @@ bool TestHrtf(const wchar_t* name, std::vector<uint8_t>* out) {
 void ResetStandIn() {
   audiofake::g_refuse = false;
   audiofake::g_spinUs = 0;
+  audiofake::g_delayL = 0.0f;
+  audiofake::g_delayR = 0.0f;
 }
 
 // ---- 1. the real ed_sound.dll ----------------------------------------------------------------------------------------
@@ -474,11 +476,11 @@ void Ownership() {
     const bool flags = metas && !(mm.flags & audv::meta_flags::kStereo) && (ms.flags & audv::meta_flags::kStereo) &&
                        !(ms.flags & audv::meta_flags::kWide) && (mw.flags & audv::meta_flags::kStereo) &&
                        (mw.flags & audv::meta_flags::kWide) && r.Marked(mono);
-    const bool counts = r.cnt.ownedNow.load() == 3 && r.cnt.ownedStereoNow.load() == 2 && r.cnt.ownedWideNow.load() == 1;
+    const bool counts = r.cnt.ownedNow.load() == 3 && r.cnt.ownedStereoNow.load() == 2;
     Check(r.StereoTagged(st) && r.StereoTagged(wide) && r.StereoTagged(mono) && tagBytes && flags && counts,
           "audio ownership: every owned voice gets the tag (m, 0), (0, m), mark (m 2^-40, -2^-100) with m = DCS's frontal "
-          "gain, mono and stereo alike; stereo waves published as stereo (wide with auto_width); the owned set's counts "
-          "(3 sounds: 2 stereo, 1 wide)");
+          "gain, mono and stereo alike; stereo waves published as stereo (auto_width flagged, informational); the owned "
+          "set's counts (3 sounds: 2 stereo)");
     // A stream turning mono under an owned stereo voice: the same tag, only the count changes.
     W<uint32_t>(r.w.voices[st], 0xec4, 1);
     r.Frame(1022);
@@ -1380,7 +1382,7 @@ void Phrases() {
                            "\"audio: listener-vs-pose: ", "\"audio: on (%s, HRTF %ls: %u directions)\"",
                            "\"audio: HRTF %ls not usable (%s); the default set is used\"",
                            "\"audio: idle, blocks %llu (armed %llu), pan calls %llu; refused: off %llu, output %llu, ",
-                           "\"%u; mono %u, stereo %u (wide %u); fades in/out "};
+                           "\"%u; mono %u, stereo %u; wide %u (near or diffuse); fades in/out "};
   int missing = 0;
   for (const char* p : phrases)
     if (src.find(p) == std::string::npos) ++missing, printf("     audio phrase missing: %s\n", p);
@@ -1494,7 +1496,9 @@ void StereoNull() {
   const double db = ErrDb(allA.data(), allB.data(), allA.size());
   printf("     stereo null test: owned %u (stereo %u, wide %u), re-panned %llu; error vs DCS's mix %.1f dB\n",
          audio::g_cnt.ownedNow.load(), stereoNow, wideNow, static_cast<unsigned long long>(audio::g_cnt.repanCalls.load()), db);
-  Check(audio::g_cnt.ownedNow.load() == 5 && stereoNow == 4 && wideNow == 1 && audio::g_cnt.repanCalls.load() > 1000 &&
+  // Kept wide (near or diffuse): the cockpit-distance noise and the decorrelated sine. The auto_width noise, 600-1300 m
+  // past its inner radius, is narrowed by DCS (w 0.5 .. 0): not diffuse, a point source.
+  Check(audio::g_cnt.ownedNow.load() == 5 && stereoNow == 4 && wideNow == 2 && audio::g_cnt.repanCalls.load() > 1000 &&
             db < -60.0,
         "audio stereo null test: stereo voices next to mono ones (decorrelated, dual mono, wide with DCS's width moving), "
         "their mid re-panned and their side put back with DCS's own gains equal DCS's mix within -60 dB");
@@ -1616,22 +1620,15 @@ void StereoSteady() {
           "audio stereo steady state: a stereo wave under 1.5 m keeps DCS's side (no loudness factor)");
     RigDown(r);
   }
-  {  // wide (auto_width, inside its inner radius): the core's mid plus DCS's own side
+  {  // auto_width inside its inner radius: ED plays it at width 1 like any stereo sound, so it is what its signal says:
+     // channels correlated in part, 5 m away: a point source (core only, the loudness factor), not wide
     Rig r;
-    StereoOne(r, kNoise, 3, 4, 100.0f);
+    StereoOne(r, kPartial, 3, 4, 100.0f);
     SimFrame(r);
     Block(r, a.data(), b.data(), 480);
-    float gL, gR;
-    audv::PanLaw(0.8, 0, 0.6 * 0.5 + 0.8 * -0.8660254037844386, 0.6 * 0.5 + 0.8 * 0.8660254037844386, &gL, &gR);
-    double worst = 0, peak = 0;
-    for (int i = 0; i < 480; ++i) {
-      const double l = b[2 * i] / gL, rr = b[2 * i + 1] / gR;  // L', R' from DCS's own output
-      const double s = 0.5 * (l - rr);
-      worst = std::max({worst, std::fabs(a[2 * i] - audiofake::g_lastAdded[2 * i] - s * gL),
-                        std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] + s * gR)});
-      peak = std::max(peak, std::fabs(s * gL));
-    }
-    const bool noComp = FactorIs(audiofake::g_lastGain, PanLevelAt(0, 3, 4), 1.0);
+    bool coreOnlyNear = true;
+    for (int i = 0; i < 960; ++i) coreOnlyNear = coreOnlyNear && a[i] == audiofake::g_lastAdded[i];
+    const double factor = audiofake::g_lastGain / PanLevelAt(0, 3, 4);
     RigDown(r);
     // far past its width (DCS's width 0): no side at all, the output is the core's alone
     Rig q;
@@ -1640,12 +1637,186 @@ void StereoSteady() {
     Block(q, a.data(), b.data(), 480);
     bool coreOnly = true;
     for (int i = 0; i < 960; ++i) coreOnly = coreOnly && a[i] == audiofake::g_lastAdded[i];
-    printf("     stereo steady (wide): side vs DCS's worst %.2e of %.3f; far past its width: core only %s\n", worst, peak,
-           coreOnly ? "yes" : "no");
-    Check(noComp && peak > 0.01 && worst <= 1e-5 * peak + 1e-7 && coreOnly,
-          "audio stereo steady state: a wide wave (auto_width) is the core's mid plus DCS's own side with DCS's gains "
-          "(no loudness factor); past inner_radius + 1200 m DCS's width is 0 and only the binaural mid remains");
+    printf("     stereo steady (auto_width inside its inner radius, 5 m): core only %s, loudness factor %.4f; far past its "
+           "width: core only %s\n", coreOnlyNear ? "yes" : "no", factor, coreOnly ? "yes" : "no");
+    Check(coreOnlyNear && factor > 1.08 && factor < 1.2 && coreOnly,
+          "audio stereo steady state: auto_width is not a reason for wide (ED's flag only narrows with distance): inside "
+          "its inner radius a partly correlated wave 5 m away is a point source at the stereo's loudness; past "
+          "inner_radius + 1200 m DCS's width is 0 and only the binaural mid remains");
     RigDown(q);
+  }
+}
+
+// DCS's gains of a StereoOne voice (gain 0.8, no crosstalk) at (x, z) on the +-60 degree pair.
+void StereoOneGains(double x, double z, float* gL, float* gR) {
+  const double n = std::sqrt(x * x + z * z);
+  x /= n, z /= n;
+  audv::PanLaw(0.8, 0, x * 0.5 + z * -0.8660254037844386, x * 0.5 + z * 0.8660254037844386, gL, gR);
+}
+
+// Review round 5 (audio_render.h): the kept side delayed per ear by the HRTF's delay (a delay change crossfaded), a
+// new wide voice's side there from its first sample, the side's share ramped when the core refuses mid-stream, the
+// mid's level trim on the side too, kNear with hysteresis, PanLevel's guard.
+void StereoWideR5() {
+  std::vector<float> a(2 * 480), b(2 * 480), bPrev(2 * 480);
+  {  // a stereo wave 1 m away (near: wide; channels correlated in part, so not diffuse): its side delayed per ear
+    Rig r;
+    StereoOne(r, kPartial, 0.6, 0.8);
+    float gL, gR;
+    StereoOneGains(0.6, 0.8, &gL, &gR);
+    audiofake::g_delayL = 20.0f;
+    audiofake::g_delayR = 33.4f;  // rounded to 33
+    for (int k = 0; k < 3; ++k) {
+      SimFrame(r);
+      bPrev = b;
+      Block(r, a.data(), b.data(), 480);
+    }
+    // S of sample k of this block (k < 0: the block before), from DCS's own output: S = (L' - R') / 2.
+    auto S = [&](int k) {
+      const float* src = k >= 0 ? b.data() : bPrev.data();
+      const int j = k >= 0 ? k : k + 480;
+      return 0.5 * (src[2 * j] / gL - src[2 * j + 1] / gR);
+    };
+    double worst = 0, peak = 0;
+    for (int i = 0; i < 480; ++i) {
+      worst = std::max({worst, std::fabs(a[2 * i] - audiofake::g_lastAdded[2 * i] - S(i - 20) * gL),
+                        std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] + S(i - 33) * gR)});
+      peak = std::max(peak, std::fabs(S(i) * gL));
+    }
+    // A delay change (20 -> 24 left, 33 -> 30 right): both crossfaded across the block.
+    audiofake::g_delayL = 24.0f;
+    audiofake::g_delayR = 30.0f;
+    SimFrame(r);
+    bPrev = b;
+    Block(r, a.data(), b.data(), 480);
+    double worstChange = 0;
+    for (int i = 0; i < 480; ++i) {
+      const double t = i / 480.0;
+      worstChange = std::max({worstChange,
+                              std::fabs(a[2 * i] - audiofake::g_lastAdded[2 * i] - ((1 - t) * S(i - 20) + t * S(i - 24)) * gL),
+                              std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] +
+                                        ((1 - t) * S(i - 33) + t * S(i - 30)) * gR)});
+    }
+    printf("     side delayed per ear (20 / 33 samples): worst %.2e of %.3f; delay change crossfaded: worst %.2e\n", worst,
+           peak, worstChange);
+    Check(peak > 0.01 && worst <= 1e-5 * peak + 1e-7 && worstChange <= 1e-5 * peak + 1e-7,
+          "audio stereo wide: the kept side is delayed per ear by the HRTF's own delay of that ear (the core's "
+          "SourceDelays), so mid and side reach each ear together; a delay change is crossfaded across the block");
+    RigDown(r);
+  }
+  {  // a new wide voice: its side is there from the first sample (no fade from 0 in its first block)
+    Rig r;
+    RigUp(r, kIniOn);
+    AddBoth(r, 0, true, 2, kPartial, 0.5f, 440, 0.8f, 21);
+    PosBoth(r, 0, 0.6, 0, 0.8);
+    Bind(r);
+    CreateVoice(r, 0);
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    float gL, gR;
+    StereoOneGains(0.6, 0.8, &gL, &gR);
+    double worst = 0, peak = 0;
+    for (int i = 0; i < 480; ++i) {
+      const double s = 0.5 * (b[2 * i] / gL - b[2 * i + 1] / gR);
+      worst = std::max({worst, std::fabs(a[2 * i] - audiofake::g_lastAdded[2 * i] - s * gL),
+                        std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] + s * gR)});
+      peak = std::max(peak, std::fabs(s * gL));
+    }
+    printf("     new wide voice, first block: side vs DCS's worst %.2e of %.3f (fade-ins %llu)\n", worst, peak,
+           static_cast<unsigned long long>(audio::g_cnt.fadeIns.load()));
+    Check(peak > 0.01 && worst <= 1e-5 * peak + 1e-7 && audio::g_cnt.fadeIns.load() == 0,
+          "audio stereo wide: a wide voice owned from its creation has DCS's side from its first sample (its first "
+          "point / wide decision is not faded from 0)");
+    RigDown(r);
+  }
+  {  // the core refusing mid-stream on a point voice: its side's share ramps in across the block (no step at sample 0)
+    Rig r;
+    RigUp(r, kIniOn);
+    AddBoth(r, 0, true, 2, kDcSplit, 1.0f, 0, 1.0f);
+    PosBoth(r, 0, 0, 0, 10);
+    CreateVoice(r, 0);
+    Bind(r);
+    for (int k = 0; k < 10; ++k) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    const uint64_t rej0 = audio::g_cnt.coreRejected.load();
+    audiofake::g_refuse = true;
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    // DCS's own output: L' gL = gL, R' gR = gR / 4 (L' = 1, R' = 1/4: S = 3/8). Re-panned mid M gL, M gR; the side's
+    // share sw(i): hooked - DCS = (sw - 1) S gL left, (1 - sw) S gR right, sw rising 0 -> 1 across the block.
+    const double gL = b[0], gR = 4.0 * b[1], S = 0.375;
+    double worst = 0;
+    for (int i = 0; i < 480; ++i) {
+      const double ramp = 1.0 - i / 480.0;
+      worst = std::max({worst, std::fabs((a[2 * i] - b[2 * i]) + ramp * S * gL),
+                        std::fabs((a[2 * i + 1] - b[2 * i + 1]) - ramp * S * gR)});
+    }
+    const double first = (b[0] - a[0]) / (S * gL);
+    SimFrame(r);
+    Block(r, a.data(), b.data(), 480);
+    double after = 0;
+    for (int i = 0; i < 960; ++i) after = std::max(after, static_cast<double>(std::fabs(a[i] - b[i])));
+    printf("     core refusal mid-stream (point voice): side share at sample 0 %.3f (was 1), ramp worst %.2e of %.3f; "
+           "next block vs DCS %.2e\n", 1.0 - first, worst, S * gL, after);
+    Check(audio::g_cnt.coreRejected.load() >= rej0 + 2 && worst <= 1e-5 && after <= 1e-5,
+          "audio stereo refusal: a core refusal in the middle of a point voice's stream ramps its side's share in "
+          "across the block (no step at its first sample); the block after is DCS's stereo exactly");
+    RigDown(r);
+  }
+  {  // the level trim (LevelTrimDb -6) applies to the kept side as to the mid
+    Rig r;
+    RigUp(r, "[Audio]\r\nBinaural=1\r\nHrtf=default\r\nMaxObjects=16\r\nLateHeadTracking=0\r\nExcludeContexts=3\r\n"
+             "LevelTrimDb=-6\r\n");
+    AddBoth(r, 0, true, 2, kPartial, 0.5f, 440, 0.8f, 21);
+    PosBoth(r, 0, 0.6, 0, 0.8);
+    Bind(r);
+    CreateVoice(r, 0);
+    for (int k = 0; k < 5; ++k) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    float gL, gR;
+    StereoOneGains(0.6, 0.8, &gL, &gR);
+    const double trim = std::pow(10.0, -6.0 / 20.0);
+    double worst = 0, peak = 0;
+    for (int i = 0; i < 480; ++i) {
+      const double s = 0.5 * (b[2 * i] / gL - b[2 * i + 1] / gR);
+      worst = std::max({worst, std::fabs(a[2 * i] - audiofake::g_lastAdded[2 * i] - trim * s * gL),
+                        std::fabs(a[2 * i + 1] - audiofake::g_lastAdded[2 * i + 1] + trim * s * gR)});
+      peak = std::max(peak, std::fabs(s * gL));
+    }
+    printf("     level trim -6 dB on a wide voice: side vs trim x DCS's worst %.2e of %.3f\n", worst, peak);
+    Check(peak > 0.01 && worst <= 2e-5 * peak + 1e-7,
+          "audio stereo wide: the mid's level trim (and so its late-translation gain, the same factor) applies to the "
+          "kept side too");
+    RigDown(r);
+  }
+  {  // kNear with hysteresis: entered under 1.4 m, left past 1.6 m; a first frame decides at 1.5 m
+    SimRig r;
+    const int v = r.Add(0, 0.8f, 2.0, 0, 0, 2);
+    const double path[] = {2.0, 1.45, 1.3, 1.55, 1.65, 1.45, 1.35};
+    const bool want[] = {false, false, true, true, false, false, true};
+    bool ok = true;
+    int64_t t = 1000;
+    for (int k = 0; k < 7; ++k) {
+      r.w.SetPos(v, path[k], 0, 0);
+      r.Frame(t += 11);
+      r.Frame(t += 11);
+      audv::MetaData md{};
+      ok = ok && r.Meta(v, &md) && ((md.flags & audv::meta_flags::kNear) != 0) == want[k];
+    }
+    SimRig q;
+    const int u = q.Add(0, 0.8f, 1.45, 0, 0, 2);
+    q.Frame(1000);
+    q.Frame(1011);
+    audv::MetaData mq{};
+    const bool firstNear = q.Meta(u, &mq) && (mq.flags & audv::meta_flags::kNear);
+    Check(ok && firstNear && std::fabs(audr::PanLevel(1.2f, 1.2f) - 1.2f) < 1e-6f &&
+              std::fabs(audr::PanLevel(3.0f, 3.0f) - 4.0f / 3.0f) < 1e-6f,
+          "audio near / wide: kNear has a 1.4 / 1.6 m band per voice (no toggling around 1.5 m; a first frame at 1.45 m "
+          "is near); PanLevel carries a level above the +-60 degree frontal gain (other speaker pairs), up to 4/3");
   }
 }
 
@@ -1656,8 +1827,9 @@ void StereoFades() {
     Rig r;
     RigUp(r, kIniOn);
     AddBoth(r, 0, true, 2, kDcSplit, 1.0f, 0, 1.0f);
-    if (wideCase) AutoWidthBoth(r, 0, 50.0f);
-    PosBoth(r, 0, 0, 0, 10);  // hard right
+    // Wide: 1 m away (near), its side delayed by the delays the stand-in reports (a fade out must leave no tail).
+    PosBoth(r, 0, 0, 0, wideCase ? 1 : 10);  // hard right
+    if (wideCase) audiofake::g_delayL = 20.0f, audiofake::g_delayR = 33.0f;
     audio::g_userOff = true;
     CreateVoice(r, 0);
     Bind(r);
@@ -2106,6 +2278,7 @@ inline void Run() {
   StereoNull();
   StereoSteady();
   StereoFades();
+  StereoWideR5();
   StereoTorn();
   StereoTakeOver();
   StereoHalfTorn();
