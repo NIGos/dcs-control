@@ -77,7 +77,7 @@ public sealed class TransactionStore(string stateDirectory)
                 if (Hashing.BytesSha256(original) != file.ExpectedSha256) throw new IOException("The file changed while preparing its backup.");
                 AtomicFile.Write(PathPolicy.UnderRoot(root, backup), original);
             }
-            journal.Entries.Add(new() { Path = Path.GetFullPath(file.Path), PreviousSha256 = file.ExpectedSha256, InstalledSha256 = Hashing.BytesSha256(file.Content), BackupFile = backup, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : Path.GetFullPath(file.Root), Deleted = file.Delete });
+            journal.Entries.Add(new() { Path = Path.GetFullPath(file.Path), PreviousSha256 = file.ExpectedSha256, InstalledSha256 = Hashing.ContentSha256(file.Content), BackupFile = backup, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : Path.GetFullPath(file.Root), Deleted = file.Delete });
         }
         Save(root, journal);
         try

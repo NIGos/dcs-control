@@ -169,10 +169,11 @@ public sealed class WindowsInventory
         };
     }
 
+    // The hash is shown on the PC page and goes into the diagnostic package only: hashed again when the file changed.
     private static FileFact Fact(string path)
     {
         if (!File.Exists(path)) return new(path, false, null, null);
-        try { return new(path, true, FileVersionInfo.GetVersionInfo(path).FileVersion, Hashing.FileSha256(path)); }
+        try { return new(path, true, FileVersionInfo.GetVersionInfo(path).FileVersion, Hashing.FileSha256Cached(path)); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return new(path, true, null, null); }
     }
 

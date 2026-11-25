@@ -235,13 +235,13 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                     foreach (var filename in new[] { "dxgi.dll", "CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll", "CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll" })
                     {
                         var path = PathPolicy.UnderRoot(cheeky, filename);
-                        if (!File.Exists(path) || Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim())
+                        if (!File.Exists(path) || Hashing.FileSha256Cached(path) != File.ReadAllText(path + ".sha256").Trim())
                             throw new InvalidDataException("The Cheeky components are modified or incomplete.");
                     }
                 }
                 layer = Path.Combine(DistributionRoot, "components/CheekyOpenXRLayer.dll");
                 var expected = File.ReadAllText(layer + ".sha256").Trim();
-                if (Hashing.FileSha256(layer) != expected) throw new InvalidDataException("Cheeky layer is modified or incomplete.");
+                if (Hashing.FileSha256Cached(layer) != expected) throw new InvalidDataException("Cheeky layer is modified or incomplete.");
             }
             var quad = Path.Combine(DistributionRoot, "components/quadviews");
             if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory))
@@ -249,7 +249,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 foreach (var filename in new[] { "XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "openxr-api-layer.json", "settings.cfg" })
                 {
                     var path = Path.Combine(quad, filename);
-                    if (Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim()) throw new InvalidDataException("Quad Views provider is modified or incomplete.");
+                    if (Hashing.FileSha256Cached(path) != File.ReadAllText(path + ".sha256").Trim()) throw new InvalidDataException("Quad Views provider is modified or incomplete.");
                 }
             }
             string? focus = null;
@@ -259,7 +259,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 foreach (var filename in new[] { "dxgi.dll", "CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll", "CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll" })
                 {
                     var path = PathPolicy.UnderRoot(focus, filename);
-                    if (Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim())
+                    if (Hashing.FileSha256Cached(path) != File.ReadAllText(path + ".sha256").Trim())
                         throw new InvalidDataException("The focus adapter is modified or incomplete.");
                 }
             }
@@ -274,7 +274,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                     // Development distributions without the fork build: upstream package for stereo profiles only.
                     ofxrLayer = null; ofxr = Import("ofxr");
                 }
-                else if (!File.Exists(ofxrLayer) || Hashing.FileSha256(ofxrLayer) != File.ReadAllText(ofxrLayer + ".sha256").Trim())
+                else if (!File.Exists(ofxrLayer) || Hashing.FileSha256Cached(ofxrLayer) != File.ReadAllText(ofxrLayer + ".sha256").Trim())
                     throw new InvalidDataException("The OFXR layer is modified or incomplete.");
             }
             string? engine = null;
@@ -286,7 +286,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 foreach (var filename in EngineFiles)
                 {
                     var path = Path.Combine(engine, filename);
-                    if (!File.Exists(path) || !File.Exists(path + ".sha256") || Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim())
+                    if (!File.Exists(path) || !File.Exists(path + ".sha256") || Hashing.FileSha256Cached(path) != File.ReadAllText(path + ".sha256").Trim())
                         throw new InvalidDataException("The DCS engine optimizations are modified or incomplete.");
                 }
             }
@@ -295,7 +295,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             if (profile.ForLaunch().UsesPerceptionLayer && (profile.ForLaunch().PerceptionLayerRequired || File.Exists(Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll"))))
             {
                 pupilShift = Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll");
-                if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
+                if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256Cached(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
                     throw new InvalidDataException("The pupil shift layer is modified or incomplete.");
             }
             return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectoryFor(inventory.OptionsPath),
@@ -315,6 +315,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// running DCS could use the files.</summary>
     public OriginalsApply Apply(ApplyPlan plan)
     {
+        using var hashes = Hashing.Scope();
         var originals = Originals;
         EnsureDcsClosed(plan.Files.Select(f => f.Path).Append(plan.Executable).Concat(originals.Read().Files.Select(f => f.Path)), ManagedRoot);
         var applied = originals.Apply(plan);
@@ -481,6 +482,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// </summary>
     public LaunchSync SyncApplied(VrProfile? draft, InventorySnapshot inventory)
     {
+        using var hashes = Hashing.Scope();
         var originals = Originals;
         var baseline = originals.Read();
         var applied = baseline.State == "applied" ? ReadAppliedProfile() : null;
@@ -562,6 +564,9 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     {
         // Refused before anything is written: with the launcher kept, the game could not start (see LaunchSafety.CurrentJob).
         if ((draft ?? ReadAppliedProfile()?.Profile)?.KeepDcsLauncher == true && LaunchSafety.LauncherRestartBlocked) throw new InvalidOperationException(LaunchSafety.LauncherBlockedMessage);
+        // One launch reads each installed file once: the sync's checks and the launch check share the hashes of files that
+        // did not change in between (Hashing.Scope).
+        using var hashes = Hashing.Scope();
         var sync = SyncApplied(draft, inventory);
         return (sync, PrepareLaunchApplied());
     }
@@ -586,6 +591,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// </summary>
     public LiveApplyResult ApplyLive(VrProfile draft, InventorySnapshot inventory)
     {
+        using var hashes = Hashing.Scope();
         var applied = ReadAppliedProfile();
         if (applied is null || applied.Journal.ProfileId != draft.Id || !SamePaths(inventory, applied))
             throw new InvalidOperationException("Launch DCS once to apply this profile; its changes wait for the next launch.");
@@ -797,7 +803,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// <summary>The planned files Live mode never writes, each with what decides it (the owned options.lua settings, a
     /// component's owned INI values, otherwise the bytes): profile.json and pimax-fovea.json are left out (Launch DCS
     /// writes them anyway), as are the live files.</summary>
-    private static Dictionary<string, string> NonLiveSignature(ApplyPlan plan, IReadOnlySet<string> blocked) => Signature(plan.Files.Select(f => (f.Path, f.LuaChanges, f.IniValues, Hashing.BytesSha256(f.Content))), blocked);
+    private static Dictionary<string, string> NonLiveSignature(ApplyPlan plan, IReadOnlySet<string> blocked) => Signature(plan.Files.Select(f => (f.Path, f.LuaChanges, f.IniValues, Hashing.ContentSha256(f.Content))), blocked);
     private static Dictionary<string, string> InstalledSignature(TransactionJournal journal, IReadOnlySet<string> blocked) => Signature(journal.Entries.Select(e => (e.Path, e.LuaChanges, e.IniValues, e.InstalledSha256)), blocked);
     /// <summary>A live file that could not be written live (<paramref name="blocked"/>) counts like any other file: a
     /// setting that changes it waits (Quad Views' edge blend that also turns Cheeky's edge fade on, for example).</summary>
@@ -866,7 +872,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             var wanted = next.Files.FirstOrDefault(f => Path.GetFileName(f.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
             var installed = journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
             if (wanted is null && installed is null) continue;
-            if (wanted is null || installed is null || Hashing.BytesSha256(wanted.Content) != installed.InstalledSha256
+            if (wanted is null || installed is null || Hashing.ContentSha256(wanted.Content) != installed.InstalledSha256
                 || !Path.GetFullPath(wanted.Path).Equals(Path.GetFullPath(installed.Path), StringComparison.OrdinalIgnoreCase))
             {
                 plan = next; reason = "this version of DCS Control writes updated settings";
@@ -878,7 +884,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             && (Path.GetExtension(f.Path).Equals(".dll", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(f.Path).Equals(".lua", StringComparison.OrdinalIgnoreCase))))
         {
             var installed = journal.Entries.FirstOrDefault(e => Path.GetFullPath(e.Path).Equals(Path.GetFullPath(wanted.Path), StringComparison.OrdinalIgnoreCase));
-            if (installed is null || Hashing.BytesSha256(wanted.Content) != installed.InstalledSha256)
+            if (installed is null || Hashing.ContentSha256(wanted.Content) != installed.InstalledSha256)
             {
                 plan = next; reason = "this version of DCS Control installs updated components";
                 return true;
@@ -1053,6 +1059,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// <summary>Verifies the complete installed launch contract without executing the game.</summary>
     public ProcessStartInfo PrepareLaunchApplied()
     {
+        using var hashes = Hashing.Scope();
         var current = Originals.Read() is { State: "applied", Current: { } applied } ? applied : null;
         EnsureDcsClosed(current?.Entries.Select(e => e.Path), ManagedRoot);
         if (current is null) throw new InvalidOperationException("No profile is applied. Launch DCS from DCS Control to apply one.");
