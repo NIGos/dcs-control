@@ -11,6 +11,9 @@ add_library(quad_probe SHARED probe_layer.cpp)
 target_compile_definitions(quad_probe PRIVATE PROBE_NAME="quad")
 add_library(gaze_probe SHARED probe_layer.cpp)
 target_compile_definitions(gaze_probe PRIVATE PROBE_NAME="gaze")
+# A layer that faults on a null-instance xrGetInstanceProcAddr, as Ultraleap's hand tracking does (GitHub #35).
+add_library(nullfault_probe SHARED probe_layer.cpp)
+target_compile_definitions(nullfault_probe PRIVATE PROBE_NAME="nullfault" PROBE_FAULT_NULL=1)
 # Read-only runtime query used to check whether a runtime exposes eye gaze (for example SteamVR with Sboys 1.3).
 add_executable(runtime_gaze_query runtime_gaze_query.cpp)
 target_link_libraries(runtime_gaze_query PRIVATE "${WORKSPACE}/artifacts/native/openxr-loader/src/loader/openxr_loader.lib" advapi32)

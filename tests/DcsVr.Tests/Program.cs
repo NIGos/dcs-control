@@ -3425,6 +3425,12 @@ foreach (var runtimeKind in new[] { RuntimeKind.Pimax, RuntimeKind.SboysSteamVr 
         Require(plan.LaunchEnvironment["DCSVR_QUAD_FOCUS"] == "1");
         Require(plan.LaunchEnvironment["DCSVR_DIAG_HOTKEY"] == "123:6" && plan.LaunchEnvironment["DCSVR_DIAG_OVERLAY"] == "0" && plan.LaunchEnvironment["DCSVR_NR_HOTKEY"] == NeuralHotkeys.Environment(p.NeuralToggleKey));
         Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_CHEEKY_foveated_dlss;XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic");
+        // Ultraleap hand tracking installed: below Quad Views (GitHub #20), above OFXR (GitHub #35).
+        var handsDll = Make(dir + "/ultraleap/UltraleapHandTracking.dll", "fixture");
+        var handsManifest = Make(dir + "/ultraleap/UltraleapHandTracking.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_ULTRALEAP_hand_tracking\",\"library_path\":\"UltraleapHandTracking.dll\",\"api_version\":\"1.0\",\"implementation_version\":\"1\",\"description\":\"fixture\",\"disable_environment\":\"DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking\"}}");
+        var withHands = new DeploymentPlanner(new(ofxr, null, Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll"), Path.Combine(workspace, "external/quadviews/bin/x64/Release"), focus, DeferredOfxr))
+            .Build(p, inv with { Layers = [new("LocalMachine", handsManifest, true, "XR_APILAYER_ULTRALEAP_hand_tracking", handsDll, true)] }, Path.Combine(root, dir + "/managed-hands"));
+        Require(withHands.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_CHEEKY_foveated_dlss;XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking;XR_APILAYER_XRFrameBridge_diagnostic", withHands.LaunchEnvironment["XR_ENABLE_API_LAYERS"]);
         var runtimeFile = plan.Files.Single(f => f.Path.EndsWith("CheekyFoveatedDLSSRuntime.dll")); Require(Hashing.BytesSha256(runtimeFile.Content) == Hashing.FileSha256(Path.Combine(focus, "CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll")));
         var store = new OriginalsStore(Path.Combine(root, dir + "/originals")); store.Apply(plan); Require(store.RestoreOriginals().Complete); Require(File.ReadAllText(options) == Lua);
     });
@@ -3777,7 +3783,16 @@ Test("Ultraleap hand tracking loads below the bundled Quad Views, only for this 
     DeploymentPlanner Planner() => new(new(null, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release")));
     var p = new VrProfile { Runtime = RuntimeKind.Pimax, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Off };
     var plan = Planner().Build(p, Inventory(manifest, true), Path.Combine(root, "hands-order/managed"));
-    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking", "last in the list: closest to the runtime");
+    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking", "directly below Quad Views");
+    // Frame generation: OFXR asks the layer below it for global functions before that layer has an instance and Ultraleap
+    // crashes on that (GitHub #35), so Ultraleap sits between Quad Views and OFXR, still below Quad Views (#20).
+    var ofxr = new ComponentCache(Path.Combine(root, "hands-order/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
+    var pupilDll = Make("hands-order/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer");
+    DeploymentPlanner FgPlanner() => new(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr, PupilShiftDll: pupilDll));
+    var fg = p with { FrameGen = FrameGeneration.Nvidia };
+    Require(FgPlanner().Build(fg, Inventory(manifest, true), Path.Combine(root, "hands-order/managed-fg")).LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking;XR_APILAYER_XRFrameBridge_diagnostic", "frame generation: above OFXR");
+    var pupil = FgPlanner().Build(fg with { Gaze = GazeMode.EyeTracked, PupilShift = true }, Inventory(manifest, true), Path.Combine(root, "hands-order/managed-pupil")).LaunchEnvironment["XR_ENABLE_API_LAYERS"];
+    Require(pupil == "XR_APILAYER_DCSVR_pupil_shift;XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking;XR_APILAYER_XRFrameBridge_diagnostic", "pupil shift stays first: " + pupil);
     Require(plan.LaunchEnvironment["DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"] == "1", "the registered copy is off for this DCS");
     var written = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("hand-tracking.json")).Content);
     Require(written.Contains("UltraleapHandTracking.dll") && written.Contains("XR_EXT_hand_tracking"), "its own manifest, with the extensions it offers");

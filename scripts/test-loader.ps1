@@ -72,6 +72,33 @@ foreach($layers in @('XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFra
     Write-Output ("deferred OFXR: " + $stdoutTask.GetAwaiter().GetResult().Trim().Split("`n")[-1]); [void]$stderrTask.GetAwaiter().GetResult()
     $code=$process.ExitCode; $process.Dispose(); if($code -ne 0){throw "Deferred OFXR layer chain failed ($code): $layers"}
 }
+# GitHub #35: a layer that faults on a null-instance xrGetInstanceProcAddr (as Ultraleap's hand tracking does) with Quad
+# Views and the OFXR layer DCS Control ships (artifacts/native/ofxr-djules75). The profile's order (it between Quad Views
+# and OFXR) and the order before the fix (it below OFXR, which OFXR's patch 0124 now survives) both create the instance.
+$faultRoot=Join-Path $fixtureRoot 'null-fault'
+New-Item -ItemType Directory -Path "$faultRoot/layers" -Force | Out-Null
+Copy-Item -LiteralPath "$workspaceRoot/artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll" -Destination $faultRoot -Force
+"[ofxr]`r`nenabled=1`r`ndefer_until_submitted=1`r`n" | Set-Content -LiteralPath "$faultRoot/ofxr_bridge.ini" -Encoding ascii
+Copy-Item -LiteralPath "$fixtureRoot/layers/XR_APILAYER_MBUCCHIA_quad_views_foveated.json" -Destination "$faultRoot/layers" -Force
+@{file_format_version='1.0.0';api_layer=@{name='XR_APILAYER_XRFrameBridge_diagnostic';library_path=[IO.Path]::GetFullPath("$faultRoot/XR_APILAYER_XRFrameBridge_diagnostic.dll");api_version='1.0';implementation_version='1';description='Offline smoke (shipped OFXR)'}} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$faultRoot/layers/XR_APILAYER_XRFrameBridge_diagnostic.json" -Encoding ascii
+@{file_format_version='1.0.0';api_layer=@{name='XR_APILAYER_TEST_nullfault_probe';library_path=[IO.Path]::GetFullPath((Join-Path $smokeRoot 'nullfault_probe.dll'));api_version='1.0';implementation_version='1';description='Faults on a null instance'}} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$faultRoot/layers/nullfault.json" -Encoding ascii
+foreach($faultCase in @(
+    @{mode='quad';layers='XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_TEST_nullfault_probe;XR_APILAYER_XRFrameBridge_diagnostic'},
+    @{mode='quad';layers='XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic;XR_APILAYER_TEST_nullfault_probe'},
+    @{mode='stereo';layers='XR_APILAYER_XRFrameBridge_diagnostic;XR_APILAYER_TEST_nullfault_probe'})){
+    $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $smokeRoot 'loader_smoke.exe'),$faultCase.mode)
+    $start.UseShellExecute=$false; $start.CreateNoWindow=$true; $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+    $start.Environment['XR_RUNTIME_JSON']="$fixtureRoot/runtime.json"
+    $start.Environment['XR_API_LAYER_PATH']="$faultRoot/layers"
+    $start.Environment['XR_ENABLE_API_LAYERS']=$faultCase.layers
+    foreach($name in 'XRFG_DISABLE_OFXR_BRIDGE','DISABLE_XR_APILAYER_MBUCCHIA_quad_views_foveated','DCSVR_QUAD_FOCUS'){ $start.Environment[$name]='1' }
+    $start.Environment['LOCALAPPDATA']="$fixtureRoot/appdata"; $start.Environment['APPDATA']="$fixtureRoot/appdata"
+    $process=[Diagnostics.Process]::Start($start)
+    $stdoutTask=$process.StandardOutput.ReadToEndAsync(); $stderrTask=$process.StandardError.ReadToEndAsync()
+    if(-not $process.WaitForExit(30000)){$process.Kill();throw 'Null-instance fault smoke timed out.'}
+    Write-Output ("null-instance fault ($($faultCase.layers)): " + $stdoutTask.GetAwaiter().GetResult().Trim().Split("`n")[-1]); [void]$stderrTask.GetAwaiter().GetResult()
+    $code=$process.ExitCode; $process.Dispose(); if($code -ne 0){throw "Layer chain with a null-instance fault failed ($code): $($faultCase.layers)"}
+}
 & (Join-Path $smokeRoot 'quad_focus_policy.exe')
 if($LASTEXITCODE -ne 0){throw 'Quad focus policy tests failed.'}
 

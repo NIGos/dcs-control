@@ -22,6 +22,10 @@ void record() {
 
 XrResult XRAPI_CALL probe_gipa(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
     if (std::strcmp(name, "xrGetInstanceProcAddr") == 0) { *function = reinterpret_cast<PFN_xrVoidFunction>(probe_gipa); return XR_SUCCESS; }
+#ifdef PROBE_FAULT_NULL
+    // As Ultraleap's hand tracking layer (GitHub #35): a null instance is dereferenced.
+    if (instance == XR_NULL_HANDLE) { volatile int* nothing = nullptr; *nothing = 1; }
+#endif
     return next_gipa ? next_gipa(instance, name, function) : XR_ERROR_HANDLE_INVALID;
 }
 

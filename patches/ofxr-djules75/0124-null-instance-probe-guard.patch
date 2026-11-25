@@ -1,0 +1,349 @@
+GitHub #35 (DCS Control, 2026-11-25): DCS no longer crashes at start when a layer below this one faults on a
+null-instance xrGetInstanceProcAddr.
+- In xrCreateApiLayerInstance the layer reads the extension list it may add to (the D3D11 bridge's XR_KHR_D3D12_enable,
+  XR_KHR_visibility_mask) before the next layer has an instance. It asked the next layer's xrGetInstanceProcAddr with
+  XR_NULL_HANDLE; Ultraleap's hand tracking layer dereferences that handle, and with Quad Views, frame generation and
+  Ultraleap installed DCS Control loaded Ultraleap below OFXR (since the GitHub #20 fix), so DCS crashed at start.
+  DCS Control now loads it above OFXR; this patch hardens the layer for any such layer below it.
+- instance_extensions_before_create: the loader answers first (resolve_global_function, as for a layer above). An
+  application that links the loader statically (DCS: Visualizer.dll exports no loader) or a loader that refuses the
+  call while it creates the instance (its global mutex: std::mutex throws on the same thread) leaves the next layer to
+  ask, as before, but through guarded_null_instance_lookup / guarded_enumerate_instance_extensions: an access violation
+  there is caught and read as "no list", and the instance is created as the application asked. The list is read once
+  for both checks.
+- tests/layer_call_chain.cpp: null-next-fault (a next layer that faults on XR_NULL_HANDLE, the test's fake loader
+  answering: the next layer is never asked, the visibility mask is added) and null-next-fault-noloader (no loader, as in
+  DCS: the fault is caught, nothing is added, the instance is created and destroyed). The 0.7.0 layer crashes (access
+  violation) on the second.
+
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 1b8ab95..ac43579 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -6161,6 +6161,88 @@ XrResult resolve_global_function(const char* name, PFN_xrVoidFunction* function)
+     return XR_SUCCESS;
+ }
+ 
++// DCS Control (0124): the extension list this layer reads in its own
++// xrCreateApiLayerInstance (the D3D11 bridge's D3D12, the visibility mask),
++// before the next layer has an instance. The next layer's
++// xrGetInstanceProcAddr may not answer XR_NULL_HANDLE: Ultraleap's hand
++// tracking dereferences it and crashed DCS at start below this layer
++// (GitHub #35). The loader answers first, as for a layer above
++// (resolve_global_function). An application that links the loader
++// statically (DCS) exports no loader, and the next layer is asked as before,
++// but a fault in that call or in its enumeration is caught and read as "no
++// list": the instance is then created as the application asked.
++XrResult guarded_null_instance_lookup(
++    PFN_xrGetInstanceProcAddr next,
++    const char* name,
++    PFN_xrVoidFunction* function) noexcept {
++    __try {
++        return next(XR_NULL_HANDLE, name, function);
++    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
++                    ? EXCEPTION_EXECUTE_HANDLER
++                    : EXCEPTION_CONTINUE_SEARCH) {
++        *function = nullptr;
++        return XR_ERROR_FUNCTION_UNSUPPORTED;
++    }
++}
++
++XrResult guarded_enumerate_instance_extensions(
++    PFN_xrEnumerateInstanceExtensionProperties enumerate,
++    std::uint32_t capacity,
++    std::uint32_t* count,
++    XrExtensionProperties* properties) noexcept {
++    __try {
++        return enumerate(nullptr, capacity, count, properties);
++    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
++                    ? EXCEPTION_EXECUTE_HANDLER
++                    : EXCEPTION_CONTINUE_SEARCH) {
++        return XR_ERROR_RUNTIME_FAILURE;
++    }
++}
++
++[[nodiscard]] bool list_extensions_from(
++    PFN_xrEnumerateInstanceExtensionProperties enumerate,
++    std::vector<XrExtensionProperties>& properties) {
++    properties.clear();
++    std::uint32_t count = 0;
++    if (enumerate == nullptr ||
++        XR_FAILED(guarded_enumerate_instance_extensions(enumerate, 0, &count, nullptr)) ||
++        count == 0) {
++        return false;
++    }
++    properties.assign(count, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
++    if (XR_FAILED(guarded_enumerate_instance_extensions(
++            enumerate, count, &count, properties.data()))) {
++        properties.clear();
++        return false;
++    }
++    properties.resize(std::min<std::size_t>(count, properties.size()));
++    return true;
++}
++
++[[nodiscard]] bool instance_extensions_before_create(
++    PFN_xrGetInstanceProcAddr next,
++    std::vector<XrExtensionProperties>& properties) {
++    PFN_xrVoidFunction function = nullptr;
++    if (XR_SUCCEEDED(resolve_global_function("xrEnumerateInstanceExtensionProperties", &function)) &&
++        list_extensions_from(
++            reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(function), properties)) {
++        return true;
++    }
++    function = nullptr;
++    return XR_SUCCEEDED(guarded_null_instance_lookup(
++               next, "xrEnumerateInstanceExtensionProperties", &function)) &&
++        list_extensions_from(
++            reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(function), properties);
++}
++
++[[nodiscard]] bool lists_extension(
++    const std::vector<XrExtensionProperties>& properties,
++    std::string_view name) noexcept {
++    return std::any_of(properties.begin(), properties.end(), [name](const auto& property) {
++        return std::string_view(property.extensionName) == name;
++    });
++}
++
+ XrResult layer_get_instance_proc_addr_impl(
+     XrInstance instance,
+     const char* name,
+@@ -6356,28 +6438,21 @@ XrResult layer_create_api_layer_instance_impl(
+         // on the binding it sees.
+         bridge_requested_by_ini =
+             xrfg::implicit_layer::read_d3d11_bridge(current_layer_directory());
++        // DCS Control (0124): read once, from the loader or a guarded call
++        // to the next layer (instance_extensions_before_create).
++        std::vector<XrExtensionProperties> offered_extensions;
++        bool offered_read = false;
++        bool offered_listed = false;
++        const auto offered = [&](std::string_view name) {
++            if (!offered_read) {
++                offered_read = true;
++                offered_listed =
++                    instance_extensions_before_create(next_get_instance_proc_addr, offered_extensions);
++            }
++            return offered_listed && lists_extension(offered_extensions, name);
++        };
+         if (asked_d3d11 && !asked_d3d12 && bridge_requested_by_ini) {
+-            PFN_xrEnumerateInstanceExtensionProperties enumerate_extensions = nullptr;
+-            bool runtime_has_d3d12 = false;
+-            if (XR_SUCCEEDED(next_get_instance_proc_addr(
+-                    XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
+-                    reinterpret_cast<PFN_xrVoidFunction*>(&enumerate_extensions))) &&
+-                enumerate_extensions != nullptr) {
+-                std::uint32_t count = 0;
+-                if (XR_SUCCEEDED(enumerate_extensions(nullptr, 0, &count, nullptr)) && count > 0) {
+-                    std::vector<XrExtensionProperties> properties(
+-                        count, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+-                    if (XR_SUCCEEDED(enumerate_extensions(
+-                            nullptr, count, &count, properties.data()))) {
+-                        for (std::uint32_t index = 0; index < count; ++index) {
+-                            if (std::string_view(properties[index].extensionName) ==
+-                                "XR_KHR_D3D12_enable") {
+-                                runtime_has_d3d12 = true;
+-                            }
+-                        }
+-                    }
+-                }
+-            }
++            const bool runtime_has_d3d12 = offered("XR_KHR_D3D12_enable");
+             if (runtime_has_d3d12) {
+                 bridged_extensions.assign(
+                     create_info->enabledExtensionNames,
+@@ -6395,26 +6470,7 @@ XrResult layer_create_api_layer_instance_impl(
+         // generated frames' final draw, when it lists the extension and the
+         // ini leaves it on (`[ofxr] visibility_mask`).
+         if (!asked_visibility_mask && visibility_mask_enabled) {
+-            PFN_xrEnumerateInstanceExtensionProperties enumerate_extensions = nullptr;
+-            bool runtime_has_mask = false;
+-            if (XR_SUCCEEDED(next_get_instance_proc_addr(
+-                    XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
+-                    reinterpret_cast<PFN_xrVoidFunction*>(&enumerate_extensions))) &&
+-                enumerate_extensions != nullptr) {
+-                std::uint32_t count = 0;
+-                if (XR_SUCCEEDED(enumerate_extensions(nullptr, 0, &count, nullptr)) && count > 0) {
+-                    std::vector<XrExtensionProperties> properties(
+-                        count, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+-                    if (XR_SUCCEEDED(enumerate_extensions(
+-                            nullptr, count, &count, properties.data()))) {
+-                        for (std::uint32_t index = 0; index < count; ++index) {
+-                            runtime_has_mask = runtime_has_mask ||
+-                                std::string_view(properties[index].extensionName) ==
+-                                    "XR_KHR_visibility_mask";
+-                        }
+-                    }
+-                }
+-            }
++            const bool runtime_has_mask = offered("XR_KHR_visibility_mask");
+             if (runtime_has_mask) {
+                 if (forwarded_create_info == create_info) {
+                     bridged_extensions.assign(
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index fdf3dcc..82cf958 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -2316,10 +2316,18 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
+ // xrEnumerateApiLayerProperties without negotiating as a layer or a
+ // runtime, and takes the global functions from it when a layer above asks
+ // for them with XR_NULL_HANDLE before any instance exists.
++// DCS Control (0124): null-next-fault-noloader hides it, as an application
++// that links the loader statically (DCS) does.
++bool g_fake_loader_hidden = false;
++
+ extern "C" XRAPI_ATTR XrResult XRAPI_CALL fake_loader_get_instance_proc_addr(
+     XrInstance instance,
+     const char* name,
+     PFN_xrVoidFunction* function) {
++    if (g_fake_loader_hidden) {
++        *function = nullptr;
++        return XR_ERROR_FUNCTION_UNSUPPORTED;
++    }
+     return fake_get_instance_proc_addr(instance, name, function);
+ }
+ 
+@@ -3577,9 +3585,123 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+ 
+ int call_chain_main(int argc, char** argv);
+ 
++// DCS Control (0124): the layer below OFXR faults when its
++// xrGetInstanceProcAddr is called with XR_NULL_HANDLE (Ultraleap's hand
++// tracking did, and DCS crashed at start: GitHub #35). OFXR must still
++// create the instance: with a loader to ask (null-next-fault) the next
++// layer is never asked; without one (null-next-fault-noloader, as in DCS)
++// the fault is caught and the instance is created as the application asked.
++std::atomic<int> g_null_next_calls{0};
++bool g_null_next_mask_requested = false;
++
++XRAPI_ATTR XrResult XRAPI_CALL faulting_next_get_instance_proc_addr(
++    XrInstance instance,
++    const char* name,
++    PFN_xrVoidFunction* function) {
++    if (instance == XR_NULL_HANDLE) {
++        g_null_next_calls.fetch_add(1);
++        volatile int* const nothing = nullptr;
++        *nothing = 1;
++    }
++    return fake_get_instance_proc_addr(instance, name, function);
++}
++
++XRAPI_ATTR XrResult XRAPI_CALL recording_create_api_layer_instance(
++    const XrInstanceCreateInfo* create_info,
++    const XrApiLayerCreateInfo*,
++    XrInstance* instance) {
++    for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index) {
++        g_null_next_mask_requested = g_null_next_mask_requested ||
++            std::strcmp(create_info->enabledExtensionNames[index], "XR_KHR_visibility_mask") == 0;
++    }
++    *instance = g_instance;
++    return XR_SUCCESS;
++}
++
++int null_next_fault_main(const char* layer_path, bool loader_available) {
++    g_fake_loader_hidden = !loader_available;
++    const HMODULE module = LoadLibraryA(layer_path);
++    if (module == nullptr) {
++        std::cerr << "LoadLibrary failed: " << GetLastError() << '\n';
++        return EXIT_FAILURE;
++    }
++    const auto negotiate = reinterpret_cast<PFN_xrNegotiateLoaderApiLayerInterface>(
++        GetProcAddress(module, "xrNegotiateLoaderApiLayerInterface"));
++    if (negotiate == nullptr) {
++        return EXIT_FAILURE;
++    }
++    XrNegotiateLoaderInfo loader_info{};
++    loader_info.structType = XR_LOADER_INTERFACE_STRUCT_LOADER_INFO;
++    loader_info.structVersion = XR_LOADER_INFO_STRUCT_VERSION;
++    loader_info.structSize = sizeof(loader_info);
++    loader_info.minInterfaceVersion = 1;
++    loader_info.maxInterfaceVersion = XR_CURRENT_LOADER_API_LAYER_VERSION;
++    loader_info.minApiVersion = XR_MAKE_VERSION(1, 0, 0);
++    loader_info.maxApiVersion = XR_CURRENT_API_VERSION;
++    XrNegotiateApiLayerRequest request{};
++    request.structType = XR_LOADER_INTERFACE_STRUCT_API_LAYER_REQUEST;
++    request.structVersion = XR_API_LAYER_INFO_STRUCT_VERSION;
++    request.structSize = sizeof(request);
++    if (XR_FAILED(negotiate(&loader_info, kLayerName, &request))) {
++        return EXIT_FAILURE;
++    }
++    XrApiLayerNextInfo next_info{};
++    next_info.structType = XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
++    next_info.structVersion = XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
++    next_info.structSize = sizeof(next_info);
++    strcpy_s(next_info.layerName, kLayerName);
++    next_info.nextGetInstanceProcAddr = faulting_next_get_instance_proc_addr;
++    next_info.nextCreateApiLayerInstance = recording_create_api_layer_instance;
++    XrApiLayerCreateInfo layer_info{};
++    layer_info.structType = XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO;
++    layer_info.structVersion = XR_API_LAYER_CREATE_INFO_STRUCT_VERSION;
++    layer_info.structSize = sizeof(layer_info);
++    layer_info.nextInfo = &next_info;
++    XrInstanceCreateInfo instance_info{XR_TYPE_INSTANCE_CREATE_INFO};
++    strcpy_s(instance_info.applicationInfo.applicationName, "XRFG null next fault test");
++    strcpy_s(instance_info.applicationInfo.engineName, "XRFG tests");
++    instance_info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
++    const char* const extensions[] = {"XR_KHR_D3D11_enable"};
++    instance_info.enabledExtensionNames = extensions;
++    instance_info.enabledExtensionCount = 1;
++
++    XrInstance instance = XR_NULL_HANDLE;
++    if (XR_FAILED(request.createApiLayerInstance(&instance_info, &layer_info, &instance)) ||
++        instance != g_instance) {
++        std::cerr << "instance not created over a layer that faults on XR_NULL_HANDLE\n";
++        return EXIT_FAILURE;
++    }
++    const int null_calls = g_null_next_calls.load();
++    if (loader_available && (null_calls != 0 || !g_null_next_mask_requested)) {
++        std::cerr << "with a loader the list comes from it (next asked " << null_calls
++                  << " times, mask " << g_null_next_mask_requested << ")\n";
++        return EXIT_FAILURE;
++    }
++    if (!loader_available && (null_calls == 0 || g_null_next_mask_requested)) {
++        std::cerr << "without a loader the faulting next layer is asked, guarded, and "
++                     "nothing is added (asked " << null_calls << " times, mask "
++                  << g_null_next_mask_requested << ")\n";
++        return EXIT_FAILURE;
++    }
++    PFN_xrVoidFunction destroy = nullptr;
++    if (XR_FAILED(request.getInstanceProcAddr(instance, "xrDestroyInstance", &destroy)) ||
++        destroy == nullptr ||
++        XR_FAILED(reinterpret_cast<PFN_xrDestroyInstance>(destroy)(instance))) {
++        std::cerr << "instance not destroyed\n";
++        return EXIT_FAILURE;
++    }
++    std::cout << "PASS null-instance probe " << (loader_available ? "from the loader" : "guarded")
++              << ", next asked " << null_calls << " time(s)\n";
++    return EXIT_SUCCESS;
++}
++
+ // Two layers ("two:<scenario>"): the scenario as it is, then the fake
+ // runtime's counts of what reached it.
+ int main(int argc, char** argv) {
++    if (argc == 4 && (std::strcmp(argv[3], "null-next-fault") == 0 ||
++                      std::strcmp(argv[3], "null-next-fault-noloader") == 0)) {
++        return null_next_fault_main(argv[1], std::strcmp(argv[3], "null-next-fault") == 0);
++    }
+     if (argc == 4 && std::strncmp(argv[3], "two:", 4) == 0) {
+         g_two_layer_mode = true;
+         argv[3] += 4;
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9b14458..d325ee9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -971,6 +971,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
+         endforeach()
++        # DCS Control (0124): a layer below that faults on a null-instance
++        # xrGetInstanceProcAddr (Ultraleap, GitHub #35); with and without a
++        # loader to ask first.
++        foreach(mode null-next-fault null-next-fault-noloader)
++            add_test(NAME xrfg_layer_${mode} COMMAND xrfg_layer_call_chain
++                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
++                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
++            set_tests_properties(xrfg_layer_${mode} PROPERTIES TIMEOUT 30)
++        endforeach()
+         add_dependencies(xrfg_layer_call_chain XR_APILAYER_XRFrameBridge_diagnostic)
+         add_executable(xrfg_layer_manual_disarm_tests tests/layer_manual_disarm_tests.cpp)
+         target_include_directories(xrfg_layer_manual_disarm_tests PRIVATE

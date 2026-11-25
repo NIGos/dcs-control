@@ -6,6 +6,8 @@
 
 **Multi-threading without driver support is now on by default** for AMD Radeon and other cards without D3D11 command lists: about 7 % more FPS on a Radeon RX 7900 XTX (GitHub #27). Earlier profiles get it turned on once. On NVIDIA cards, which have their own command lists, nothing changes; where DCS gets none there (MFAA on, the integrated GPU, a hooking program), the recorders run on emulated lists and the Engine Optimizations page says what gives the full gain.
 
+DCS no longer crashes at start with Quad Views, frame generation and Ultraleap hand tracking installed (#35).
+
 # 0.7.0 preview
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.

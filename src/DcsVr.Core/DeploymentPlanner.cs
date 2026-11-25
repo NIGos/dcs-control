@@ -321,7 +321,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // Ultraleap's hand tracking is a registered (implicit) layer, and the loader puts every registered layer above the
         // ones enabled here: above Quad Views, DCS asks for quad views and gets only the stereo configuration (GitHub
         // #20). It works below Quad Views, as with a registered Quad Views install, so for this DCS it is turned off as a
-        // registered layer and loaded again below everything else, closest to the runtime. Other games keep it as it is.
+        // registered layer and loaded again directly below Quad Views. Not last: OFXR (frame generation) asks the layer
+        // below it for a global function before that layer has an instance, and Ultraleap crashes on that (GitHub #35),
+        // so it stays above OFXR and every layer the bundle adds below Quad Views. Other games keep it as it is.
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && HandTrackingLayer.Find(inventory) is { } hands)
         {
             var handsText = File.ReadAllText(hands.ManifestPath);
@@ -337,7 +339,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 }
                 dependencies[Path.GetFullPath(hands.ManifestPath)] = Hashing.FileSha256(hands.ManifestPath);
                 environment[handsOff] = "1";
-                layerNames.Add(hands.Name!);
+                layerNames.Insert(layerNames.IndexOf("XR_APILAYER_MBUCCHIA_quad_views_foveated") + 1, hands.Name!);
             }
         }
         // Pupil shift sits first, next to DCS: it changes only what DCS renders and puts the runtime's own poses and
