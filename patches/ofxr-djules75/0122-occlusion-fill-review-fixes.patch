@@ -55,7 +55,7 @@ diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
 diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
 --- a/include/xrfg/d3d12_frame_synthesizer.hpp
 +++ b/include/xrfg/d3d12_frame_synthesizer.hpp
-@@ -370,7 +370,13 @@ struct D3D12NvidiaOpticalFlowOptions {
+@@ -374,7 +374,13 @@ struct D3D12NvidiaOpticalFlowOptions {
      // frame alone along the farther surface's vector, instead of the flow's
      // blend of both (frame_synthesis.hlsl, dcs_motion_occlusion_fill).
      // Without it the composition is exactly as before.
@@ -69,42 +69,43 @@ diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame
 +    std::uint32_t dcs_motion_occlusion_fill{};
  };
  
- // Foveated layers: the Waits a command queue already has queued, by fence.
+ // DCS Control (0104): the bits of D3D12NvidiaOpticalFlowOptions::fg_quality.
 diff --git a/include/xrfg/embedded_control.hpp b/include/xrfg/embedded_control.hpp
 --- a/include/xrfg/embedded_control.hpp
 +++ b/include/xrfg/embedded_control.hpp
-@@ -25,6 +25,9 @@ struct Snapshot {
-     // value it read at its start. Not in Settings: the provider ABI's
-     // requests carry no such field, and one must not reset it.
-     std::int32_t occlusion_aware{-1};
+@@ -28,6 +28,9 @@ struct Snapshot {
+     // DCS Control (0104): the [ofxr] quality keys' bits (implicit_layer::kFgQualityKeys)
+     // as last taken in live; -1 while nothing has been (each session keeps its own).
+     std::int64_t fg_quality{-1};
 +    // DCS Control (0122): [ofxr] dcs_motion_occlusion_fill as last taken in
 +    // live (0-2); -1 while nothing has been (each session keeps its own).
 +    std::int32_t occlusion_fill{-1};
  };
  Snapshot snapshot();
  bool request(Settings settings); // persists only owned keys; false means INI write failed
-@@ -47,6 +50,7 @@ struct LiveFlow {
-     int scale{2}; // as Settings::scale
+@@ -51,6 +54,7 @@ struct LiveFlow {
      bool backward{};
      std::uint32_t occlusion_aware{}; // 0 or 1
+     std::uint32_t fg_quality{}; // DCS Control (0104): implicit_layer::kFgQualityKeys' bits
 +    std::uint32_t occlusion_fill{}; // DCS Control (0122): dcs_motion_occlusion_fill, 0-2
      bool operator==(const LiveFlow&) const = default;
  };
  // Bits of LiveAdoption::keys (and of the live_settings record's c).
-@@ -54,6 +58,7 @@ inline constexpr std::uint32_t kLivePreset = 1U;
- inline constexpr std::uint32_t kLiveScale = 2U;
+@@ -59,6 +63,7 @@ inline constexpr std::uint32_t kLiveScale = 2U;
  inline constexpr std::uint32_t kLiveBidirectional = 4U;
  inline constexpr std::uint32_t kLiveOcclusion = 8U;
+ inline constexpr std::uint32_t kLiveFgQuality = 16U; // DCS Control (0104)
 +inline constexpr std::uint32_t kLiveOcclusionFill = 32U; // DCS Control (0122) (16: 0104's quality keys)
  struct LiveAdoption {
      std::uint32_t keys{}; // what differed; 0: nothing taken in
      LiveFlow before{}, after{};
-@@ -64,7 +69,7 @@ struct LiveAdoption {
+@@ -69,7 +74,8 @@ struct LiveAdoption {
  LiveAdoption adopt_live(const LiveFlow& flow, bool first = false);
  // The live_settings record's a and b: preset (Settings::preset) in bits 0-7,
  // the input scale in percent (100, 75, 50) in bits 8-15, bidirectional in bit
--// 16, occlusion_aware in bits 24-31.
-+// 16, occlusion_aware in bits 24-31; DCS Control (0122): dcs_motion_occlusion_fill in bits 40-41.
+-// 16, occlusion_aware in bits 24-31; DCS Control (0104): the quality keys' bits in 32-39.
++// 16, occlusion_aware in bits 24-31; DCS Control (0104): the quality keys' bits in 32-39; DCS Control (0122):
++// dcs_motion_occlusion_fill in bits 40-41.
  [[nodiscard]] std::uint64_t live_flow_code(const LiveFlow& flow) noexcept;
  
  // DCS Control (0095): `[ofxr] diag_vram` as the live watcher last read it (0
@@ -122,10 +123,10 @@ diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
      const std::filesystem::path& module_directory) noexcept;
  // DCS Control (0049). `[ofxr] hud_symbology`: with cockpit_mask, also read the
  // HUD / helmet symbology the engine module shares beside the mask
-@@ -486,6 +488,7 @@ struct OfxrSectionValues {
-     bool found{};
+@@ -504,6 +506,7 @@ struct OfxrSectionValues {
      ConfiguredNvidiaOptions nvidia{};
      std::uint32_t occlusion_aware{};
+     std::uint32_t fg_quality{}; // DCS Control (0104): kFgQualityKeys' bits
 +    std::uint32_t occlusion_fill{}; // DCS Control (0122): dcs_motion_occlusion_fill, 0-2
      std::array<std::wstring, kOfxrStartOnlyKeys.size()> start_only{};
  };
@@ -150,23 +151,23 @@ diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
 diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
 --- a/src/common/embedded_control.cpp
 +++ b/src/common/embedded_control.cpp
-@@ -31,6 +31,7 @@ struct Control {
-     Settings settings;
+@@ -32,6 +32,7 @@ struct Control {
      std::uint64_t revision{1}, next_id{1};
      std::int32_t occlusion_aware{-1}; // DCS Control (0066): Snapshot::occlusion_aware
+     std::int64_t fg_quality{-1}; // DCS Control (0104): Snapshot::fg_quality
 +    std::int32_t occlusion_fill{-1}; // DCS Control (0122): Snapshot::occlusion_fill
      std::map<std::uint64_t, Receipt> sessions;
      Control() {
          const auto options = implicit_layer::read_nvidia_options(directory());
-@@ -54,6 +55,7 @@ Snapshot snapshot() {
-     auto& c = control(); std::scoped_lock lock(c.mutex);
+@@ -56,6 +57,7 @@ Snapshot snapshot() {
      Snapshot s; s.desired = c.settings; s.revision = c.revision;
      s.occlusion_aware = c.occlusion_aware; // DCS Control (0066)
+     s.fg_quality = c.fg_quality; // DCS Control (0104)
 +    s.occlusion_fill = c.occlusion_fill; // DCS Control (0122)
      s.sessions = static_cast<unsigned>(c.sessions.size());
      for (auto& [id, r] : c.sessions) {
          if (r.revision != c.revision) ++s.pending;
-@@ -102,18 +104,24 @@ bool set_overlay_setting(int position) { return position >= 0 && position < 5 &&
+@@ -104,7 +106,8 @@ bool set_overlay_setting(int position) { return position >= 0 && position < 5 &&
  // DCS Control (0066).
  LiveAdoption adopt_live(const LiveFlow& flow, bool first) {
      LiveAdoption result;
@@ -176,9 +177,12 @@ diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
          return result;
      auto& c = control(); std::scoped_lock lock(c.mutex);
      result.before = {c.settings.preset, c.settings.scale, c.settings.backward,
-         c.occlusion_aware >= 0 || !first ? static_cast<std::uint32_t>(std::max(c.occlusion_aware, 0))
--                                         : flow.occlusion_aware};
-+                                         : flow.occlusion_aware,
+@@ -112,15 +115,20 @@ LiveAdoption adopt_live(const LiveFlow& flow, bool first) {
+                                          : flow.occlusion_aware,
+         // DCS Control (0104): as occlusion_aware.
+         c.fg_quality >= 0 || !first ? static_cast<std::uint32_t>(std::max<std::int64_t>(c.fg_quality, 0))
+-                                    : flow.fg_quality};
++                                    : flow.fg_quality,
 +        // DCS Control (0122): as occlusion_aware.
 +        c.occlusion_fill >= 0 || !first ? static_cast<std::uint32_t>(std::max(c.occlusion_fill, 0))
 +                                        : flow.occlusion_fill};
@@ -187,33 +191,35 @@ diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
      if (result.before.scale != flow.scale) result.keys |= kLiveScale;
      if (result.before.backward != flow.backward) result.keys |= kLiveBidirectional;
      if (result.before.occlusion_aware != flow.occlusion_aware) result.keys |= kLiveOcclusion;
+     if (result.before.fg_quality != flow.fg_quality) result.keys |= kLiveFgQuality; // DCS Control (0104)
 +    if (result.before.occlusion_fill != flow.occlusion_fill) result.keys |= kLiveOcclusionFill; // DCS Control (0122)
      c.occlusion_aware = static_cast<std::int32_t>(flow.occlusion_aware);
+     c.fg_quality = static_cast<std::int64_t>(flow.fg_quality);
 +    c.occlusion_fill = static_cast<std::int32_t>(flow.occlusion_fill);
      if (result.keys != 0) {
          c.settings.preset = flow.preset;
          c.settings.scale = flow.scale;
-@@ -129,13 +137,14 @@ std::uint64_t live_flow_code(const LiveFlow& flow) noexcept {
-     return static_cast<std::uint64_t>(flow.preset & 0xFF) |
+@@ -137,13 +145,14 @@ std::uint64_t live_flow_code(const LiveFlow& flow) noexcept {
          (flow.scale >= 0 && flow.scale <= 2 ? percent[flow.scale] << 8 : 0ULL) |
          (flow.backward ? 1ULL << 16 : 0ULL) |
--        (static_cast<std::uint64_t>(flow.occlusion_aware & 0xFFU) << 24);
-+        (static_cast<std::uint64_t>(flow.occlusion_aware & 0xFFU) << 24) |
+         (static_cast<std::uint64_t>(flow.occlusion_aware & 0xFFU) << 24) |
+-        (static_cast<std::uint64_t>(flow.fg_quality & 0xFFU) << 32); // DCS Control (0104)
++        (static_cast<std::uint64_t>(flow.fg_quality & 0xFFU) << 32) | // DCS Control (0104)
 +        (static_cast<std::uint64_t>(flow.occlusion_fill & 3U) << 40); // DCS Control (0122)
  }
  
  namespace {
  LiveFlow live_flow_of(const implicit_layer::OfxrSectionValues& values) noexcept {
      return {static_cast<int>(values.nvidia.preset), static_cast<int>(values.nvidia.input_scale),
--        values.nvidia.bidirectional, values.occlusion_aware};
-+        values.nvidia.bidirectional, values.occlusion_aware, values.occlusion_fill};
+-        values.nvidia.bidirectional, values.occlusion_aware, values.fg_quality};
++        values.nvidia.bidirectional, values.occlusion_aware, values.fg_quality, values.occlusion_fill};
  }
  // DCS Control (0095): diag_vram's place in kOfxrStartOnlyKeys (its bit stays
  // in the list, so the live_settings record's bits keep their meaning; it is
 diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
 --- a/src/common/implicit_layer.cpp
 +++ b/src/common/implicit_layer.cpp
-@@ -381,8 +381,18 @@ bool read_dcs_motion(const std::filesystem::path& module_directory) noexcept {
+@@ -398,8 +398,18 @@ bool read_dcs_motion(const std::filesystem::path& module_directory) noexcept {
  }
  
  // DCS Control (0121).
@@ -234,10 +240,10 @@ diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
  }
  
  // DCS Control (0049).
-@@ -768,6 +778,8 @@ OfxrSectionValues parse_ofxr_section(std::wstring_view section) {
-     values.nvidia.bidirectional = profile_int(find(L"nvidia_bidirectional"), 0) != 0;
-     const UINT occlusion = profile_int(find(L"nvidia_occlusion_aware"), 0);
-     values.occlusion_aware = occlusion <= 1U ? occlusion : 0U; // as read_nvidia_occlusion_aware
+@@ -788,6 +798,8 @@ OfxrSectionValues parse_ofxr_section(std::wstring_view section) {
+     for (const auto& key : kFgQualityKeys) { // DCS Control (0104), as read_fg_quality
+         if (profile_int(find(key.name), 0) != 0) values.fg_quality |= key.bit;
+     }
 +    const UINT fill = profile_int(find(L"dcs_motion_occlusion_fill"), 0); // DCS Control (0122)
 +    values.occlusion_fill = fill <= 2U ? fill : 2U; // as read_dcs_motion_occlusion_fill
      for (std::size_t i = 0; i < kOfxrStartOnlyKeys.size(); ++i) {
@@ -246,7 +252,7 @@ diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
-@@ -537,6 +537,10 @@ constexpr UINT kDcsMotionCellShift = 4U;
+@@ -538,6 +538,10 @@ constexpr UINT kDcsMotionCellShift = 4U;
  constexpr UINT kDcsMotionOutputBit = 256U;
  // DCS Control (0121): [ofxr] dcs_motion_occlusion_fill (frame_synthesis.hlsl).
  constexpr UINT kDcsMotionFillBit = 4096U;
@@ -257,7 +263,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
  // The resampled motion (xy residual, z class, w surface), the scatter (a key
  // per cell and output), and the composition's counters: 16 buckets of two
  // uints (pixels along an MV, pixels back to the flow), one pixel in 256,
-@@ -544,7 +548,11 @@ constexpr UINT kDcsMotionFillBit = 4096U;
+@@ -545,7 +549,11 @@ constexpr UINT kDcsMotionFillBit = 4096U;
  constexpr DXGI_FORMAT kDcsMotionTargetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
  constexpr DXGI_FORMAT kDcsMotionScatterFormat = DXGI_FORMAT_R32_UINT;
  constexpr UINT kDcsMotionCounterBuckets = 16;
@@ -268,9 +274,9 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
 +constexpr UINT kDcsMotionCounterBytes = kDcsMotionFillCounterOffset + kDcsMotionCounterBuckets * 4U;
 +static_assert(kDcsMotionFillCounterOffset == 128U, "frame_synthesis.hlsl writes the fill count at byte 128");
  constexpr UINT kDcsMotionSampledPixels = 256;
- // The sky's MVs (the camera's motion at infinity, R70 T2) instead of its flow
- // (the fixtures: a little closer to the true middle frame, and no worse).
-@@ -1842,6 +1850,7 @@ struct D3D12FrameSynthesizer::Impl {
+ // DCS Control (0104): the quality options' shader bits (frame_synthesis.hlsl,
+ // kQuality*), in UseGameMotion bits 16-20 of the NVIDIA compositions
+@@ -1861,6 +1869,7 @@ struct D3D12FrameSynthesizer::Impl {
      std::uint64_t dcs_motion_next_order{1};
      std::uint64_t dcs_motion_harvested_order{};
      std::array<std::uint32_t, 2> dcs_motion_harvested{};
@@ -278,7 +284,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
      [[nodiscard]] bool dcs_motion_enabled() const noexcept {
          return nvidia_options.dcs_motion && nvidia_options.cockpit_mask &&
              backend == D3D12OpticalFlowBackend::nvidia;
-@@ -2548,8 +2557,10 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2587,8 +2596,10 @@ struct D3D12FrameSynthesizer::Impl {
              }
          }
          // DCS Control (0121): the previous frame's class pass (without it no
@@ -291,7 +297,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
              compute_description.CS = {g_xrfg_dcs_motion_previous_shader, sizeof(g_xrfg_dcs_motion_previous_shader)};
              if (FAILED(device->CreateComputePipelineState(
                      &compute_description, IID_PPV_ARGS(dcs_motion_previous_pipeline.GetAddressOf())))) {
-@@ -5267,7 +5278,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5306,7 +5317,7 @@ struct D3D12FrameSynthesizer::Impl {
          apply_test_dcs_motion_cell(); // DCS Control (0120)
          // DCS Control (0121): the occlusion fill rides in every MV pair's bits.
          dcs_motion_feature_bits =
@@ -300,7 +306,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
          // Tests only: the sky's MVs on (1) or off (0), and the MVs without
          // any check (XRFG_TEST_DCS_MOTION_ONLY), to measure what each gives.
          std::array<char, 4> sky{};
-@@ -5568,8 +5579,15 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5607,8 +5618,15 @@ struct D3D12FrameSynthesizer::Impl {
          if (SUCCEEDED(dcs_motion_readback->Map(0, &read_range, &mapped)) && mapped != nullptr) {
              std::array<std::uint32_t, kDcsMotionCounterBuckets * 2U> words{};
              std::memcpy(words.data(), static_cast<const std::byte*>(mapped) + begin, sizeof(words));
@@ -316,7 +322,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
              std::array<std::uint32_t, 2> values{};
              for (UINT bucket = 0; bucket < kDcsMotionCounterBuckets; ++bucket) {
                  values[0] += words[bucket * 2U];
-@@ -5589,7 +5607,14 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5628,7 +5646,14 @@ struct D3D12FrameSynthesizer::Impl {
                              std::uint64_t(pixels) * kDcsMotionSampledPixels, std::memory_order_relaxed);
                          slot.motion_sink->motion_fallback_pixels.fetch_add(
                              std::uint64_t(fallbacks) * kDcsMotionSampledPixels, std::memory_order_relaxed);
@@ -331,7 +337,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
                  }
              }
          }
-@@ -5604,6 +5629,12 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5643,6 +5668,12 @@ struct D3D12FrameSynthesizer::Impl {
      // pair's previous frame carries its class atlas; the composition's fill
      // reads it. Nothing without the key, MVs or that atlas (the fill then
      // only knows what the current frame hides).
@@ -344,7 +350,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
      void record_dcs_motion_previous_class(
          ID3D12GraphicsCommandList* list,
          WorkSlot& slot,
-@@ -5613,18 +5644,27 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5652,18 +5683,27 @@ struct D3D12FrameSynthesizer::Impl {
          D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
          if (!pair_motion_bound || dcs_motion_previous_pipeline == nullptr ||
              (dcs_motion_feature_bits & kDcsMotionFillBit) == 0U || previous_frame == nullptr ||
@@ -374,7 +380,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
                  continue;
              }
              const D3D12DcsMotionView& previous_view = previous_frame->motion_views[eye];
-@@ -5644,9 +5684,16 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5683,9 +5723,16 @@ struct D3D12FrameSynthesizer::Impl {
              parameters.source_rect = {float(previous_view.x), float(previous_view.y), float(previous_view.width),
                  float(previous_view.height)};
              parameters.source_fov = previous_view.fov_tan;
@@ -391,7 +397,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
              return;
          }
          // The block: t1 the previous frame's classes, u0 the resampled
-@@ -5661,6 +5708,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5700,6 +5747,7 @@ struct D3D12FrameSynthesizer::Impl {
              view.Format = DXGI_FORMAT_R8_UNORM;
              ID3D12Resource* resource = nullptr;
              if (index == 0) {
@@ -399,7 +405,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
                  view.Format = DXGI_FORMAT_R16G16_FLOAT;
              } else if (index == 1) {
                  resource = previous_frame->motion_class_texture.Get();
-@@ -10482,8 +10530,9 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -10526,8 +10574,9 @@ struct D3D12FrameSynthesizer::Impl {
          }
          // DCS Control (0121): the fill's pass read the previous frame's class
          // copy: its fence, where the mask did not wait for it.
@@ -411,7 +417,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
              result = wait_once(previous_cockpit_mask->ready_fence.Get(), previous_cockpit_mask->ready_value);
              if (FAILED(result)) {
                  hud_pair = {};
-@@ -10578,6 +10627,11 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -10622,6 +10671,11 @@ struct D3D12FrameSynthesizer::Impl {
          if (hud_previous_wait) {
              previous_cockpit_mask->note_reader(fence.Get(), fence_value);
          }
@@ -520,7 +526,7 @@ diff --git a/src/d3d12/dcs_motion_previous.hlsl b/src/d3d12/dcs_motion_previous.
 diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
 --- a/src/d3d12/frame_synthesis.hlsl
 +++ b/src/d3d12/frame_synthesis.hlsl
-@@ -1348,6 +1348,12 @@ static const float kDcsMotionSnap = 1.0 / 64.0;
+@@ -1550,6 +1550,12 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
  // which one frame alone would carry to another place), and only where the
  // MVs' own composition did not hold (weight below 1). (Leaving out pixels the
  // scatter brings a nearer edge to, tried, kept a third of the gain away.)
@@ -533,7 +539,7 @@ diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
  static const uint kDcsMotionFillBit = 4096u;
  
  // The class's depth order: 2 a model, 1 another G-buffer surface, 0 the sky;
-@@ -1366,16 +1372,24 @@ float4 dcs_motion_current_cell(float2 at) {
+@@ -1568,16 +1574,24 @@ float4 dcs_motion_current_cell(float2 at) {
  
  // The previous frame's rank at target pixel `at` (3 where unknown).
  uint dcs_motion_previous_rank(float2 at) {
@@ -561,7 +567,7 @@ diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
      float far_distance = 1.0e9;
      [unroll] for (int y = -1; y <= 1; ++y) {
          [unroll] for (int x = -1; x <= 1; ++x) {
-@@ -1389,20 +1403,58 @@ bool dcs_motion_occlusion_fill(float2 pixel, float t, out float4 color) {
+@@ -1591,20 +1605,58 @@ bool dcs_motion_occlusion_fill(float2 pixel, float t, out float4 color) {
              far_distance = farther ? distance : far_distance;
              far_rank = farther ? rank : far_rank;
              near_motion = nearer ? around.xy : near_motion;
@@ -624,7 +630,7 @@ diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
              CameraSample same_previous = sample_previous_target(pixel, Slice, ViewIndex);
              CameraSample same_current = sample_current_target(pixel, Slice, ViewIndex);
              bool still = same_previous.valid >= 0.5 && same_current.valid >= 0.5 &&
-@@ -1507,20 +1559,25 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+@@ -1739,20 +1791,25 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
                  }
              }
          }
@@ -671,8 +677,8 @@ diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
 +                inputs.nvidia_options.dcs_motion_occlusion_fill != wanted_options.dcs_motion_occlusion_fill) {
                  taken = SUCCEEDED(generation->synthesizer->reconfigure(
                      wanted, wanted_options));
-             }
-@@ -6713,8 +6715,9 @@ XrResult layer_create_session_impl(
+             } else if (inputs.nvidia_options.fg_quality != wanted_options.fg_quality) {
+@@ -6718,8 +6720,9 @@ XrResult layer_create_session_impl(
      state->nvidia_options.hud_symbology = state->nvidia_options.cockpit_mask &&
          xrfg::implicit_layer::read_hud_symbology(current_layer_directory());
      // DCS Control (0121): fixed for the session (with dcs_motion).
@@ -684,10 +690,10 @@ diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
      // Foveated layers: fixed for the session.
      state->foveated_layers =
          xrfg::implicit_layer::read_foveated_layers(current_layer_directory());
-@@ -17460,12 +17463,18 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
-         state->nvidia_options.foveated_uncovered_alpha,
-         state->nvidia_options.foveated_uncovered_exact, // round 6: the session's
-         state->nvidia_options.foveated_uncovered_fill, // (round 7: a number)
+@@ -17468,12 +17471,18 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+         // DCS Control (0104): the session's, or the ini's once taken in live.
+         control.fg_quality >= 0 ? static_cast<std::uint32_t>(control.fg_quality)
+                                 : state->nvidia_options.fg_quality,
 -        state->nvidia_options.dcs_motion_occlusion_fill}; // DCS Control (0121): the session's
 +        // DCS Control (0121): the session's; DCS Control (0122): or the ini's
 +        // once taken in live (with dcs_motion only, as at the start).
@@ -702,9 +708,9 @@ diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
 -        options.occlusion_aware != state->nvidia_options.occlusion_aware; // DCS Control (0066)
 +        options.occlusion_aware != state->nvidia_options.occlusion_aware || // DCS Control (0066)
 +        options.dcs_motion_occlusion_fill != state->nvidia_options.dcs_motion_occlusion_fill; // DCS Control (0122)
-     // Enumeration is excluded by frame_call_mutex, so newly created contexts
-     // also see this tuple. A partial failure remains bypass, never mixed flow.
-     state->optical_flow_backend = backend;
+     // DCS Control (0104): the quality keys alone are shader bits, taken by each
+     // synthesizer without a rebuild (D3D12FrameSynthesizer::set_fg_quality).
+     const bool quality_changed = options.fg_quality != state->nvidia_options.fg_quality;
 diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
 --- a/tests/cockpit_mask_tests.cpp
 +++ b/tests/cockpit_mask_tests.cpp
@@ -719,7 +725,7 @@ diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
              what);
          return section;
      };
-@@ -2290,6 +2292,13 @@ void test_live_ini_section() {
+@@ -2296,6 +2298,13 @@ void test_live_ini_section() {
          "live ini: the first repeated key, quotes stripped");
      require(xrfg::implicit_layer::parse_ofxr_section(std::wstring_view(L"; x=1\0", 6)).found == false,
          "live ini: comments alone are no section");

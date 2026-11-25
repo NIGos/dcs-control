@@ -33,7 +33,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
-@@ -5215,6 +5215,25 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5254,6 +5254,25 @@ struct D3D12FrameSynthesizer::Impl {
      // eye image), the scatter (a slice per view and output), the counters
      // (created zeroed) and their readback, one region per work slot. Where
      // they cannot be made no pair binds MVs.
@@ -59,7 +59,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
      [[nodiscard]] HRESULT create_dcs_motion_resources(UINT node_mask) noexcept {
          if (!dcs_motion_enabled()) {
              return S_OK;
-@@ -5226,6 +5245,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -5265,6 +5284,7 @@ struct D3D12FrameSynthesizer::Impl {
              dcs_motion_cell *= 2U;
              ++dcs_motion_cell_code;
          }
@@ -70,7 +70,7 @@ diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synth
 diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
 --- a/tests/d3d12_history_tests.cpp
 +++ b/tests/d3d12_history_tests.cpp
-@@ -4350,6 +4350,7 @@ void test_nvidia_serialized_eye_context_stress(
+@@ -4354,6 +4354,7 @@ void test_nvidia_serialized_eye_context_stress(
  }
  
  #include "nvidia_fast_patterns.inc"
@@ -78,7 +78,7 @@ diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
  
  }  // namespace
  
-@@ -6951,6 +6952,16 @@ int main() {
+@@ -6955,6 +6956,16 @@ int main() {
              std::cout << "D3D12 DCS motion tests passed\n";
              return 0;
          }
