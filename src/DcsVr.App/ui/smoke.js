@@ -29,7 +29,7 @@ window.runWebSmoke = async function() {
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','audioToggleKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
-  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','frameGenSkyOcclusion','nvidiaFlowScale','showOverlay',
+  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','frameGenFineTune','nvidiaFlowScale','showOverlay',
     'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
     'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','binauralNearField','binauralLogVoices','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
