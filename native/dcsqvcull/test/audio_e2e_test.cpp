@@ -320,6 +320,111 @@ void Radio() {
   RigDown(r);
 }
 
+// ---- 3. stereo waves ------------------------------------------------------------------------------------------------
+// The hooked output of one sound (kind, channels, auto_width inner radius or < 0) held at a position: `blocks` blocks
+// after `settle` blocks, and DCS's own output of it (the reference world). toggle: every `toggle` blocks the kill
+// switch flips (0: never).
+struct Take {
+  std::vector<float> hooked, stock;
+  uint64_t stereoCalls = 0;
+};
+Take Hold(uint32_t channels, Kind kind, const float pos[3], int settle, int blocks, int toggle = 0, uint32_t seed = 31,
+          double hz = 0) {
+  Rig r;
+  RigUp(r, kIni);
+  AddBoth(r, 0, true, channels, kind, 0.3f, hz, 1.0f, seed);
+  Bind(r);
+  PosBoth(r, 0, pos[0], pos[1], pos[2]);
+  CreateVoice(r, 0);
+  std::vector<float> a(2 * kFrames), b(2 * kFrames);
+  Take t;
+  for (int k = 0; k < settle + blocks; ++k) {
+    if (toggle && k > settle && (k - settle) % toggle == 0) audio::g_userOff = !audio::g_userOff.load();
+    SimFrame(r);
+    Block(r, a.data(), b.data(), kFrames);
+    if (k < settle) continue;
+    t.hooked.insert(t.hooked.end(), a.begin(), a.end());
+    t.stock.insert(t.stock.end(), b.begin(), b.end());
+  }
+  t.stereoCalls = audio::g_cnt.stereoCalls.load();
+  audio::g_userOff = false;
+  RigDown(r);
+  return t;
+}
+double Energy(const std::vector<float>& v) {
+  double e = 0;
+  for (float x : v) e += static_cast<double>(x) * x;
+  return e;
+}
+// The largest second difference of either channel (a click is a step: its second difference is the step's size).
+double MaxD2(const std::vector<float>& v, size_t from = 0, size_t to = SIZE_MAX) {
+  double m = 0;
+  to = std::min(to, v.size() / 2);
+  for (size_t n = std::max<size_t>(from, 2); n < to; ++n)
+    for (int ch = 0; ch < 2; ++ch)
+      m = std::max(m, std::fabs(static_cast<double>(v[2 * n + ch]) - 2.0 * v[2 * (n - 1) + ch] + v[2 * (n - 2) + ch]));
+  return m;
+}
+
+void Stereo() {
+  char err[160] = {};
+  binaural::HrtfSet* set = binaural::LoadHrtf(g_set.data(), g_set.size() * 4, kRate, err, sizeof(err));
+  const double radius = binaural_config::PilotItdRadiusM(set ? binaural::DescribeHrtf(set).datasetHeadRadiusM : 0.0f, kCircumferenceCm);
+  if (set) binaural::ReleaseHrtf(set);
+  // 1. A stereo wave with decorrelated channels, a point source: ahead, at the right, at the left.
+  const float ahead[3] = {5, 0, 0}, right[3] = {0, 0, 5}, left[3] = {0, 0, -5};
+  const Take ta = Hold(2, kNoise, ahead, 20, 100), tr = Hold(2, kNoise, right, 20, 100), tl = Hold(2, kNoise, left, 20, 100);
+  const Cue ca = Measure(ta.hooked.data(), ta.hooked.size() / 2), cr = Measure(tr.hooked.data(), tr.hooked.size() / 2),
+            cl = Measure(tl.hooked.data(), tl.hooked.size() / 2);
+  const double side = Woodworth(90, radius);
+  printf("     stereo point source: ahead %.1f us %.2f dB, right %.1f us %.2f dB, left %.1f us %.2f dB (Woodworth at the "
+         "side %.1f us); stereo HRTF calls %llu\n",
+         ca.itd * 1e6, ca.ild, cr.itd * 1e6, cr.ild, cl.itd * 1e6, cl.ild, side * 1e6,
+         static_cast<unsigned long long>(tr.stereoCalls));
+  Check(tr.stereoCalls >= 100 && std::fabs(ca.itd) <= 15e-6 && std::fabs(ca.ild) <= 0.5 && std::fabs(cr.itd - side) <= 30e-6 &&
+            std::fabs(cl.itd + side) <= 30e-6 && cr.ild >= 3.0 && cl.ild <= -3.0,
+        "audio e2e stereo: a stereo wave (decorrelated channels) is rendered by the core as a point source: no "
+        "interaural difference ahead, Woodworth's ITD at the sides within 30 us, the far ear at least 3 dB quieter");
+  // 2. Loudness ahead against DCS's own stereo output, for decorrelated and dual-mono channels and a mono wave.
+  const Take td = Hold(2, kDual, ahead, 20, 100, 0, 31, 500), tm = Hold(1, kNoise, ahead, 20, 100), tmd = Hold(1, kSine, ahead, 20, 100, 0, 31, 500);
+  const double dbStereo = 10 * std::log10(Energy(ta.hooked) / Energy(ta.stock));
+  const double dbDual = 10 * std::log10(Energy(td.hooked) / Energy(td.stock));
+  const double dbMono = 10 * std::log10(Energy(tm.hooked) / Energy(tm.stock));
+  double worstDual = 0, peakDual = 0;
+  for (size_t i = 0; i < td.hooked.size(); ++i) {
+    worstDual = std::max(worstDual, static_cast<double>(std::fabs(td.hooked[i] - tmd.hooked[i])));
+    peakDual = std::max(peakDual, static_cast<double>(std::fabs(tmd.hooked[i])));
+  }
+  printf("     loudness ahead vs DCS's own output: stereo (decorrelated) %+.2f dB, stereo (dual mono) %+.2f dB, mono %+.2f "
+         "dB; dual-mono stereo vs the same mono wave: worst %.2e of %.3f\n",
+         dbStereo, dbDual, dbMono, worstDual, peakDual);
+  Check(std::fabs(dbStereo) <= 1.0 && std::fabs(dbDual) <= 1.0,
+        "audio e2e stereo: ahead, a stereo wave is as loud as DCS's own stereo output within 1 dB (decorrelated and "
+        "dual-mono channels)");
+  Check(peakDual > 0.05 && worstDual <= 1e-5 * peakDual + 1e-7,
+        "audio e2e stereo: a dual-mono stereo wave (most of DCS's stereo files) renders exactly as the same mono wave");
+  // 3. The kill switch flipping every 50 blocks: no click (second difference) beyond the steady state's own.
+  const float at[3] = {4, 0, 3};
+  bool clickFree = true;
+  for (uint32_t ch : {2u, 1u}) {
+    const Take tk = Hold(ch, kSine, at, 20, 400, 50, 31, 200);
+    double steadyD2 = 0;
+    for (int seg = 0; seg < 8; ++seg) {  // the middle 20 blocks of each half-period: no change there
+      const size_t from = size_t(seg * 50 + 15) * kFrames, to = size_t(seg * 50 + 35) * kFrames;
+      steadyD2 = std::max(steadyD2, MaxD2(tk.hooked, from, to));
+    }
+    const double allD2 = MaxD2(tk.hooked);
+    printf("     kill switch every 0.5 s on a %s wave: largest second difference %.2e (steady %.2e)\n",
+           ch == 2 ? "stereo" : "mono", allD2, steadyD2);
+    // A step of s shows as a second difference of s; a 10 ms linear crossfade between two different signals only bends
+    // the slope (about 1 / 480 of their difference per sample). Before the onset fade the later ear's step gave 2e-2.
+    clickFree = clickFree && steadyD2 > 0 && allD2 <= steadyD2 + 1e-3 && AllFinite(tk.hooked);
+  }
+  Check(clickFree, "audio e2e: switching a stereo or a mono wave between binaural and DCS's panning makes no click (no "
+                   "step above -60 dBFS beyond the steady output's own second difference; the core's fresh source is "
+                   "faded in at its input)");
+}
+
 }  // namespace e2e
 
 int main() {
@@ -330,6 +435,7 @@ int main() {
   printf("---- binaural audio end to end (fake ed_sound, real BinauralCore, synthetic spherical-head HRTF)\n");
   e2e::Circle();
   e2e::Radio();
+  e2e::Stereo();
   audio::g_testNoThread = false;
   printf("%d failure(s)\n", g_fail);
   return g_fail ? 1 : 0;

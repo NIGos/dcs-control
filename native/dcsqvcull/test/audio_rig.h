@@ -172,6 +172,10 @@ inline void PosBoth(Rig& r, int i, double x, double y, double z) {
   r.w.SetPos(i, x, y, z);
   r.ref.SetPos(i, x, y, z);
 }
+inline void AutoWidthBoth(Rig& r, int i, float innerRadius) {
+  r.w.SetAutoWidth(i, innerRadius);
+  r.ref.SetAutoWidth(i, innerRadius);
+}
 
 // One SND_process frame: hooked world through P3a (ed mutex held, frame counter advanced), the reference directly.
 inline void SimFrame(Rig& r) {

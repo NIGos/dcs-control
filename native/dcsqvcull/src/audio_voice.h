@@ -6,7 +6,7 @@
 // per-frame ranking is O(records) once per SND_process.
 //
 // Ownership (all must hold): module on, renderer bound (the WASAPI renderer the render side validated), offline state
-// off, a 3D sound (+0x18) in a context that is not 2D and not excluded, a mono wave, DCS's stereo gain format
+// off, a 3D sound (+0x18) in a context that is not 2D and not excluded, a mono or stereo wave, DCS's stereo gain format
 // (ch0 = (gL, 0), ch1 = (0, gR)), distance >= 5 cm, and a rank within the top MaxObjects by loudness (hysteresis: an
 // owned voice is kept at least 250 ms; a waiting voice replaces the quietest owned one only when it is 3 dB louder).
 // A voice created this frame (P3b) is owned at once when a slot is free, so its onset is already binaural.
@@ -14,7 +14,8 @@
 // For an owned voice the pending gains are replaced by the mono tag ch0 = (m, 0), ch1 = (m, 0) (m = DCS's own gain for
 // that voice with the source straight ahead, solved from DCS's two gains; at least kTagFloor so a tag is never all
 // zero). DCS never writes a non-zero `a` on channel 1 of a stereo device, so the render side tells a tagged snapshot
-// from a stock one by its bytes alone. The voice's metadata (listener-frame position, distance, m, DCS's own gains for
+// from a stock one by its bytes alone. A stereo wave gets the stereo tag instead (IsStereoTag below: m L' and m R'
+// apart, marked in channel 2). The voice's metadata (listener-frame position, distance, m, DCS's own gains for
 // the fallback re-pan, the head pose DCS used) goes to its VoiceMeta slot (one seqlock per slot, single writer).
 //
 // Slots are released through the render side: the sim stops tagging, the render side fades the voice back to DCS's
@@ -39,6 +40,8 @@ constexpr uint32_t kSndIs3D = 0x018;     // non-zero = 3D
 constexpr uint32_t kSndRelPos = 0x0d0;   // double3, listener frame (x forward, y up, z right), metres
 constexpr uint32_t kSndDist = 0x1c8;     // double
 constexpr uint32_t kSndToListener = 0x1d8;  // double3 unit vector source -> listener
+constexpr uint32_t kSndAutoWidth = 0x1a6;   // u8, the sdef's auto_width (panner 0x1c5ee: a stereo wave's width
+                                            // narrows from 1 at inner_radius to 0 at inner_radius + 1200 m)
 constexpr uint32_t kSndVoice = 0x1f0;    // Voice*
 // Render voice
 constexpr uint32_t kVNext = 0x000;
@@ -47,7 +50,10 @@ constexpr uint32_t kVSound = 0x010;
 constexpr uint32_t kVPendGain = 0x048;   // float[2] per output channel (stride 8)
 constexpr uint32_t kVSnapGain = 0x0f8;   // float[2] per output channel: the targets the last render ramped to
 constexpr uint32_t kVCtx2d = 0xec2;      // u8
-constexpr uint32_t kVChannels = 0xec4;   // u32 wave channels (1 = mono)
+constexpr uint32_t kVChannels = 0xec4;   // u32 wave channels (1 = mono, 2 = stereo; set from the wave at creation,
+                                         // switched by a stream's chunk, 0x1614d)
+constexpr uint32_t kTagBytes = 24;       // the gains of channels 0, 1 and 2 (the stereo tag's mark is in channel 2,
+                                         // a slot DCS neither writes nor reads on a stereo output)
 constexpr uint32_t kVoiceSize = 0x1f10;
 // Renderer
 constexpr uint32_t kRRate = 0x0000;      // double
@@ -172,6 +178,32 @@ inline void PanLaw(double base, double x, double cL, double cR, float* gL, float
 // Snapshot gains (ch0.a, ch0.b, ch1.a, ch1.b) of a stereo renderer's voice: is it the mono tag?
 inline bool IsTag(const float g[4]) { return g[1] == 0.0f && g[3] == 0.0f && g[2] > 0.0f && g[0] == g[2]; }
 
+// ---- the stereo tag (a voice whose wave has two channels) -------------------------------------------------------------
+// ed_sound renders a stereo wave with the same two gains per output channel as a mono one, a for the wave's left
+// channel and b for its right (stereo kernels 0x183e0 / 0x14de0: out[ch] += L' a[ch] + R' b[ch]), after its own width
+// stage L' = M + w S, R' = M - w S (M = (L + R) / 2, S = (L - R) / 2; w = 1, or the auto_width distance rule, panner
+// 0x1c5ee). The stereo tag ch0 = (m, 0), ch1 = (0, m) gives the render side m L' and m R' apart (so DCS's own mid
+// m M and side m w S); DCS's own gains for a frontal source are the same bytes, so the tag also carries a mark in
+// channel 2: ch2 = (m, kStereoMark). DCS never writes or reads channel 2 on a stereo output (the panner, the ramp set-up
+// and the kernels all stop at the renderer's channel count, renderer+0x2274), and never writes a negative gain.
+constexpr float kStereoMark = -1.0f;
+// Snapshot gains of channels 0..2 (ch0.a, ch0.b, ch1.a, ch1.b, ch2.a, ch2.b): is it the stereo tag?
+inline bool IsStereoTag(const float g[6]) {
+  return g[1] == 0.0f && g[2] == 0.0f && g[0] > 0.0f && g[3] == g[0] && g[4] == g[0] && g[5] == kStereoMark;
+}
+inline bool IsAnyTag(const float g[6]) { return IsTag(g) || IsStereoTag(g); }
+
+// The stereo mark of a voice on a stereo output is cleared whenever the voice is not tagged (a stale mark next to
+// DCS's own frontal gains would read as a tag). Channel 2 of a stereo output is ours alone, so the write is safe.
+inline void ClearStereoMark(void* voice) {
+  uint8_t* v = static_cast<uint8_t*>(voice);
+  const void* rend = Rd<void*>(v, off::kVRenderer);
+  if (!rend || Rd<uint32_t>(rend, off::kRChannels) != 2) return;
+  if (Rd<float>(v, off::kVPendGain + 20) != kStereoMark) return;
+  const float zero[2] = {0.0f, 0.0f};
+  memcpy(v + off::kVPendGain + 16, zero, sizeof(zero));
+}
+
 // ---- VoiceMeta: one slot per owned voice, written by the sim thread, read by the render thread -----------------------
 namespace meta_flags {
 constexpr uint32_t kOwned = 1;      // render binaurally (else: fade back to DCS's panning, then acknowledge)
@@ -179,6 +211,10 @@ constexpr uint32_t kInitial = 2;    // owned from the voice's creation (P3b): no
 constexpr uint32_t kPoseValid = 4;  // qUsed / tUsed hold the head pose DCS used for this frame (pose ring entry)
 constexpr uint32_t kNear = 8;       // under 1.5 m: the late-translation gain applies
 constexpr uint32_t kPosValid = 16;  // tUsed is a tracked position (the pose entry had one; else it is zero)
+constexpr uint32_t kStereo = 32;    // a stereo wave: the stereo tag (the render side takes its mid, and its side below)
+constexpr uint32_t kWide = 64;      // a stereo wave whose sdef asks for width (auto_width): the side keeps DCS's own
+                                    // stereo, the mid is the binaural point source (else: the mid alone, at the
+                                    // stereo's loudness)
 }  // namespace meta_flags
 
 struct MetaData {
@@ -243,6 +279,8 @@ struct Rec {
   bool initialOwned;   // owned from its creation
   int64_t ownedSince;  // QPC
   uint8_t ctx;
+  uint8_t chans;       // wave channels in the last frame (1 or 2)
+  bool wide;           // stereo with auto_width
 };
 
 enum SlotState : uint8_t { kSlotFree = 0, kSlotOwned = 1, kSlotReleasing = 2 };

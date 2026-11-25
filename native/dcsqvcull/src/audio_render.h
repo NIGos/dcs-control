@@ -31,6 +31,16 @@
 // tag in the next). For an owned voice whose metadata is unchanged that is not a release: the block stays tagged, the
 // mono signal is recovered from the known ramp (sum of the gains from tag to stock and back) and the voice stays
 // binaural (counted: Counters::tornSnaps). A real release that happens to look torn then fades out from that block.
+//
+// A stereo wave (the stereo tag, audio_voice.h IsStereoTag): the tagged scratch is m L', m R' (DCS's own channels after
+// its width stage). The point source is the mid M = (L' + R') / 2, DCS's own stereo-to-mono rule; the side
+// S = (L' - R') / 2 is what DCS's stereo adds on top:
+//   T = h HRTF(c M) + (1-h) RePan(M) + s SidePan(S)
+// where SidePan puts S back with DCS's gains (+gL left, -gR right), so h = 0 is DCS's stock stereo exactly. A plain
+// stereo wave is a point source: s = 1 - h, and c (BlockMidSide, 1..2) keeps the stereo's loudness. A wave whose sdef
+// asks for width (auto_width, meta_flags::kWide): s = 1 and c = 1, the side stays DCS's own stereo (it narrows with
+// distance as DCS's own width does) around a binaural mid. Torn snapshots of a stereo voice are recovered per channel
+// (its two gain ramps are known).
 #pragma once
 
 #include <immintrin.h>
@@ -177,10 +187,10 @@ struct EvRing {
 // idle" line logs them). The first reason that applies is counted.
 enum Refuse : int {
   kRefuseOff = 0,        // binaural not on for this frame (settings, kill switch, an off reason, a pass or handover)
-  kRefuseOutput,         // no output bound, or the voice plays on another one (a second DCS output)
-  kRefuseNot3D,          // no sound, a 2D sound, or a voice of a 2D context
+  kRefuseOutput,         // a 3D sound, but no output bound, or the voice plays on another one (a second DCS output)
+  kRefuseNot3D,          // no sound, a 2D sound, or a voice of a 2D context (on any output)
   kRefuseOffline,        // ed_sound's engine state offline
-  kRefuseNotMono,        // a voice with more than one channel
+  kRefuseChannels,       // a wave neither mono nor stereo
   kRefuseContext,        // its context is not one of the array's, is excluded ([Audio] ExcludeContexts) or 2D
   kRefuseDistance,       // nearer than the minimum distance, or not finite
   kRefuseStereoOut,      // the bound output is not stereo
@@ -194,9 +204,10 @@ struct Counters {
   std::atomic<uint64_t> refused[kRefuseCount] = {};
   std::atomic<uint64_t> blocks{0}, armedBlocks{0}, candidateCalls{0}, hrtfCalls{0}, repanCalls{0}, fadeIns{0},
       fadeOuts{0}, steady{0}, passCandidates{0}, coreRejected{0}, orphanTagged{0}, nonFinite{0}, framesTooLong{0},
-      voiceEnded{0}, unarmedCalls{0}, overruns{0}, poseBlocks{0}, tornSnaps{0}, passBlocks{0};
+      voiceEnded{0}, unarmedCalls{0}, overruns{0}, poseBlocks{0}, tornSnaps{0}, passBlocks{0}, stereoCalls{0};
   std::atomic<uint64_t> panCalls{0}, panSolves{0}, panMismatch{0}, panMedian{0}, ownedVoiceFrames{0}, simFrames{0};
   std::atomic<uint32_t> ownedNow{0}, limitNow{binaural::kMaxSources}, activeLastBlock{0};
+  std::atomic<uint32_t> ownedStereoNow{0}, ownedWideNow{0};  // of ownedNow: stereo waves, and those kept wide
   // Block time of our own DSP, microseconds x 10, the last 1024 armed blocks (single writer: the render thread).
   std::atomic<uint32_t> timeRing[1024];
   std::atomic<uint32_t> timeHead{0};
@@ -205,10 +216,12 @@ struct Counters {
     for (std::atomic<uint64_t>* c : {&blocks, &armedBlocks, &candidateCalls, &hrtfCalls, &repanCalls, &fadeIns, &fadeOuts,
                                      &steady, &passCandidates, &coreRejected, &orphanTagged, &nonFinite, &framesTooLong,
                                      &voiceEnded, &unarmedCalls, &overruns, &poseBlocks, &tornSnaps, &passBlocks, &panCalls, &panSolves,
-                                     &panMismatch, &panMedian, &ownedVoiceFrames, &simFrames})
+                                     &panMismatch, &panMedian, &ownedVoiceFrames, &simFrames, &stereoCalls})
       c->store(0, std::memory_order_relaxed);
     for (std::atomic<uint64_t>& c : refused) c.store(0, std::memory_order_relaxed);
     ownedNow.store(0, std::memory_order_relaxed);
+    ownedStereoNow.store(0, std::memory_order_relaxed);
+    ownedWideNow.store(0, std::memory_order_relaxed);
     limitNow.store(binaural::kMaxSources, std::memory_order_relaxed);
     activeLastBlock.store(0, std::memory_order_relaxed);
     timeHead.store(0, std::memory_order_relaxed);
@@ -289,6 +302,48 @@ inline uint32_t RePan(const float* a, const float* b, float scale, uint32_t fram
   return bad;
 }
 
+// SidePan: a stereo voice's side with DCS's own gains: s(i) = (a[2i] - b[2i]) / 2 (b = a + 1: the two channels of the
+// scratch), out_L += wgt s rL, out_R -= wgt s rR. With RePan of the mid (scale 1/2) it gives DCS's stock stereo output
+// m L' gL / m, m R' gR / m back exactly (L' = M + S, R' = M - S). Returns the non-finite count.
+inline uint32_t SidePan(const float* a, const float* b, uint32_t frames, float w0, float w1, float rL0, float rL1,
+                        float rR0, float rR1, float* out) {
+  if (!frames || (w0 == 0.0f && w1 == 0.0f)) return 0;
+  const float inv = 1.0f / static_cast<float>(frames);
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < frames; ++i) {
+    const float t = static_cast<float>(i) * inv;
+    const float w = w0 + (w1 - w0) * t;
+    const float x = 0.5f * (a[2 * i] - b[2 * i]);
+    const float l = w * x * (rL0 + (rL1 - rL0) * t);
+    const float r = w * x * (rR0 + (rR1 - rR0) * t);
+    if (!std::isfinite(l) || !std::isfinite(r)) {
+      ++bad;
+      continue;
+    }
+    out[2 * i] += l;
+    out[2 * i + 1] -= r;
+  }
+  return bad;
+}
+
+// The loudness of a stereo voice's mid against its stereo: (P_M + P_S) / P_M of this block's m L', m R'. The mid alone
+// keeps DCS's own stereo-to-mono rule (M = (L + R) / 2, what its stream decoder does at 0x16260 and its width stage
+// gives at w = 0) and is as loud as the stereo when the channels are equal (most of DCS's stereo waves); for
+// decorrelated channels it is up to 3 dB quieter, so the HRTF part is raised by sqrt of this ratio, smoothed over
+// kLoudTau and limited to kMaxLoudComp (anti-phase content is not chased).
+constexpr float kLoudTau = 0.05f;      // seconds
+constexpr float kMaxLoudComp = 2.0f;   // +6 dB
+inline void BlockMidSide(const float* lr, uint32_t frames, double* pm, double* ps) {
+  double m = 0, s = 0;
+  for (uint32_t i = 0; i < frames; ++i) {
+    const double a = lr[2 * i], b = lr[2 * i + 1];
+    m += 0.25 * (a + b) * (a + b);
+    s += 0.25 * (a - b) * (a - b);
+  }
+  *pm = m;
+  *ps = s;
+}
+
 // out += (1 - w(i)) scratch (both channels), w linear w0 -> w1 across the call.
 inline void AddStockWeighted(const float* scratch, uint32_t frames, float w0, float w1, float* out) {
   const float inv = 1.0f / static_cast<float>(frames);
@@ -310,6 +365,11 @@ struct Rs {
   float rL = 0, rR = 0;     // re-pan ratios at the end of the last block
   float lastTag = 0;        // the tag value of the last tagged snapshot (the ramp's start in the next block)
   float tornS0 = 0;         // > 0: the last block's snapshot was torn; this block's gain ramp starts from that sum
+  float tornL = 0, tornR = 0;  // and, for a stereo voice, from these two gains (per channel)
+  float comp = 1;           // stereo: the HRTF part's loudness factor of the last block (BlockMidSide)
+  double powM = 0, powS = 0;   // its smoothed mid / side powers (per frame)
+  bool havePow = false;
+  bool powExact = false;       // the estimate comes from tag-to-tag blocks (not only a fade block's seed)
   MetaData meta{};          // the last consistent read
   MetaData prev{};          // the one before (pairs a snapshot written before the newest metadata)
 };
@@ -318,7 +378,8 @@ struct Binding {
   void* renderer = nullptr;
   uint32_t rate = 0;
   binaural::Renderer* core = nullptr;
-  float* scratch = nullptr;  // 2 x kMaxFrames, 64-byte aligned
+  float* scratch = nullptr;  // 2 x kMaxFrames, 64-byte aligned (one allocation with `onset`)
+  float* onset = nullptr;    // kMaxFrames: a source's first HRTF block from silence, faded in at the input
   uint32_t* overrun = nullptr;  // ED's overrun counter of this WASAPI renderer
   uint32_t lastOverrun = 0;
   bool haveOverrun = false;
@@ -356,9 +417,9 @@ struct MxcsrScope {  // FTZ | DAZ for our DSP, the caller's mode back afterwards
 };
 
 // The output rule for one candidate voice. scratch: the voice's own render (2 x frames); snap: its snapshot gains
-// (ch0.a, ch0.b, ch1.a, ch1.b) after that render; metaOk/meta: a consistent read of its slot (else rs.meta is used);
-// ended: voice_render returned 0. Adds to blk.out.
-inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float* scratch, const float snap[4],
+// (ch0.a, ch0.b, ch1.a, ch1.b, ch2.a, ch2.b) after that render; metaOk/meta: a consistent read of its slot (else rs.meta
+// is used); ended: voice_render returned 0. Adds to blk.out.
+inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float* scratch, const float snap[6],
                          bool metaOk, const MetaData& metaIn, bool ended, std::atomic<uint32_t>* ackGen) {
   Binding& b = *blk.b;
   Rs& rs = b.rs[slot];
@@ -368,7 +429,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   if (!metaOk) {
     if (!rs.haveMeta || rs.voice != voice) {
       // No consistent metadata yet: the stock part only (a tagged voice plays centred for this block).
-      if (audv::IsTag(snap)) cnt.orphanTagged.fetch_add(1, std::memory_order_relaxed);
+      if (audv::IsAnyTag(snap)) cnt.orphanTagged.fetch_add(1, std::memory_order_relaxed);
       for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += scratch[i];
       return;
     }
@@ -380,7 +441,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     rs.voice = voice;
     rs.gen = meta.gen;
     // Owned from its creation: its first block is already tagged and has no stock past to fade from.
-    rs.prevTagged = (meta.flags & audv::meta_flags::kInitial) != 0 && audv::IsTag(snap);
+    rs.prevTagged = (meta.flags & audv::meta_flags::kInitial) != 0 && audv::IsAnyTag(snap);
     if (rs.prevTagged) rs.lastTag = snap[0];
     rs.hW = blk.on && (meta.flags & audv::meta_flags::kOwned) ? 1.0f : 0.0f;
   }
@@ -389,7 +450,9 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     rs.meta = meta;
     rs.haveMeta = true;
   }
-  const bool tagSnap = audv::IsTag(snap);
+  const bool monoSnap = audv::IsTag(snap);
+  const bool stereoSnap = audv::IsStereoTag(snap);
+  const bool tagSnap = monoSnap || stereoSnap;
   const bool prevTagged = rs.prevTagged;
   const bool owned = (meta.flags & audv::meta_flags::kOwned) != 0;
   const float hTarget = blk.on && owned && b.core ? 1.0f : 0.0f;
@@ -420,6 +483,9 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   float rL1 = pm.gL / mRef, rR1 = pm.gR / mRef;
   if (!std::isfinite(rL1) || !std::isfinite(rR1)) rL1 = rR1 = 0.5f;
   if (rs.rL == 0 && rs.rR == 0) rs.rL = rL1, rs.rR = rR1;
+  // A stereo voice: the stereo tag now, or (a torn snapshot, a fade out) its metadata or the mark left in channel 2.
+  const bool stereo = stereoSnap || (!monoSnap && ((pm.flags & audv::meta_flags::kStereo) || snap[5] == audv::kStereoMark));
+  const bool wide = stereo && (pm.flags & audv::meta_flags::kWide) != 0;
 
   // Weights. w: ownership fade (1 steady); h: HRTF share of the tagged part.
   float w0 = 1, w1 = 1, h0 = rs.hW, h1 = rs.hW;
@@ -429,6 +495,10 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   if (prevTagged && tagged) {
     h1 = hTarget;
     cnt.steady.fetch_add(1, std::memory_order_relaxed);
+    if (stereo) {  // the mid of m L', m R'
+      bb = scratch + 1;
+      scale = 0.5f;
+    }
   } else {
     a = scratch;
     bb = scratch + 1;
@@ -446,18 +516,58 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   // level from both channels and the known ramp of their gain sum, mono(i) = (L + R) M(t) / S(t), into the scratch's
   // left channel (the stock part above is already added). DCS ramps each gain linearly, t = (i + 1) / frames.
   if (torn || rs.tornS0 > 0.0f) {
-    const float s0 = torn ? 2.0f * rs.lastTag : rs.tornS0;
-    const float s1 = tagSnap ? 2.0f * snap[0] : sumNow;
     const float m0 = rs.lastTag, m1 = tagSnap ? snap[0] : rs.lastTag;
     const float inv = 1.0f / static_cast<float>(frames);
-    for (uint32_t i = 0; i < frames; ++i) {
-      const float t = static_cast<float>(i + 1) * inv;
-      const float s = s0 + (s1 - s0) * t;
-      scratch[2 * i] = s > 0.0f ? (scratch[2 * i] + scratch[2 * i + 1]) * ((m0 + (m1 - m0) * t) / s) : 0.0f;
+    if (stereo) {
+      // Each channel has its own known ramp (tag m to DCS's gL / gR and back): m L', m R' recovered apart.
+      const float l0 = torn ? rs.lastTag : rs.tornL, r0 = torn ? rs.lastTag : rs.tornR;
+      const float l1 = snap[0], r1 = snap[3];  // the stereo tag (m, m) or DCS's own gains (gL, gR)
+      for (uint32_t i = 0; i < frames; ++i) {
+        const float t = static_cast<float>(i + 1) * inv;
+        const float gl = l0 + (l1 - l0) * t, gr = r0 + (r1 - r0) * t, mt = m0 + (m1 - m0) * t;
+        scratch[2 * i] = gl > 0.0f ? scratch[2 * i] * (mt / gl) : 0.0f;
+        scratch[2 * i + 1] = gr > 0.0f ? scratch[2 * i + 1] * (mt / gr) : 0.0f;
+      }
+      a = scratch;
+      bb = scratch + 1;
+      scale = 0.5f;
+    } else {
+      const float s0 = torn ? 2.0f * rs.lastTag : rs.tornS0;
+      const float s1 = tagSnap ? 2.0f * snap[0] : sumNow;
+      for (uint32_t i = 0; i < frames; ++i) {
+        const float t = static_cast<float>(i + 1) * inv;
+        const float s = s0 + (s1 - s0) * t;
+        scratch[2 * i] = s > 0.0f ? (scratch[2 * i] + scratch[2 * i + 1]) * ((m0 + (m1 - m0) * t) / s) : 0.0f;
+      }
+      a = scratch;
+      bb = nullptr;
+      scale = 1.0f;
     }
-    a = scratch;
-    bb = nullptr;
-    scale = 1.0f;
+  }
+  // A plain stereo wave: the HRTF part at the stereo's loudness (BlockMidSide), from this block's m L', m R'.
+  // Only a block that runs tag to tag (or was recovered) holds m L', m R' exactly; a fade block's mix of DCS's gains and
+  // the tag only seeds the estimate, which the first exact block then replaces.
+  float comp = stereo && !wide ? rs.comp : 1.0f;
+  const bool exactLR = prevTagged && tagged;
+  if (stereo && !wide && (exactLR || !rs.havePow)) {
+    double pmB = 0, psB = 0;
+    BlockMidSide(scratch, frames, &pmB, &psB);
+    pmB /= frames;
+    psB /= frames;
+    if (!rs.havePow || (exactLR && !rs.powExact)) {
+      rs.powM = pmB, rs.powS = psB, rs.havePow = true;
+      rs.powExact = exactLR;
+    } else {
+      const double k = 1.0 - std::exp(-static_cast<double>(frames) / (static_cast<double>(b.rate ? b.rate : 48000) * kLoudTau));
+      rs.powM += k * (pmB - rs.powM);
+      rs.powS += k * (psB - rs.powS);
+    }
+    comp = rs.comp;
+    if (rs.powM + rs.powS > 1e-24 && std::isfinite(rs.powM + rs.powS)) {
+      const double c = rs.powM > 0 ? std::sqrt((rs.powM + rs.powS) / rs.powM) : kMaxLoudComp;
+      comp = static_cast<float>(c < 1.0 ? 1.0 : (c > kMaxLoudComp ? kMaxLoudComp : c));
+    }
+    rs.comp = comp;
   }
   // HRTF part: weight w(i) h(i). Only one of the two ramps moves in a block, so the product stays linear.
   const float hw0 = w0 * h0, hw1 = w1 * h1;
@@ -466,17 +576,29 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     binaural::SourceUpdate u{};
     float gT = 1.0f;
     CorrectedPosition(pm, blk.pose, blk.late, u.position, &gT);
-    u.gain = blk.trim * gT;
+    u.gain = blk.trim * gT * comp;  // the core ramps its gain across the call
     // Near field on/off is the core's own (Renderer::SetNearField fades it); no per-source exclusion here.
     u.flags = rs.live ? 0u : binaural::source_flags::kReset;
-    const binaural::MonoInput in{a, bb, 2, scale};
+    binaural::MonoInput in{a, bb, 2, scale};
+    float cw0 = hw0, cw1 = hw1;
+    if (!rs.live && hw0 == 0.0f && b.onset) {
+      // Faded in from silence with a fresh core source (kill switch on, a fade in, off for the session over): the
+      // core's delay lines start empty, so a weight on its output would cut the later ear in d samples late at weight
+      // d / frames (a step). The fade goes on the input instead: both ears rise from zero, d samples apart.
+      const float inv = 1.0f / static_cast<float>(frames);
+      for (uint32_t i = 0; i < frames; ++i)
+        b.onset[i] = (hw0 + (hw1 - hw0) * static_cast<float>(i) * inv) * scale * (a[2 * i] + (bb ? bb[2 * i] : 0.0f));
+      in = binaural::MonoInput{b.onset, nullptr, 1, 1.0f};
+      cw0 = cw1 = 1.0f;
+    }
     if (!blk.coreBegun) {
       audr::CoreBegin(b.core, frames);
       blk.coreBegun = true;
     }
-    if (audr::CoreRender(b.core, static_cast<uint32_t>(slot), u, in, frames, hw0, hw1, out)) {
+    if (audr::CoreRender(b.core, static_cast<uint32_t>(slot), u, in, frames, cw0, cw1, out)) {
       rs.live = true;
       cnt.hrtfCalls.fetch_add(1, std::memory_order_relaxed);
+      if (stereo) cnt.stereoCalls.fetch_add(1, std::memory_order_relaxed);
       ++blk.hrtfVoices;
     } else {
       // Refused (or no core): that share is re-panned with DCS's gains instead.
@@ -495,11 +617,20 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     if (bad) cnt.nonFinite.fetch_add(bad, std::memory_order_relaxed);
     cnt.repanCalls.fetch_add(1, std::memory_order_relaxed);
   }
+  // A stereo voice's side with DCS's own gains: with the re-panned share for a point source (so h = 0 is DCS's stereo),
+  // with the whole ownership weight for a wide one (the side stays DCS's while the mid is binaural).
+  if (stereo) {
+    const float sw0 = wide ? w0 : rpw0, sw1 = wide ? w1 : rpw1;
+    const uint32_t bad = SidePan(a, a + 1, frames, sw0, sw1, rs.rL, rL1, rs.rR, rR1, out);
+    if (bad) cnt.nonFinite.fetch_add(bad, std::memory_order_relaxed);
+  }
   rs.hW = h1;
   rs.rL = rL1;
   rs.rR = rR1;
   rs.prevTagged = tagged;
   rs.tornS0 = torn ? sumNow : 0.0f;
+  rs.tornL = torn ? snap[0] : 0.0f;
+  rs.tornR = torn ? snap[3] : 0.0f;
   if (tagSnap) rs.lastTag = snap[0];
   if (!tagged && !owned) ackGen[slot].store(meta.gen, std::memory_order_release);  // faded back: DCS's again
   if (ended) {

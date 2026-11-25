@@ -29,6 +29,7 @@ float g_lastRadius = 0;
 float g_lastEarRadius = 0;
 float g_lastInitRadius = 0;
 std::atomic<uint32_t> g_lastFlags{0};
+float g_lastGain = 0;
 }  // namespace audiofake
 
 namespace binaural {
@@ -134,6 +135,7 @@ bool Renderer::Render(std::uint32_t slot, const SourceUpdate& u, const MonoInput
     while ((b.QuadPart - a.QuadPart) * 1000000 / f.QuadPart < us);
   }
   audiofake::g_lastFlags.store(u.flags, std::memory_order_relaxed);
+  audiofake::g_lastGain = u.gain;
   Impl::Src& s = impl_->src[slot];
   float gl1, gr1;
   FakePan(u.position, &gl1, &gr1);
