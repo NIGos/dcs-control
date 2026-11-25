@@ -340,6 +340,7 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
              : !is3d                                                          ? audr::kRefuseNot3D
              : !e.boundRenderer || Rd<void*>(voice, off::kVRenderer) != e.boundRenderer ? audr::kRefuseOutput
              : e.engineState == off::kStateOffline                            ? audr::kRefuseOffline
+             : chans == 0                                                     ? audr::kRefuseNoWave
                                                                               : audr::kRefuseChannels;
   uint32_t ctxId = 8;
   if (q) {
@@ -409,15 +410,14 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
     ClearStereoMark(voice);
     return;
   }
-  // The tag and the voice's metadata. Mono: ch0 = ch1 = (m, 0). Stereo: ch0 = (m, 0), ch1 = (0, m), ch2 = (m, mark),
-  // so the render side gets m L' and m R' (DCS's own width, filters, doppler and fades kept).
+  // The tag and the voice's metadata: ch0 = (m, 0), ch1 = (0, m), ch2 = mark for mono and stereo waves alike, so the
+  // render side gets m L' and m R' (m s on both for a mono wave; DCS's own width, filters, doppler and fades kept), and a
+  // stream switching its channel count in the middle of a render needs nothing.
   const float mt = m > kTagFloor ? m : kTagFloor;
   const bool stereo = chans == 2;
-  const float tag[6] = {mt, 0.0f, stereo ? 0.0f : mt, stereo ? mt : 0.0f, stereo ? mt : 0.0f, stereo ? kStereoMark : 0.0f};
-  if (stereo || Rd<float>(voice, off::kVPendGain + 20) == kStereoMark)  // a stream that turned mono: its mark goes
-    memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, off::kTagBytes);
-  else
-    memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, 16);
+  float tag[6];
+  MakeTag(mt, tag);
+  memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, off::kTagBytes);
   MetaData d = s.last[r->slot];
   d.voice = voice;
   d.gen = o.slotGen[r->slot];

@@ -1116,12 +1116,12 @@ void ControlTick() {
       const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
       Log("audio: idle, blocks %llu (armed %llu), pan calls %llu; refused: off %llu, output %llu, not 3D %llu, offline %llu, "
           "channels %llu, context %llu, distance %llu, output not stereo %llu, gains %llu, pan law %llu, not at start "
-          "%llu, limit %llu",
+          "%llu, limit %llu, no wave yet %llu",
           u(blocks - L.idleBlocks), u(armed - L.idleArmed), u(pan - L.idlePan), u(refused[audr::kRefuseOff]),
           u(refused[audr::kRefuseOutput]), u(refused[audr::kRefuseNot3D]), u(refused[audr::kRefuseOffline]),
           u(refused[audr::kRefuseChannels]), u(refused[audr::kRefuseContext]), u(refused[audr::kRefuseDistance]),
           u(refused[audr::kRefuseStereoOut]), u(refused[audr::kRefuseGains]), u(refused[audr::kRefusePanMismatch]),
-          u(refused[audr::kRefuseNotCreation]), u(refused[audr::kRefuseLimit]));
+          u(refused[audr::kRefuseNotCreation]), u(refused[audr::kRefuseLimit]), u(refused[audr::kRefuseNoWave]));
     }
     L.idleBlocks = g_cnt.blocks.load();
     L.idleArmed = g_cnt.armedBlocks.load();

@@ -336,7 +336,7 @@ Runs on the simulation thread with the ed mutex held. No allocation, no locks of
 2. Decide ownership (all must hold, else return):
    - module enabled, renderer bound and validated (§6), offline state not active (`0x3ad70 != 2`);
    - `sound->is3D` (`+0x18 != 0`), context not 2D (`ctx+0xe0 == 0`), context not in `ExcludeContexts`;
-   - wave is mono or stereo (`voice+0xec4` is 1 or 2; a stereo wave gets the stereo tag of §10, v1 left it to DCS);
+   - wave is mono or stereo (`voice+0xec4` is 1 or 2; both get the tag of §10, v1 left stereo to DCS);
    - renderer channels == 2 and the voice's renderer is the bound one (`voice+0x08`);
    - distance ≥ 0.05 m (`sound+0x1c8`); closer means head-locked, left to DCS;
    - rank within the top `MaxObjects` by `base` gain (hysteresis: kept ≥ 250 ms, replaced only by a voice 3 dB louder).
@@ -581,49 +581,67 @@ rumble, afterburner crackle: wide sounds by design), `inner_radius` is mostly th
 the median (0.0 dB), 1.8 dB quieter or more for 10 %, 3 dB or more for 5 %, at worst 9 dB (switch clicks recorded
 partly out of phase).
 
-So, for a 3D voice whose wave is stereo:
-- **The stereo tag.** `ch0 = (m, 0)`, `ch1 = (0, m)`, `ch2 = (m, -1)`: the render side gets `m L'` and `m R'` apart, with
-  DCS's own width, filters, doppler and fades in them. The first four floats equal DCS's own gains for a frontal
-  source, so the mark in channel 2 (a negative gain, which DCS never writes, in a slot it never uses on a stereo output)
-  names the tag; the sim clears it whenever it does not tag the voice. `m` is the mono gain rule of §5.1 (the panner's
-  gains are the same).
-- **A point source (every stereo wave without auto_width).** The HRTF input is the mid `M = (L' + R') / 2`, DCS's own
-  stereo-to-mono rule (its stream decoder, its own width at `w = 0`), at the source's position. For dual-mono files this
-  is the file itself. Its loudness is kept: the HRTF part's gain is `c = sqrt((P_M + P_S) / P_M)` of the voice's mid and
-  side powers (smoothed over 50 ms, 1 to 2, ramped by the core across each call), so decorrelated channels are not
-  3 dB quieter than DCS's stereo. A stereo recording of a point source has no physical width: its side is dropped.
-- **A wide sound (auto_width).** DCS's own side stays: `T = HRTF(M) + SidePan(S)`, SidePan putting `S` back with DCS's
-  gains (`+gL` left, `-gR` right). Up close it keeps the width the sound designer asked for, around a binaural centre;
-  with distance DCS's own width narrows it to the binaural point source (`w = 0` past `inner_radius + 1200` m). No
-  loudness factor: mid and side together are DCS's power. Two virtual sources at `±angle` were not taken: nothing in
-  the data gives an angle, DCS's width is not an angle, and a second core slot per voice would halve MaxObjects.
+So, for every owned 3D voice (mono or stereo wave):
+- **One tag for both.** `ch0 = (m, 0)`, `ch1 = (0, m)`, `ch2 = (m 2^-40, -2^-100)`. For a stereo wave the render side
+  gets `m L'` and `m R'` apart, with DCS's own width, filters, doppler and fades in them; ED's mono kernels play
+  `s a + s b` per channel (`0x17024..0x17166`), so a mono wave gives `m s` on both, and a stream switching its channel
+  count in the middle of a render (`0x169ac` re-reads `0xec4` per kernel run) needs nothing. The first four floats
+  equal DCS's own gains for a frontal source, so the mark in channel 2 (a slot DCS never uses on a stereo output;
+  negative, which DCS never writes) names the tag; the sim clears it whenever it does not tag the voice. Both mark
+  values are tiny normal floats: should an output turn multichannel in place before DCS pans again, channel 2 plays
+  the voice about 240 dB down. `m` is the mono gain rule of §5.1 (the panner's gains are the same).
+- **DCS's channels recovered in every block.** DCS ramps each gain linearly from the last snapshot to the new one, both
+  known on the render side, so `m L'`, `m R'` are recovered exactly whenever both snapshots are in DCS's stereo format:
+  the tag, DCS's own gains, a fade between them, a torn snapshot, or a tag half written when the render copied the
+  gains in 16-byte pieces. The loudness estimate therefore never sees a mix of the two (on hard-panned dual mono a fade
+  block would otherwise read as decorrelated and swell 3 dB).
+- **A point source (the default).** The HRTF input is the mid `M = (L' + R') / 2`, DCS's own stereo-to-mono rule (its
+  stream decoder, its own width at `w = 0`), at the source's position. For dual-mono files this is the file itself.
+  Its loudness is kept: the HRTF part's gain is `c = sqrt((P_M + P_S) / P_M)` of the voice's mid and side powers
+  (smoothed over 50 ms, 1 to 2, ramped by the core across each call). A stereo recording of a point source has no
+  physical width: its side is dropped.
+- **A wide sound.** DCS's own side stays: `T = HRTF(M) + SidePan(S)`, SidePan putting `S` back with DCS's gains (`+gL`
+  left, `-gR` right), no loudness factor (mid and side together are DCS's power). Wide are:
+  - the sdef's `auto_width` (the width the sound designer asked for; DCS's own width narrows it with distance to the
+    point source, `w = 0` past `inner_radius + 1200` m);
+  - a source under 1.5 m (cockpit sounds: a cockpit-wide stereo bed is not a point at the head, and the near-field
+    gain would scale it with head motion);
+  - a diffuse bed, by its own signal: `c` above 1.3 (`P_S / P_M` above 0.69) for 200 ms, back to a point under 1.15 for
+    200 ms; a voice's first block decides at once. About 15 % of the readable stereo files have an L / R correlation
+    under 0.5 (wind, rain, cabin ambience).
+  A change between point and wide is crossfaded across one block. Two virtual sources at `±angle` were not taken:
+  nothing in the data gives an angle, DCS's width is not an angle, and a second core slot per voice would halve
+  MaxObjects.
 - **Head-locked sounds.** Sounds at the listener (under 5 cm) stay DCS's as before; 2D sounds and 2D contexts too.
-- **Fallbacks are DCS's stereo.** `T = h HRTF(c M) + (1 - h) RePan(M) + s SidePan(S)` with `s = 1 - h` (point source)
-  or `s = 1` (wide): the kill switch, a core refusal or off for the session (`h = 0`) give `M gL + S gL`, `M gR - S gR`
-  = DCS's `L' gL`, `R' gR` exactly; fades in and out use the same crossfade as mono voices.
-- **Fading in a fresh core source** (mono and stereo): when the core's source starts from reset with an HRTF weight
-  rising from 0 (the kill switch back on, a fade in, off for the session over), the weight goes on the core's input
-  (`Binding::onset`), not its output: with empty delay lines an output weight lets the later ear start d samples late
-  at weight d / frames, a step (the e2e kill-switch test measured a second difference of 2e-2 against 3e-4 steady).
-  The loudness estimate is seeded by a fade block and replaced by the first tag-to-tag block.
-- **Torn snapshots** (§9): DCS's two gains with our mark still in channel 2. Each channel has its own known ramp (tag to
-  `gL`, tag to `gR` and back), so `m L'` and `m R'` are recovered apart.
-- **Counts.** The running line says `mono <n>, stereo <n> (wide <n>)` after the limit; the idle line's `not mono` is
-  now `channels` (waves of more than two channels).
+- **Fallbacks are DCS's stereo.** `T = h HRTF(c' M) + (1 - h) RePan(M) + ((1 - h) + h q) SidePan(S)` (q = 0 point,
+  1 wide): the kill switch, a core refusal or off for the session (`h = 0`) give `M gL + S gL`, `M gR - S gR` = DCS's
+  `L' gL`, `R' gR` exactly.
+- **Fading in a fresh core source:** when the core's source starts from reset with an HRTF weight rising from 0 (the
+  kill switch back on, a fade in, off for the session over), the weight goes on the core's input (`Binding::onset`),
+  not its output: with empty delay lines an output weight lets the later ear start d samples late at weight
+  d / frames, a step (the e2e kill-switch test measured a second difference of 2e-2 against 3e-4 steady).
+- **Counts.** The running line says `mono <n>, stereo <n> (wide <n>)` after the limit (`wide`: auto_width); the idle
+  line's `not mono` is now `channels` (waves of more than two channels), and `no wave yet` counts stream voices before
+  their first chunk (`0xec4` still 0: ED sets it from the first chunk, `0x16107..0x16130`, or to 1 on the refill path
+  at `0x16419..0x16423`).
 
 ### 10.4 Tests
 
-`DcsQvCullTests`: the stereo tag's bytes against DCS's frontal gains, a stale mark and the mono tag; ownership (stereo
-owned, its metadata, wide with auto_width, a stream switching mono and stereo, the mark cleared on release; refusals
-by reason with a 2D sound on the other output and a four-channel wave); the stereo null test (decorrelated, dual mono,
-wide with DCS's width moving, cockpit distance, next to mono voices and a stereo radio: -60 dB from DCS's mix with the
-core refusing); steady states (dual mono: the core's input is DCS's signal at DCS's frontal gain, factor 1;
-decorrelated: factor about sqrt 2, within 0.5 dB of DCS's stereo power; wide: core plus DCS's side; past its width:
-core only); fades on a stereo DC with a side (point and wide: no step above -60 dBFS); a torn stereo snapshot (output
-stays the steady one); no allocation with stereo voices. `DcsQvCullAudioE2ETests` (real core): a decorrelated stereo
-wave ahead / right / left (no interaural difference ahead, Woodworth's ITD at the sides, far ear 3 dB quieter), its
-loudness ahead against DCS's stereo within 1 dB (decorrelated and dual mono), a dual-mono stereo wave equal to the same
-mono wave, and the kill switch every 0.5 s with no click (second difference).
+`DcsQvCullTests`: the tag's bytes against DCS's frontal gains, a stale mark and silence, its mark values normal down
+to the tag floor; ownership (mono and stereo with one tag, stereo metadata, wide with auto_width, a stream switching
+mono and stereo, the mark cleared on release; refusals by reason with a 2D sound on the other output, a four-channel
+wave and a stream with no wave yet); the stereo null test (decorrelated, dual mono, wide with DCS's width moving,
+cockpit distance, next to mono voices and a stereo radio: -60 dB from DCS's mix with the core refusing); steady states
+(dual mono: DCS's signal at DCS's frontal gain, factor 1; partly correlated: a point source, factor about 1.13, within
+0.5 dB of DCS's stereo power; a decorrelated bed, a source 1 m away and auto_width: core plus DCS's side; past its
+width: core only); fades on a stereo DC with a side (point and wide: no step above -60 dBFS); take-over and give-back
+of hard-panned dual mono (factor stays 1, no block above the steady levels); torn and half-written stereo snapshots
+(output stays the steady one); a stream switching mono / stereo mid-render; the mark across an uninstall and a new
+install; an output turning three-channel in place (channel 2 over 200 dB down); non-finite input to the loudness
+estimate; no allocation with stereo voices. `DcsQvCullAudioE2ETests` (real core): a partly correlated stereo wave
+ahead / right / left (no interaural difference ahead, Woodworth's ITD at the sides, far ear 3 dB quieter), loudness
+ahead against DCS's stereo within 1 dB (partly correlated, dual mono, decorrelated bed), a dual-mono stereo wave equal
+to the same mono wave, and the kill switch every 0.5 s on stereo and mono waves with no click (second difference).
 
 ### 10.5 What the next live flight must show
 
@@ -632,4 +650,6 @@ mono wave, and the kill switch every 0.5 s with no click (second difference).
 - No level jump when the kill switch flips (engine and cockpit sounds about as loud binaural as stock).
 - `click.rate` with binaural on near the off part's. The round-8 clicks (9 per minute in the on part) all fell in the
   recording's first 5 s while no voice was owned, i.e. with DCS's own calls untouched; they must not grow now.
-- Whether DCS's own core sounds set auto_width (the `wide` count): if it stays 0, every stereo sound is a point source.
+- Whether DCS's own core sounds set auto_width (the `wide` count, auto_width only); cockpit-near and diffuse stereo
+  beds keep DCS's side whatever it says.
+- Wind, rain and cabin ambiences still wide (not collapsed to a point) with binaural on.

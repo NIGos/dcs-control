@@ -44,8 +44,9 @@ constexpr uint32_t kVPhase = 0x1800, kVStep = 0x1808, kVAmp = 0x1810, kVKind = 0
 constexpr uint32_t kSndCrosstalk = 0x300;  // test field: crosstalk x of the pan law
 // Stereo waves: kSine plays sin(ph) left and sin(1.3 ph + 0.5) right, kNoise two independent noises (decorrelated
 // channels), kDual the same sine on both (DCS's dual-mono stereo files), kDc the same DC on both, kDcSplit DC amp left
-// and amp / 4 right (a side for click tests).
-enum Kind : uint32_t { kSine = 0, kDc = 1, kNoise = 2, kDual = 3, kDcSplit = 4 };
+// and amp / 4 right (a side for click tests), kPartial a common noise plus 0.9 x independent noise per channel
+// (correlated in part: P_S / P_M about 0.29, loudness factor about 1.13).
+enum Kind : uint32_t { kSine = 0, kDc = 1, kNoise = 2, kDual = 3, kDcSplit = 4, kPartial = 5 };
 
 using DrvP3a = void (*)(void** soundSlot);
 using DrvP3b = void (*)(void* voice, uint8_t ctx2d);
@@ -126,6 +127,17 @@ inline float NextSample(void* v, float* right) {
     ph += R<double>(v, kVStep);
     if (ph > 6.283185307179586 * 1000) ph -= 6.283185307179586 * 1000;
     W<double>(v, kVPhase, ph);
+  } else if (kind == kPartial) {
+    uint32_t st = R<uint32_t>(v, kVRng);
+    st = st * 1664525u + 1013904223u;
+    const float n1 = static_cast<float>(st >> 8) / 8388608.0f - 1.0f;
+    st = st * 1664525u + 1013904223u;
+    const float n2 = static_cast<float>(st >> 8) / 8388608.0f - 1.0f;
+    st = st * 1664525u + 1013904223u;
+    const float s = static_cast<float>(st >> 8) / 8388608.0f - 1.0f;  // the common part: broadband too
+    W<uint32_t>(v, kVRng, st);
+    l = amp * (s + 0.9f * n1);
+    rr = amp * (s + 0.9f * n2);
   } else if (kind == kNoise) {
     uint32_t st = R<uint32_t>(v, kVRng);
     st = st * 1664525u + 1013904223u;
