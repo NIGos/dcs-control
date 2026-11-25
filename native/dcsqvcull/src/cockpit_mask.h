@@ -96,6 +96,21 @@
 //     coverage alpha into an RGBA16F atlas, the class into an R8_UINT atlas (both in the shared set: same generation,
 //     held set, builder thread). Its own heartbeat (and the mask's); the commit writes its slot first; one fence
 //     Signal. Status bit 43.
+// 15. Focus-view motion and the depth plane (motion contract revision 4, docs/FOCUS_MOTION.md; [Perception]
+//     CockpitMotionFocus / CockpitMotionDepth, default 0, both need CockpitMotionExport). The same motion dispatch, at
+//     each view's own sample point inside its passes (the focus views' runs are kept like the periphery's), also copies
+//     the focus views' (2 / 3) MVs and class into their rects of the SAME atlases (periphery 0 above 1 in a column at
+//     x = 0, focus 2 and 3 to its right; MotionRectsOf), and with the plane writes every view's linear depth (w = near /
+//     d from its gProj, the viewport depth range undone; 65504 sky) into a third shared R16_FLOAT texture (u2) on the
+//     same rects. Records: header.focusView[s][v - 2], viewMask bits 2 / 3, view_flags focus / depth_plane /
+//     jitter_proven, slot_flags focus_partial / depth_plane, header_flags focus_views / depth_plane, depthFormat /
+//     depthTextureHandle; the depth block's header_flags::per_pixel_in_motion. Read only from DCS's targets (MV, DSV,
+//     stencil) before DLSSPass, every CS binding saved and put back (RunCs), no NGX call, no reference past the pass.
+//     Once CockpitMotionFocus was on, the mask's views include 2 / 3 for the rest of the payload (EffectiveViews), so
+//     its switch-off keeps the larger set (R85: the first switch-on of either key is one new generation; off and on
+//     again keep it). A set whose larger motion atlases cannot be made falls back to revision 3's (logged once, latched
+//     until either key changes: no build loop). Both off: the motion records are revision 3's byte for byte (plus
+//     revision 4 and view_flags::jitter_proven on views 0 / 1).
 // Cost: GPU timestamps around each dispatch, render-thread QPC around the capture + commit; both in the 30 s log line.
 // SEH: the capture and the commit run inside the boundary callback's / the hook's __try; a fault latches the export
 // off for this load (fixation_depth.h g_fault for the callback, g_fault here for the hook).
@@ -147,10 +162,24 @@ std::wstring g_dBlockName = cdp::block_name;  // + DCSVR_PERCEPTION_SHM_SUFFIX (
 std::atomic<bool> g_motionOn{false};
 std::atomic<bool> g_motionClass{true};
 std::wstring g_mBlockName = cmv::block_name;  // + DCSVR_PERCEPTION_SHM_SUFFIX (Configure)
+// Motion contract revision 4 (15. at the top): [Perception] CockpitMotionFocus, CockpitMotionDepth; [Dev]
+// CockpitMotionFocusAssumeJitterFree (view_flags::jitter_proven on views 2 / 3 before the live R70 T1 check on them:
+// OFXR bring-up only).
+std::atomic<bool> g_motionFocus{false};
+std::atomic<bool> g_motionPlane{false};
+std::atomic<bool> g_focusJitterAssumed{false};
+// Once CockpitMotionFocus was on (with the motion export) in this payload, the mask's views include 2 / 3
+// (EffectiveViews): its switch-off then keeps the set's layout (no new generation, 15. at the top).
+std::atomic<bool> g_focusViewsKept{false};
+// The larger motion set could not be made (VRAM): revision 3's set is used, latched until either key changes.
+std::atomic<bool> g_extFailed{false};
+std::atomic<bool> g_testFailExt{false};  // tests: the larger motion atlases fail to be made
 
 bool Wanted() { return g_on.load(std::memory_order_relaxed); }
 bool MotionWanted() { return g_on.load(std::memory_order_relaxed) && g_motionOn.load(std::memory_order_relaxed); }
 bool DepthWanted() { return g_on.load(std::memory_order_relaxed) && g_depthOn.load(std::memory_order_relaxed); }
+bool FocusMotionWanted() { return MotionWanted() && g_motionFocus.load(std::memory_order_relaxed); }
+bool PlaneWanted() { return MotionWanted() && g_motionPlane.load(std::memory_order_relaxed); }
 bool Active() { return g_on.load(std::memory_order_relaxed) && !g_stopping.load(std::memory_order_relaxed) && !g_fault.load(std::memory_order_relaxed); }
 
 // R67 reader heartbeat: idle while no reader heartbeat is fresh (render thread decides at a frame's first pass; the
@@ -204,6 +233,8 @@ std::atomic<ULONGLONG> g_lastDepthMs{0};
 std::atomic<uint64_t> g_mCommits{0}, g_mViews{0}, g_mResets{0}, g_mResetPrev{0}, g_mResetGen{0}, g_mResetSeq{0},
     g_mResetJit{0}, g_mResetCut{0}, g_mNoMv{0}, g_mNoSrv{0}, g_mBadFmt{0}, g_mPartial{0};
 std::atomic<ULONGLONG> g_lastMotionMs{0};
+// Revision 4: focus views copied, depth-plane views written, slots with focus_partial, larger sets that failed.
+std::atomic<uint64_t> g_mFocusViews{0}, g_mPlaneViews{0}, g_mFocusPartial{0}, g_mExtFails{0};
 // 0.7 three views x frame generation: while the right periphery is drawn as strip + cockpit (tvc::g_engaged), DCS's
 // MVs of that view outside the strip are the culled view's (the engine fill writes its MVs later, at the view's
 // TransparentCockpitPass, after this sample point). The commit then publishes view 1 WITHOUT view_flags::valid (and
@@ -295,6 +326,54 @@ bool MakeLayout(const uint32_t srcW[4], const uint32_t srcH[4], uint32_t views, 
   out.atlasH = hMax;
   out.views = views;
   out.div = div;
+  return true;
+}
+
+// Motion contract revision 4: the motion atlases' rects (the MV, class and depth-plane textures share them; divisor 1,
+// render resolution) for layout L. Without the focus views (focus false, or no focus view in L.views): views 0 / 1
+// left to right at y = 0, revision 3's layout. With them: periphery 0 above 1 in a column at x = 0 (as wide as the
+// wider), focus 2 and 3 side by side to its right (docs/FOCUS_MOTION.md). False: no view, or wider / taller than 16384.
+struct MotionRects {
+  uint32_t x[4] = {}, y[4] = {}, w[4] = {}, h[4] = {}, W = 0, H = 0;
+  bool focus = false;
+};
+bool MotionRectsOf(const Layout& L, bool focus, MotionRects& out) {
+  out = MotionRects{};
+  out.focus = focus && (L.views & 12u) != 0;
+  uint32_t W = 0, H = 0;
+  if (!out.focus) {
+    for (int v = 0; v < 2; ++v) {
+      if (!(L.views & (1u << v))) continue;
+      out.x[v] = W;
+      out.w[v] = L.srcW[v];
+      out.h[v] = L.srcH[v];
+      W += L.srcW[v];
+      H = std::max(H, L.srcH[v]);
+    }
+  } else {
+    uint32_t colW = 0, y = 0;
+    for (int v = 0; v < 2; ++v) {
+      if (!(L.views & (1u << v))) continue;
+      out.y[v] = y;
+      out.w[v] = L.srcW[v];
+      out.h[v] = L.srcH[v];
+      y += L.srcH[v];
+      colW = std::max(colW, L.srcW[v]);
+    }
+    W = colW;
+    H = y;
+    for (int v = 2; v < 4; ++v) {
+      if (!(L.views & (1u << v))) continue;
+      out.x[v] = W;
+      out.w[v] = L.srcW[v];
+      out.h[v] = L.srcH[v];
+      W += L.srcW[v];
+      H = std::max(H, L.srcH[v]);
+    }
+  }
+  if (!W || !H || W > 16384 || H > 16384) return false;
+  out.W = W;
+  out.H = H;
   return true;
 }
 
@@ -536,7 +615,9 @@ void main(uint3 id : SV_DispatchThreadID) {
 // R16G16_FLOAT) and, with gFlags bit 2, the class byte into the class atlas (u1, R8_UINT): bits 0-2 the stencil
 // composition (bit 0 of gFlags: a stencil SRV is bound; else 7), bit 7 sky (the depth is at infinity: from gProj with
 // gFlags bit 1, else depth == 0, DCS's reverse-Z). The same MaskParams: gSrcOrg / gSrcEnd the viewport (clipped to the
-// texture), gDstOrg / gDstSize the rect.
+// texture), gDstOrg / gDstSize the rect. Revision 4: with gFlags bit 3 (and bit 1: gProj bound) the view's linear depth
+// (the clip w in metres, as the mask's ForwardDist; 65504 for the sky, beyond, or outside the texture) into the depth
+// plane (u2, R16_FLOAT) on the same rect: MV, class and depth of a texel come from the same source texel.
 const char kMotionShader[] = R"(
 cbuffer MaskParams : register(b0) {
   int2 gSrcOrg; int2 gSrcEnd; int2 gDstOrg; int2 gDstSize;
@@ -572,6 +653,7 @@ Texture2D<uint2> gStencil : register(t1);
 Texture2D<float4> gMv : register(t2);
 RWTexture2D<float2> gOutMv : register(u0);
 RWTexture2D<uint> gOutClass : register(u1);
+RWTexture2D<float> gOutPlane : register(u2);  // revision 4: the depth plane (bound only with gFlags bit 3)
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
   if (id.x >= (uint)gDstSize.x || id.y >= (uint)gDstSize.y) return;
@@ -579,28 +661,37 @@ void main(uint3 id : SV_DispatchThreadID) {
   bool inside = p.x < gSrcEnd.x && p.y < gSrcEnd.y;
   float2 mv = inside ? gMv.Load(int3(p, 0)).xy : float2(0, 0);
   gOutMv[gDstOrg + int2(id.xy)] = mv;
-  if (gFlags & 4u) {
-    uint cls = 7u;
+  if (gFlags & 12u) {
+    // The texel's distance once, for the class's sky bit and the depth plane.
+    float w = 65504.0;
+    bool sky = true;
     if (inside) {
-      if (gFlags & 1u) cls = (LOADS(p) >> 3) & 7u;
       float d = LOADD(p);
       float dscale = gMaxD - gMinD;
       float dn = dscale != 0 ? (d - gMinD) / dscale : d;
-      bool sky;
       if (gFlags & 2u) {  // R70 live: DCS's sky is a far dome, not depth 0: sky = no finite distance below 65504 m
         float den = dn * gProj[2][3] - gProj[2][2];
-        sky = !(abs(den) > 1e-30);
-        if (!sky) {
+        if (abs(den) > 1e-30) {
           float z = (gProj[3][2] - dn * gProj[3][3]) / den;
-          float w = z * gProj[2][3] + gProj[3][3];
-          sky = !(w > 0 && w < 65504.0);
+          float ww = z * gProj[2][3] + gProj[3][3];
+          if (ww > 0 && ww < 65504.0) {
+            w = ww;
+            sky = false;
+          }
         }
       } else {
         sky = dn == 0;
       }
-      if (sky) cls |= 0x80u;
     }
-    gOutClass[gDstOrg + int2(id.xy)] = cls;
+    if (gFlags & 4u) {
+      uint cls = 7u;
+      if (inside) {
+        if (gFlags & 1u) cls = (LOADS(p) >> 3) & 7u;
+        if (sky) cls |= 0x80u;
+      }
+      gOutClass[gDstOrg + int2(id.xy)] = cls;
+    }
+    if (gFlags & 8u) gOutPlane[gDstOrg + int2(id.xy)] = w;
   }
 }
 )";
@@ -702,7 +793,12 @@ struct Res {
   ID3D11UnorderedAccessView* cuav[kSlots] = {};
   HANDLE ctexH[kSlots] = {};
   bool haveMotion = false, haveClass = false;
-  uint32_t mx[2] = {}, mw[2] = {}, mh[2] = {}, mW = 0, mH = 0;
+  uint32_t mx[4] = {}, my[4] = {}, mw[4] = {}, mh[4] = {}, mW = 0, mH = 0;  // revision 4: views 2 / 3 with haveFocus
+  // Revision 4 (15. at the top): the focus views' rects in the motion atlases, the depth plane (R16_FLOAT, its size).
+  ID3D11Texture2D* ptex[kSlots] = {};
+  ID3D11UnorderedAccessView* puav[kSlots] = {};
+  HANDLE ptexH[kSlots] = {};
+  bool haveFocus = false, havePlane = false;
   // R95: the symbology companion (symbology.h): the emission atlases (RGBA16F) and class atlases (R8_UINT), shared
   // (NT handles); private: the run-start copy of a window (RGBA16F), the accumulator (RGBA32F), the scan signatures.
   ID3D11Texture2D* stex[kSlots] = {};
@@ -920,6 +1016,11 @@ void PublishDepthHeader(bool final = false) {
   if (!final)  // R74a: slotTime is filled while the xrLocateViews hook is in
     g_dhdr.flags = (g_dhdr.flags & ~cdp::header_flags::slot_time) |
                    (ctime::g_hooked.load(std::memory_order_relaxed) ? cdp::header_flags::slot_time : 0u);
+  if (!final)  // revision 3 hint: the per-pixel depth is in the motion block's depth plane while it is published
+    g_dhdr.flags = (g_dhdr.flags & ~cdp::header_flags::per_pixel_in_motion) |
+                   ((g_dhdr.flags & cdp::header_flags::active) && g_r.havePlane && PlaneWanted()
+                        ? cdp::header_flags::per_pixel_in_motion
+                        : 0u);
   g_dhdr.magic = cdp::block_magic;
   g_dhdr.version = cdp::block_version;
   g_dhdr.structSize = sizeof(cdp::Header);
@@ -951,6 +1052,12 @@ bool OpenDepthBlock(bool existingOnly = false) {
 HANDLE g_mmap = nullptr;
 std::atomic<cmv::Header*> g_mview{nullptr};
 cmv::Header g_mhdr{};
+void ClearMotionExt() {  // revision 4: the focus records and the depth plane's handles (no set describes them)
+  for (auto& s : g_mhdr.focusView)
+    for (cmv::MotionView& m : s) m = cmv::MotionView{};
+  g_mhdr.depthFormat = 0;
+  for (auto& h : g_mhdr.depthTextureHandle) h = 0;
+}
 
 void PublishMotionHeader(bool final = false) {
   cmv::Header* v = g_mview.load();
@@ -965,6 +1072,13 @@ void PublishMotionHeader(bool final = false) {
   if (!final)  // R74a
     g_mhdr.flags = (g_mhdr.flags & ~cmv::header_flags::slot_time) |
                    (ctime::g_hooked.load(std::memory_order_relaxed) ? cmv::header_flags::slot_time : 0u);
+  if (!final) {  // revision 4: the focus records / the depth plane are written while the set has them and the key is on
+    constexpr uint32_t ext = cmv::header_flags::focus_views | cmv::header_flags::depth_plane;
+    const bool act = (g_mhdr.flags & cmv::header_flags::active) != 0;
+    g_mhdr.flags = (g_mhdr.flags & ~ext) |
+                   (act && g_r.haveFocus && FocusMotionWanted() ? cmv::header_flags::focus_views : 0u) |
+                   (act && g_r.havePlane && PlaneWanted() ? cmv::header_flags::depth_plane : 0u);
+  }
   g_mhdr.magic = cmv::block_magic;
   g_mhdr.version = cmv::block_version;
   g_mhdr.structSize = sizeof(cmv::Header);
@@ -1002,7 +1116,10 @@ void CloseMotionBlock(bool keep = false) {  // keep: R85 (CloseBlock)
       for (auto& h : g_mhdr.classTextureHandle) h = 0;
       g_mhdr.fenceHandle = 0;
       g_mhdr.classFormat = 0;
+      ClearMotionExt();
     }
+    for (auto& s : g_mhdr.focusView)  // revision 4: no slot is valid, so no focus record either
+      for (cmv::MotionView& m : s) m = cmv::MotionView{};
     for (cmv::MotionSlot& s : g_mhdr.slot) s = cmv::MotionSlot{};
     for (cmv::SlotTime& t : g_mhdr.slotTime) t = cmv::SlotTime{};  // R74a
     PublishMotionHeader(true);
@@ -1047,6 +1164,7 @@ void RetireMotionRec() {
   for (auto& h : g_mhdr.classTextureHandle) h = 0;
   g_mhdr.fenceHandle = 0;
   g_mhdr.classFormat = 0;
+  ClearMotionExt();
   for (cmv::MotionSlot& s : g_mhdr.slot) s = cmv::MotionSlot{};
   for (cmv::SlotTime& t : g_mhdr.slotTime) t = cmv::SlotTime{};
 }
@@ -1114,6 +1232,10 @@ void ReleaseAtlas() {
     RelP(g_r.ctex[i]);
     Bury(g_r.ctexH[i]);
     g_r.ctexH[i] = nullptr;
+    RelP(g_r.puav[i]);  // revision 4: the depth plane
+    RelP(g_r.ptex[i]);
+    Bury(g_r.ptexH[i]);
+    g_r.ptexH[i] = nullptr;
     RelP(g_r.suav[i]);  // R95
     RelP(g_r.stex[i]);
     Bury(g_r.stexH[i]);
@@ -1134,6 +1256,7 @@ void ReleaseAtlas() {
   g_r.sCap[0] = g_r.sCap[1] = g_r.sW = g_r.sH = 0;
   g_r.haveDepth = false;
   g_r.haveMotion = g_r.haveClass = false;
+  g_r.haveFocus = g_r.havePlane = false;  // revision 4
   g_r.haveLayout = false;
   g_r.layout = Layout{};
 }
@@ -1178,6 +1301,7 @@ void ReleaseAll() {
   for (auto& h : g_mhdr.textureHandle) h = 0;
   for (auto& h : g_mhdr.classTextureHandle) h = 0;
   g_mhdr.fenceHandle = 0;
+  ClearMotionExt();  // revision 4
   g_shdr.flags = 0;  // R95
   ClearSymSet();
 }
@@ -1298,9 +1422,10 @@ struct BuildKey {
   bool depth = false, motion = false, cls = false;
   bool sym = false;           // R95: the symbology atlases (capacities sCap: periphery, focus)
   uint32_t sCap[2] = {};
+  bool focus = false, plane = false;  // revision 4: the focus views' rects, the depth plane (with motion)
   bool Same(const BuildKey& o) const {
     return dev == o.dev && L.Same(o.L) && depth == o.depth && motion == o.motion && cls == o.cls && sym == o.sym &&
-           sCap[0] == o.sCap[0] && sCap[1] == o.sCap[1];
+           sCap[0] == o.sCap[0] && sCap[1] == o.sCap[1] && focus == o.focus && plane == o.plane;
   }
 };
 struct Built {
@@ -1320,7 +1445,12 @@ struct Built {
   ID3D11UnorderedAccessView* cuav[kSlots] = {};
   HANDLE ctexH[kSlots] = {};
   bool haveDepth = false, haveMotion = false, haveClass = false;
-  uint32_t mx[2] = {}, mw[2] = {}, mh[2] = {}, mW = 0, mH = 0;
+  uint32_t mx[4] = {}, my[4] = {}, mw[4] = {}, mh[4] = {}, mW = 0, mH = 0;
+  ID3D11Texture2D* ptex[kSlots] = {};  // revision 4: the depth plane
+  ID3D11UnorderedAccessView* puav[kSlots] = {};
+  HANDLE ptexH[kSlots] = {};
+  bool haveFocus = false, havePlane = false;
+  bool extFailed = false;  // revision 4: the larger motion atlases were asked for and could not be made (revision 3's)
   // R95: as Res's symbology objects.
   ID3D11Texture2D* stex[kSlots] = {};
   ID3D11UnorderedAccessView* suav[kSlots] = {};
@@ -1359,6 +1489,9 @@ void ReleaseBuilt(Built& b) {
     RelP(b.cuav[i]);
     RelP(b.ctex[i]);
     closeH(b.ctexH[i]);
+    RelP(b.puav[i]);  // revision 4
+    RelP(b.ptex[i]);
+    closeH(b.ptexH[i]);
     RelP(b.suav[i]);  // R95
     RelP(b.stex[i]);
     closeH(b.stexH[i]);
@@ -1413,43 +1546,61 @@ bool BuildSet(Built& b) {
     }
     b.haveDepth = true;
   }
-  // R70: the motion atlases: views 0 / 1 (when configured) at their render resolution, left to right.
+  // R70: the motion atlases: views 0 / 1 (when configured) at their render resolution, left to right. Revision 4: with
+  // key.focus the focus views' rects too (MotionRectsOf), with key.plane the depth plane (R16_FLOAT, the same size).
   if (b.key.motion) {
-    uint32_t x = 0, hMax = 0;
-    for (int v = 0; v < 2; ++v) {
-      b.mx[v] = b.mw[v] = b.mh[v] = 0;
-      if (!(L.views & (1u << v))) continue;
-      b.mx[v] = x;
-      b.mw[v] = L.srcW[v];
-      b.mh[v] = L.srcH[v];
-      x += L.srcW[v];
-      hMax = std::max(hMax, L.srcH[v]);
-    }
-    if (x > 16384 || hMax > 16384 || !x || !hMax) return false;
-    b.mW = x;
-    b.mH = hMax;
-    D3D11_TEXTURE2D_DESC md = td;
-    md.Width = x;
-    md.Height = hMax;
-    md.Format = DXGI_FORMAT_R16G16_FLOAT;
-    D3D11_TEXTURE2D_DESC cd = md;
-    cd.Format = DXGI_FORMAT_R8_UINT;
-    for (int i = 0; i < kSlots; ++i) {
-      if (FAILED(dev->CreateTexture2D(&md, nullptr, &b.mtex[i])) || !b.mtex[i]) return false;
-      ++b.made;
-      if (FAILED(dev->CreateUnorderedAccessView(b.mtex[i], nullptr, &b.muav[i])) || !b.muav[i]) return false;
-      b.mtexH[i] = SharedHandleOf(b.mtex[i]);
-      if (!b.mtexH[i]) return false;
-      if (b.key.cls) {
-        if (FAILED(dev->CreateTexture2D(&cd, nullptr, &b.ctex[i])) || !b.ctex[i]) return false;
-        ++b.made;
-        if (FAILED(dev->CreateUnorderedAccessView(b.ctex[i], nullptr, &b.cuav[i])) || !b.cuav[i]) return false;
-        b.ctexH[i] = SharedHandleOf(b.ctex[i]);
-        if (!b.ctexH[i]) return false;
+    // One attempt at a layout; false: what it made is released again (b's motion objects empty).
+    auto makeMotion = [&](bool focus, bool plane) -> bool {
+      MotionRects mr;
+      bool ok = MotionRectsOf(L, focus, mr) && !((focus || plane) && g_testFailExt.load());
+      if (ok) {
+        for (int v = 0; v < 4; ++v) b.mx[v] = mr.x[v], b.my[v] = mr.y[v], b.mw[v] = mr.w[v], b.mh[v] = mr.h[v];
+        b.mW = mr.W;
+        b.mH = mr.H;
+        D3D11_TEXTURE2D_DESC md = td;
+        md.Width = mr.W;
+        md.Height = mr.H;
+        md.Format = DXGI_FORMAT_R16G16_FLOAT;
+        D3D11_TEXTURE2D_DESC cd = md;
+        cd.Format = DXGI_FORMAT_R8_UINT;
+        D3D11_TEXTURE2D_DESC pd = md;
+        pd.Format = DXGI_FORMAT_R16_FLOAT;
+        auto one = [&](const D3D11_TEXTURE2D_DESC& d, ID3D11Texture2D*& t, ID3D11UnorderedAccessView*& u, HANDLE& h) {
+          if (FAILED(dev->CreateTexture2D(&d, nullptr, &t)) || !t) return false;
+          ++b.made;
+          if (FAILED(dev->CreateUnorderedAccessView(t, nullptr, &u)) || !u) return false;
+          h = SharedHandleOf(t);
+          return h != nullptr;
+        };
+        for (int i = 0; ok && i < kSlots; ++i) {
+          ok = one(md, b.mtex[i], b.muav[i], b.mtexH[i]) && (!b.key.cls || one(cd, b.ctex[i], b.cuav[i], b.ctexH[i])) &&
+               (!plane || one(pd, b.ptex[i], b.puav[i], b.ptexH[i]));
+        }
       }
+      if (ok) {
+        b.haveMotion = true;
+        b.haveClass = b.key.cls;
+        b.haveFocus = mr.focus;
+        b.havePlane = plane;
+        return true;
+      }
+      for (int i = 0; i < kSlots; ++i) {  // never published: the handles close now
+        RelP(b.muav[i]), RelP(b.mtex[i]), RelP(b.cuav[i]), RelP(b.ctex[i]), RelP(b.puav[i]), RelP(b.ptex[i]);
+        for (HANDLE* h : {&b.mtexH[i], &b.ctexH[i], &b.ptexH[i]}) {
+          if (*h) CloseHandle(*h);
+          *h = nullptr;
+        }
+      }
+      for (int v = 0; v < 4; ++v) b.mx[v] = b.my[v] = b.mw[v] = b.mh[v] = 0;
+      b.mW = b.mH = 0;
+      return false;
+    };
+    if (!makeMotion(b.key.focus, b.key.plane)) {
+      if (!(b.key.focus || b.key.plane)) return false;
+      // Revision 4 fallback (VRAM): revision 3's atlases under the same set; SwapIn latches it (no build loop).
+      b.extFailed = true;
+      if (!makeMotion(false, false)) return false;
     }
-    b.haveMotion = true;
-    b.haveClass = b.key.cls;
   }
   // R95: the symbology atlases (the contract's packing: the periphery windows stacked, the focus windows beside them)
   // and the private textures sized for the larger capacity.
@@ -1736,6 +1887,13 @@ void PublishSet(bool depth, bool motion, bool sym) {
     }
     g_mhdr.classFormat = g_r.haveClass ? cmv::format_r8_uint : 0u;
     g_mhdr.fenceHandle = reinterpret_cast<uint64_t>(g_r.fenceH);
+    // Revision 4: the depth plane's handles whenever the set has it (the same generation and handles while its key is
+    // off: header_flags::depth_plane says whether it is written); the focus records describe nothing yet.
+    ClearMotionExt();
+    if (g_r.havePlane) {
+      g_mhdr.depthFormat = cmv::format_r16_float;
+      for (int i = 0; i < kSlots; ++i) g_mhdr.depthTextureHandle[i] = reinterpret_cast<uint64_t>(g_r.ptexH[i]);
+    }
     for (cmv::MotionSlot& s : g_mhdr.slot) s = cmv::MotionSlot{};
     PublishMotionHeader();
   }
@@ -1769,7 +1927,8 @@ struct Frame {
   bool motion = false;  // R70: this frame writes the motion companion
   bool sym = false;     // R95: this frame writes the symbology companion
   uint32_t motionMask = 0;
-  cmv::MotionView mview[2] = {};
+  cmv::MotionView mview[4] = {};  // revision 4: 2 / 3 the focus views
+  bool focus = false, plane = false;  // revision 4: this frame copies the focus views' MVs / writes the depth plane
   bool camOk = false;   // R70: view 0's DCS camera (gViewInv: position row 3, forward row 2), for the cut check
   double camC[3] = {}, camF[3] = {};
   bool camOOk = false;  // R71: view 0's gOrigin (DCS's floating render origin), for the rebase check
@@ -1803,8 +1962,8 @@ struct MotionPrev {
   int64_t displayTime = 0;
   uint32_t gen = 0;
   uint64_t cuts = 0;
-  float jit[2][2] = {};
-  bool jitOk[2] = {};
+  float jit[4][2] = {};  // revision 4: the focus views' too
+  bool jitOk[4] = {};
   bool camOk = false;
   double camC[3] = {}, camF[3] = {};
   bool camOOk = false;  // R71
@@ -1821,9 +1980,11 @@ bool g_hasPend[4] = {};
 ID3D11RenderTargetView* g_pendMv[4] = {};  // R70: the pending run's MV target (reference)
 
 // The configured views the previous frame had (two HMD views: the periphery pair only).
+// Revision 4: once CockpitMotionFocus was on, the focus views too (their runs give the focus MVs; 15. at the top).
 uint32_t EffectiveViews() {
   const int n = g_s.lastHmdCount;
-  return g_views.load(std::memory_order_relaxed) & (n == 4 ? 15u : n == 2 ? 3u : 0u);
+  const uint32_t views = g_views.load(std::memory_order_relaxed) | (g_focusViewsKept.load(std::memory_order_relaxed) ? 12u : 0u);
+  return views & (n == 4 ? 15u : n == 2 ? 3u : 0u);
 }
 
 bool HasPending() { return g_hasPend[0] || g_hasPend[1] || g_hasPend[2] || g_hasPend[3]; }
@@ -1840,7 +2001,8 @@ void DropPending() {
 
 // CloseRun: HMD view idx's G-buffer run (hmdCount HMD views in the previous frame).
 void NoteRun(const Run& r, int idx, int hmdCount, ID3D11RenderTargetView* mvRtv = nullptr) {
-  if (g_idle || !Active() || idx < 0 || idx > 3 || !(g_views.load(std::memory_order_relaxed) & (1u << idx))) return;
+  const uint32_t cfgViews = g_views.load(std::memory_order_relaxed) | (g_focusViewsKept.load(std::memory_order_relaxed) ? 12u : 0u);
+  if (g_idle || !Active() || idx < 0 || idx > 3 || !(cfgViews & (1u << idx))) return;
   if ((hmdCount != 2 && hmdCount != 4) || idx >= hmdCount || g_hmdOffset.load() != 0) {
     g_skipIdentity++;
     return;
@@ -1850,8 +2012,8 @@ void NoteRun(const Run& r, int idx, int hmdCount, ID3D11RenderTargetView* mvRtv 
   if (r.dsv) r.dsv->AddRef();
   if (r.cb) r.cb->AddRef();
   g_hasPend[idx] = true;
-  RelP(g_pendMv[idx]);  // R70: the run's MV target, for the motion copy of views 0 / 1
-  if (mvRtv && idx < 2 && MotionWanted()) {
+  RelP(g_pendMv[idx]);  // R70: the run's MV target, for the motion copy of views 0 / 1 (revision 4: 2 / 3 too)
+  if (mvRtv && (idx < 2 || FocusMotionWanted()) && MotionWanted()) {
     g_pendMv[idx] = mvRtv;
     mvRtv->AddRef();
   }
@@ -1896,6 +2058,8 @@ bool BeginFrame() {
   g_f.wantMask = EffectiveViews();
   g_f.depth = !g_dIdle && DepthWanted() && g_r.haveDepth && g_dview.load() != nullptr;  // R69
   g_f.motion = !g_mIdle && MotionWanted() && g_r.haveMotion && g_mview.load() != nullptr;  // R70
+  g_f.focus = g_f.motion && g_r.haveFocus && FocusMotionWanted();  // revision 4
+  g_f.plane = g_f.motion && g_r.havePlane && PlaneWanted();
   g_f.sym = !g_sIdle && SymWanted() && g_r.haveSym && g_sview.load() != nullptr;  // R95
   if (const int note = g_symVramNote.exchange(0)) {  // R97 (Dev): DXGI's local usage when the export turned on / off
     const int64_t u = LocalUsageBytes(g_r.dev);
@@ -2013,6 +2177,8 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
   if (g_held || !g_r.haveLayout || g_r.layout.div != cfgDiv || g_r.layout.views != views || g_r.layout.srcW[idx] != vw ||
       g_r.layout.srcH[idx] != vh || (DepthWanted() && g_dview.load() != nullptr && !g_r.haveDepth) ||
       (MotionWanted() && g_mview.load() != nullptr && (views & 3u) && !g_r.haveMotion) ||
+      (g_mview.load() != nullptr && (views & 3u) && !g_extFailed.load(std::memory_order_relaxed) &&  // revision 4
+       ((FocusMotionWanted() && (views & 12u) && !g_r.haveFocus) || (PlaneWanted() && !g_r.havePlane))) ||
       (SymWanted() && g_sview.load() != nullptr &&
        (!g_r.haveSym || g_r.sCap[0] != sym::g_capPeri.load(std::memory_order_relaxed) ||
         g_r.sCap[1] != sym::g_capFocus.load(std::memory_order_relaxed)))) {  // R95 (capacities: tests)
@@ -2086,10 +2252,12 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
   if (g_f.depth && !r.cb) g_dNoCb++;
   RunCs(r, g_r.params, g_r.cs[r.variant + (depthView ? 4 : 0)], srvs, g_r.uav[g_f.slot], (L.w[idx] + 7) / 8,
         (L.h[idx] + 7) / 8, depthView ? g_r.duav[g_f.slot] : nullptr);
-  // R70: the motion copy of a periphery view (render resolution, verbatim) and its class byte.
+  // R70: the motion copy of a periphery view (render resolution, verbatim) and its class byte. Revision 4: of a focus
+  // view too (its own rect), and the view's depth into the plane (u2) when gProj is bound.
   bool motionView = false;
   bool motionRgba = false;
-  if (g_f.motion && idx < 2 && g_r.muav[g_f.slot] && g_r.mw[idx] == vw && g_r.mh[idx] == vh) {
+  bool planeView = false;
+  if (g_f.motion && (idx < 2 || g_f.focus) && g_r.muav[g_f.slot] && g_r.mw[idx] == vw && g_r.mh[idx] == vh) {
     UINT tw = 0, th = 0;
     ID3D11ShaderResourceView* mvSrv = mvRtv ? MvSrvOf(mvRtv, tw, th, motionRgba) : nullptr;
     if (!mvRtv) {
@@ -2103,7 +2271,7 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
       if (SUCCEEDED(c->Map(g_r.params, 0, D3D11_MAP_WRITE_DISCARD, 0, &mm))) {
         MaskParams q = p;
         q.dstOrg[0] = static_cast<int32_t>(g_r.mx[idx]);
-        q.dstOrg[1] = 0;
+        q.dstOrg[1] = static_cast<int32_t>(g_r.my[idx]);  // revision 4 (0 in revision 3's layout)
         q.dstSize[0] = static_cast<int32_t>(vw);
         q.dstSize[1] = static_cast<int32_t>(vh);
         q.srcEnd[0] = static_cast<int32_t>(std::min({vx + vw, r.texW, tw}));
@@ -2111,11 +2279,12 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
         q.div = 1;
         q.apron = 0;
         const bool cls = g_r.haveClass && g_r.cuav[g_f.slot] != nullptr;
-        q.flags = (se->stencil ? 1u : 0u) | (r.cb ? 2u : 0u) | (cls ? 4u : 0u);
+        planeView = g_f.plane && r.cb != nullptr && g_r.puav[g_f.slot] != nullptr;  // revision 4: needs gProj
+        q.flags = (se->stencil ? 1u : 0u) | (r.cb ? 2u : 0u) | (cls ? 4u : 0u) | (planeView ? 8u : 0u);
         memcpy(mm.pData, &q, sizeof(q));
         c->Unmap(g_r.params, 0);
         RunCs(r, g_r.params, g_r.mcs[r.variant], srvs, g_r.muav[g_f.slot], (vw + 7) / 8, (vh + 7) / 8,
-              cls ? g_r.cuav[g_f.slot] : nullptr, mvSrv);
+              cls ? g_r.cuav[g_f.slot] : nullptr, mvSrv, planeView ? g_r.puav[g_f.slot] : nullptr);
         motionView = true;
       }
     }
@@ -2191,10 +2360,15 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
   }
   if (motionView) {  // R70: the motion view record (the jitters are added at the commit)
     cmv::MotionView mrec{};
+    // Revision 4: focus (2 / 3), depth_plane (written this frame), jitter_proven (views 0 / 1 with the R70 T1 proof;
+    // 2 / 3 only with [Dev] CockpitMotionFocusAssumeJitterFree until the same check passed live on them).
+    const bool proven = idx < 2 ? kMvJitterFree : g_focusJitterAssumed.load(std::memory_order_relaxed);
     mrec.flags = cmv::view_flags::valid | (point == 0 ? cmv::view_flags::after_water : 0u) |
-              (motionRgba ? cmv::view_flags::from_rgba16f : 0u) | (se->stencil ? 0u : cmv::view_flags::no_stencil);
+              (motionRgba ? cmv::view_flags::from_rgba16f : 0u) | (se->stencil ? 0u : cmv::view_flags::no_stencil) |
+              (idx >= 2 ? cmv::view_flags::focus : 0u) | (planeView ? cmv::view_flags::depth_plane : 0u) |
+              (proven ? cmv::view_flags::jitter_proven : 0u);
     mrec.x = g_r.mx[idx];
-    mrec.y = 0;
+    mrec.y = g_r.my[idx];
     mrec.w = vw;
     mrec.h = vh;
     mrec.srcW = vw;
@@ -2206,6 +2380,8 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
     g_f.mview[idx] = mrec;
     g_f.motionMask |= 1u << idx;
     g_mViews++;
+    if (idx >= 2) g_mFocusViews++;
+    if (planeView) g_mPlaneViews++;
   }
   if (idx == 0 && r.cpuProj) {  // R70: view 0's DCS camera for the cut check (gViewInv row 3 position, row 2 forward)
     g_f.camOk = true;
@@ -2341,6 +2517,13 @@ void SwapIn(Built& b) {
         g_r.ctexH[i] = b.ctexH[i];
         ctx->ClearUnorderedAccessViewUint(g_r.cuav[i], zu);
       }
+      if (b.havePlane) {  // revision 4: the depth plane (sky until written)
+        const float sky[4] = {cmv::sky_depth_m, 0, 0, 0};
+        g_r.ptex[i] = b.ptex[i];
+        g_r.puav[i] = b.puav[i];
+        g_r.ptexH[i] = b.ptexH[i];
+        ctx->ClearUnorderedAccessViewFloat(g_r.puav[i], sky);
+      }
     }
     if (b.haveSym) {  // R95
       g_r.stex[i] = b.stex[i];
@@ -2365,13 +2548,23 @@ void SwapIn(Built& b) {
   g_r.haveDepth = b.haveDepth;
   g_r.haveMotion = b.haveMotion;
   g_r.haveClass = b.haveClass;
-  for (int v = 0; v < 2; ++v) {
+  g_r.haveFocus = b.haveFocus;  // revision 4
+  g_r.havePlane = b.havePlane;
+  for (int v = 0; v < 4; ++v) {
     g_r.mx[v] = b.mx[v];
+    g_r.my[v] = b.my[v];
     g_r.mw[v] = b.mw[v];
     g_r.mh[v] = b.mh[v];
   }
   g_r.mW = b.mW;
   g_r.mH = b.mH;
+  if (b.extFailed) {  // revision 4: latched until either key changes (ConfigureMotion); no build loop
+    g_extFailed = true;
+    if (g_mExtFails++ == 0)
+      Log("cockpit mask: the larger motion atlases (focus views %s, depth plane %s) could not be made; revision 3's "
+          "motion set is used (views 0 / 1, no depth plane) until CockpitMotionFocus / CockpitMotionDepth change "
+          "(logged once)", b.key.focus ? "on" : "off", b.key.plane ? "on" : "off");
+  }
   RelP(b.key.dev);
   b = Built{};  // the objects are g_r's now
   g_r.layout = L;
@@ -2401,10 +2594,17 @@ void SwapIn(Built& b) {
       L.w[2], L.h[2], L.dv[2], L.w[3], L.h[3], L.dv[3], g_gen,
       g_r.fenceH ? "shared" : "none", g_r.relH ? "shared" : "none",
       g_r.haveDepth ? "; depth companion R16G16_FLOAT atlas of the same size" : "");
-  if (g_r.haveMotion)
+  if (g_r.haveMotion && !g_r.haveFocus && !g_r.havePlane)
     Log("cockpit mask: motion companion atlas %ux%u R16G16_FLOAT (views 0 / 1 at render resolution: %ux%u at %u, %ux%u at %u)%s",
         g_r.mW, g_r.mH, g_r.mw[0], g_r.mh[0], g_r.mx[0], g_r.mw[1], g_r.mh[1], g_r.mx[1],
         g_r.haveClass ? " + class atlas R8_UINT" : "");
+  else if (g_r.haveMotion)  // revision 4
+    Log("cockpit mask: motion companion atlas %ux%u R16G16_FLOAT%s%s (render resolution: view 0 %ux%u at %u,%u, 1 "
+        "%ux%u at %u,%u, 2 %ux%u at %u,%u, 3 %ux%u at %u,%u); %.1f MB per slot, %d slots",
+        g_r.mW, g_r.mH, g_r.haveClass ? " + class R8_UINT" : "", g_r.havePlane ? " + depth plane R16_FLOAT" : "",
+        g_r.mw[0], g_r.mh[0], g_r.mx[0], g_r.my[0], g_r.mw[1], g_r.mh[1], g_r.mx[1], g_r.my[1], g_r.mw[2], g_r.mh[2],
+        g_r.mx[2], g_r.my[2], g_r.mw[3], g_r.mh[3], g_r.mx[3], g_r.my[3],
+        double(g_r.mW) * g_r.mH * (4.0 + (g_r.haveClass ? 1.0 : 0.0) + (g_r.havePlane ? 2.0 : 0.0)) / 1e6, kSlots);
   if (g_r.haveSym) {  // R95; R97: its VRAM (R96 measured ON - OFF +591 ... +804 MB for us and OFXR together)
     const sym::Vram vr = sym::VramOf(g_r.sW, g_r.sH, g_r.sCap[0], g_r.sCap[1]);
     Log("cockpit mask: symbology companion atlas %ux%u RGBA16F + class R8_UINT (capacities periphery %u, focus %u); "
@@ -2439,6 +2639,10 @@ void Relayout() {
     return;  // a configured view not seen yet: retried at the next commit
   const bool wantDepth = DepthWanted() && g_dview.load() != nullptr;  // R69
   const bool wantMotion = MotionWanted() && g_mview.load() != nullptr && (L.views & 3u);  // R70
+  // Revision 4: the focus rects / the depth plane (unless the larger set failed: 15. at the top).
+  const bool extOk = wantMotion && !g_extFailed.load(std::memory_order_relaxed);
+  const bool wantFocus = extOk && FocusMotionWanted() && (L.views & 12u);
+  const bool wantPlane = extOk && PlaneWanted();
   const bool wantSym = SymWanted() && g_sview.load() != nullptr;  // R95
   const uint32_t capP = sym::g_capPeri.load(), capF = sym::g_capFocus.load();
   // R85: the set as it is (held or not) when it has this layout and every companion wanted now; a companion it has
@@ -2447,7 +2651,8 @@ void Relayout() {
   const bool clsChange = wantMotion && g_r.haveMotion && g_r.haveClass != cls;
   const bool capChange = wantSym && g_r.haveSym && (g_r.sCap[0] != capP || g_r.sCap[1] != capF);  // R95
   if (g_r.haveLayout && g_r.layout.Same(L) && (!wantDepth || g_r.haveDepth) && (!wantMotion || g_r.haveMotion) &&
-      (!wantSym || g_r.haveSym) && !clsChange && !capChange) {
+      (!wantFocus || g_r.haveFocus) && (!wantPlane || g_r.havePlane) && (!wantSym || g_r.haveSym) && !clsChange &&
+      !capChange) {
     DiscardBuild();  // R91: back to the set's layout before a requested one was swapped in
     if (g_held) {
       const bool map = g_heldForMap;  // R88: flight frames again with the held layout
@@ -2484,6 +2689,10 @@ void Relayout() {
   }
   BuildKey key{s.dev, L, wantDepth, wantMotion, wantMotion && cls};
   if (wantSym) key.sym = true, key.sCap[0] = capP, key.sCap[1] = capF;  // R95
+  // Revision 4: what is wanted, and what the set has now although its key is off (the larger set stays larger: an off
+  // key never costs a generation by itself, 15. at the top).
+  key.focus = wantFocus || (extOk && g_r.haveFocus && (L.views & 12u));
+  key.plane = wantPlane || (extOk && g_r.havePlane);
   Built b;
   if (g_asyncBuild.load(std::memory_order_relaxed) && g_bRunning.load()) {
     // R91: the builder makes the set; swapped in at the commit that finds it made (Capture skips the views meanwhile:
@@ -3578,6 +3787,7 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
   ms = cmv::MotionSlot{};
   if (!f.motionMask) {  // nothing copied this frame: the slot describes nothing; the next one starts afresh
     g_mhdr.slotTime[f.slot] = cmv::SlotTime{};  // R74a
+    for (auto& fv : g_mhdr.focusView[f.slot]) fv = cmv::MotionView{};  // revision 4
     PublishMotionHeader();
     g_mPrev.valid = false;
     return false;
@@ -3592,9 +3802,10 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
   const bool rCut = g_mPrev.valid && (g_mPrev.cuts != cuts || CameraCut(g_mPrev, f, &rebased));
   if (rebased && g_mPrev.cuts == cuts) g_mRebaseNoCut++;  // R71
   bool rJit = false;
-  float jitCur[2][2] = {};
-  bool jitCurOk[2] = {};
-  for (int v = 0; v < 2; ++v) {
+  float jitCur[4][2] = {};
+  bool jitCurOk[4] = {};
+  for (auto& fv : g_mhdr.focusView[f.slot]) fv = cmv::MotionView{};  // revision 4: this slot's focus records
+  for (int v = 0; v < 4; ++v) {
     if (!(f.motionMask & (1u << v))) continue;
     cmv::MotionView m = f.mview[v];
     jitCur[v][0] = jitCur[v][1] = NAN;
@@ -3607,6 +3818,10 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
     if (g_mPrev.valid && g_mPrev.jitOk[v]) {
       m.jitterPrevPx[0] = g_mPrev.jit[v][0];
       m.jitterPrevPx[1] = g_mPrev.jit[v][1];
+    }
+    if (v >= 2) {  // revision 4: a focus view's unknown jitter does not reset the pair (its own jitter_proven gates it)
+      g_mhdr.focusView[f.slot][v - 2] = m;
+      continue;
     }
     if (!jitCurOk[v] || !(g_mPrev.valid && g_mPrev.jitOk[v])) rJit = true;
     ms.view[v] = m;
@@ -3627,10 +3842,17 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
   ms.prevDisplayTime = g_mPrev.valid ? g_mPrev.displayTime : 0;
   ms.viewMask = mvMask;
   const uint32_t want = f.wantMask & 3u;
+  // Revision 4: a focus view the mask slot has (this frame's mask views) without MVs here; any view with its depth.
+  const bool focusPartial = f.focus && (f.viewMask & 12u & ~mvMask) != 0;
+  bool planeAny = false;
+  for (int v = 0; v < 4; ++v)
+    if ((mvMask & (1u << v)) && (f.mview[v].flags & cmv::view_flags::depth_plane)) planeAny = true;
   ms.flags = cmv::slot_flags::valid | (paired && displayTime ? cmv::slot_flags::display_time : 0u) |
              (paired ? 0u : cmv::slot_flags::late_commit) | ((mvMask & want) != want ? cmv::slot_flags::partial : 0u) |
              (reset ? cmv::slot_flags::reset : 0u) | (kMvIncludesJitter ? cmv::slot_flags::includes_jitter : 0u) |
-             (kMvJitterFree ? cmv::slot_flags::jitter_free : 0u) | (kMvSkyIsInfinity ? cmv::slot_flags::sky_is_infinity : 0u);
+             (kMvJitterFree ? cmv::slot_flags::jitter_free : 0u) | (kMvSkyIsInfinity ? cmv::slot_flags::sky_is_infinity : 0u) |
+             (focusPartial ? cmv::slot_flags::focus_partial : 0u) | (planeAny ? cmv::slot_flags::depth_plane : 0u);
+  if (focusPartial) g_mFocusPartial++;
   g_mhdr.slotTime[f.slot] = ctime::ToMotion(ctime::g_rec);  // R74a: this frame's content time (seq == this seq)
   g_mhdr.newestSeq = seq;
   g_mhdr.newestSlot = static_cast<uint32_t>(f.slot);
@@ -3654,11 +3876,11 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
   np.camOk = f.camOk;
   np.camOOk = f.camOOk;  // R71
   for (int k = 0; k < 3; ++k) np.camC[k] = f.camC[k], np.camF[k] = f.camF[k], np.camO[k] = f.camO[k];
-  for (int v = 0; v < 2; ++v) {
+  for (int v = 0; v < 4; ++v) {
     np.jitOk[v] = jitCurOk[v];
     np.jit[v][0] = jitCurOk[v] ? jitCur[v][0] : 0.0f;
     np.jit[v][1] = jitCurOk[v] ? jitCur[v][1] : 0.0f;
-    if (poses && static_cast<uint32_t>(v) < xr->viewCount) {
+    if (v < 2 && poses && static_cast<uint32_t>(v) < xr->viewCount) {
       np.poseOk[v] = true;
       memcpy(np.q[v], xr->q[v], sizeof(np.q[v]));
       memcpy(np.p[v], xr->p[v], sizeof(np.p[v]));
@@ -4123,8 +4345,23 @@ void ConfigureDepth(bool on, int dump = 0) {
 
 // R70: [Perception] CockpitMotionExport / CockpitMotionClass / CockpitMotionDump (before Configure; a change of the
 // export reinstalls the mask export through fixation_depth.h's Tick: MotionWanted() is part of its install key).
-void ConfigureMotion(bool on, bool cls = true, int dump = 0) {
+// Revision 4: focus / plane = [Perception] CockpitMotionFocus / CockpitMotionDepth, assumeJitterFree = [Dev]
+// CockpitMotionFocusAssumeJitterFree (all default 0). A change of either key retries a larger set that failed; no
+// reinstall: the next commit relays out when the set lacks what is wanted (Capture / Relayout).
+void ConfigureMotion(bool on, bool cls = true, int dump = 0, bool focus = false, bool plane = false,
+                     bool assumeJitterFree = false) {
   static int lastDump = 0;
+  if (focus != g_motionFocus.load() || plane != g_motionPlane.load() || assumeJitterFree != g_focusJitterAssumed.load()) {
+    if (g_extFailed.exchange(false)) Log("cockpit mask: the larger motion set is tried again (a key changed)");
+    if (on && (focus || plane || g_motionFocus.load() || g_motionPlane.load()))
+      Log("cockpit mask: motion contract revision 4: CockpitMotionFocus=%d (the focus views' MVs and class), "
+          "CockpitMotionDepth=%d (the per-pixel depth plane), [Dev] CockpitMotionFocusAssumeJitterFree=%d",
+          focus ? 1 : 0, plane ? 1 : 0, assumeJitterFree ? 1 : 0);
+  }
+  if (on && focus) g_focusViewsKept = true;  // the mask's views include 2 / 3 from now on (15. at the top)
+  g_focusJitterAssumed = assumeJitterFree;
+  g_motionPlane = plane;
+  g_motionFocus = focus;
   if (dump != lastDump) {
     lastDump = dump;
     if (on && dump > 0) {
@@ -4278,9 +4515,10 @@ void Install() {
     Log("cockpit mask: depth companion on (%ls, R16G16_FLOAT metres, contract revision %u); its reader heartbeat %s",
         g_dBlockName.c_str(), cdp::contract_revision, g_dIdle ? "absent: no depth until a reader stores one" : "fresh");
   if (g_mview.load())
-    Log("cockpit mask: motion companion on (%ls, DCS's MVs of views 0 / 1 at render resolution%s, contract revision %u; "
-        "jitter_free %s, sky_is_infinity %s); its reader heartbeat %s",
-        g_mBlockName.c_str(), g_motionClass.load() ? " + class byte" : "", cmv::contract_revision,
+    Log("cockpit mask: motion companion on (%ls, DCS's MVs of views 0 / 1%s at render resolution%s%s, contract revision "
+        "%u; jitter_free %s, sky_is_infinity %s); its reader heartbeat %s",
+        g_mBlockName.c_str(), g_motionFocus.load() ? " and the focus views 2 / 3" : "",
+        g_motionClass.load() ? " + class byte" : "", g_motionPlane.load() ? " + depth plane" : "", cmv::contract_revision,
         kMvJitterFree ? "set (R70 T1)" : "not set (unproven)", kMvSkyIsInfinity ? "set (R70 T2)" : "not set (unproven)",
         g_mIdle ? "absent: no copy until a reader stores one" : "fresh");
   if (g_sview.load())  // R95
@@ -4679,6 +4917,11 @@ void LogStats() {
         u(g_mCommits), u(g_mViews), u(g_mPartial), u(g_mResets), u(g_mResetPrev), u(g_mResetGen), u(g_mResetSeq),
         u(g_mResetCut), u(g_mResetJit), u(g_mRebaseNoCut.load()), u(g_mNoMv), u(g_mNoSrv), u(g_mBadFmt), u(fixdepth::g_mvAmbiguous), u(g_mTvViews),
         g_mIdleA.load() ? "idle" : "active", age, u(g_mToIdle), u(g_mToActive));
+    if (g_motionFocus.load() || g_motionPlane.load() || g_mFocusViews.load() || g_mPlaneViews.load())
+      Log("cockpit mask: motion revision 4: focus views copied %llu (focus_partial slots %llu), depth-plane views %llu, "
+          "larger set failed %llu%s",
+          u(g_mFocusViews), u(g_mFocusPartial), u(g_mPlaneViews), u(g_mExtFails),
+          g_extFailed.load() ? " (revision 3's set in use)" : "");
   }
 }
 

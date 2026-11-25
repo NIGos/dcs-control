@@ -12,6 +12,7 @@ D3D	FxApplySkipLogSec	tuning of FxApplySkip (log period)
 D3D	FxApplySkipVerify	tuning of FxApplySkip (test only)
 D3D	FxApplySkipVerifyEvery	tuning of FxApplySkip (test only)
 D3D	ProxyGuard	safety guard (R146), default 1 ships; 0 only for an A/B in a dev ini
+Dev	CockpitMotionFocusAssumeJitterFree	developer key (motion contract revision 4: jitter_proven on the focus views before their live jitter check; OFXR bring-up only)
 Dev	SymbologyPublishAlways	developer key (R97: publish without the reader's heartbeat)
 DLSS	Instrument	measure only (R130 read-only DLSS lifetime counters, dev ini)
 DLSS	ReleaseAfterEvals	tuning of ReleaseIdleSets

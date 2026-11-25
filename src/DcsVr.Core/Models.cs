@@ -347,6 +347,12 @@ public sealed record VrProfile
     public bool DiagnosticFrameRecords { get; init; }
     /// <summary>The engine module's frame ring around each ini reload ([Log] ReloadFrameTimes, R142), for live-reload hitch checks. Profile only, off.</summary>
     public bool DiagnosticReloadFrameTimes { get; init; }
+    /// <summary>Framegen research (motion study Q1, docs/FOCUS_MOTION.md): the engine module also exports the focus views'
+    /// own motion vectors and class ([Perception] CockpitMotionFocus, with Framegen). Profile only, off until a live A/B.</summary>
+    public bool FgFocusMotionVectors { get; init; }
+    /// <summary>Framegen research (motion study Q2, docs/FOCUS_MOTION.md): the engine module also exports every view's
+    /// per-pixel depth ([Perception] CockpitMotionDepth, with Framegen). Profile only, off until a live A/B.</summary>
+    public bool FgPerPixelDepth { get; init; }
     /// <summary>OFXR's always-on FPS counter; the diagnostic panel (its own key) shows FPS on demand.</summary>
     public bool ShowOverlay { get; init; }
     public FpsLimitMode FpsLimit { get; init; }

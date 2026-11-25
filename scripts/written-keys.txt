@@ -182,8 +182,10 @@ DcsQvCull	Perception	CockpitMaskNearM
 DcsQvCull	Perception	CockpitMaskOverlay
 DcsQvCull	Perception	CockpitMaskViews
 DcsQvCull	Perception	CockpitMotionClass
+DcsQvCull	Perception	CockpitMotionDepth
 DcsQvCull	Perception	CockpitMotionDump
 DcsQvCull	Perception	CockpitMotionExport
+DcsQvCull	Perception	CockpitMotionFocus
 DcsQvCull	Perception	CockpitTrueIpd
 DcsQvCull	Perception	CockpitTrueIpdForward
 DcsQvCull	Perception	CockpitTrueIpdHelmet
