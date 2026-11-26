@@ -25,7 +25,8 @@ struct Loc {
 inline constexpr uint32_t kTimestamp = 0x6acb8057u;
 inline constexpr uint32_t kSizeOfImage = 0xd0c4000u;
 
-enum Id : uint8_t { kP3a, kP3b, kP4, kP5, kPanner, kVoiceRender, kMix, kCount };
+enum Id : uint8_t { kP3a, kP3b, kP4, kP5, kPanner, kVoiceRender, kMix, kSpaceGain, kSpaceOrient, kCount };
+inline constexpr int kRequired = 7;  // rows before it must resolve; the rest are optional (cockpit space)
 
 inline constexpr Mask kMasks[] = {
     {47, 4}, {53, 4}, {59, 4}, {66, 4}, {71, 4}, {76, 4}, {81, 4}, {93, 4}, {102, 4}, {108, 4}, {116, 4}, {123, 4},
@@ -49,7 +50,13 @@ inline constexpr Mask kMasks[] = {
     {661, 4}, {688, 4}, {876, 4}, {925, 4}, {957, 4}, {965, 4}, {974, 4}, {1012, 4}, {1029, 4}, {1036, 4},
     {1043, 4}, {1051, 4}, {1059, 4}, {1066, 4}, {1079, 4}, {1087, 4}, {1094, 4}, {1102, 4}, {1110, 4}, {1117, 4},
     {1127, 4}, {40, 4}, {87, 4}, {124, 4}, {138, 4}, {149, 4}, {208, 4}, {223, 4}, {261, 4}, {269, 4}, {443, 4},
-    {541, 4}, {703, 4},
+    {541, 4}, {703, 4}, {39, 4}, {47, 4}, {104, 4}, {110, 4}, {126, 4}, {232, 4}, {263, 4}, {284, 4}, {301, 4},
+    {316, 4}, {330, 4}, {345, 4}, {382, 4}, {391, 4}, {421, 4}, {461, 4}, {480, 4}, {626, 4}, {632, 4}, {664, 4},
+    {682, 4}, {687, 4}, {755, 4}, {70, 4}, {153, 4}, {173, 4}, {248, 4}, {270, 4}, {280, 4}, {340, 4}, {351, 4},
+    {394, 4}, {469, 4}, {531, 4}, {539, 4}, {550, 4}, {594, 4}, {600, 4}, {642, 4}, {660, 4}, {665, 4}, {722, 4},
+    {735, 4}, {772, 4}, {786, 4}, {791, 4}, {850, 4}, {870, 4}, {878, 4}, {889, 4}, {953, 4}, {971, 4}, {1001, 4},
+    {1021, 4}, {1062, 4}, {1117, 4}, {1129, 4}, {1140, 4}, {1154, 4}, {1183, 4}, {1210, 4}, {1224, 4}, {1433, 4},
+    {1450, 4}, {1475, 4}, {1596, 4}, {1620, 4}, {1642, 4}, {1675, 4},
 };
 
 inline constexpr Loc kLocs[] = {
@@ -74,6 +81,12 @@ inline constexpr Loc kLocs[] = {
     // void mix(Renderer*, float* out, uint32 frames)
     {"Mix", 0x1b180u, "48 89 5C 24 10 48 89 6C 24 18 56 57 41 54 41 56 41 57 48 83 EC 20 48 8B F1 4C 8D 79 20", 0, 0, 730u,
      0x1a076c2886d7eb13ull, 218u, 12u},
+    // sound update: the context's use-cockpit-gain flag, the host's allow flag, the sdef's cockpit_gain
+    {"SpaceGain", 0x7010u, "80 BF E1 00 00 00 00 74 ?? 80 BB A8 01 00 00 00 74 ?? 48 8B 43 50 48 85 C0 74 ?? 48 8B 40 18 8B 88 A0 00 00 00 89 8B B0 01 00 00", 0, -160, 842u,
+     0x4a6b493b244c47d3ull, 230u, 23u},
+    // sound update: the source's orientation in the listener frame (sound+0xe8)
+    {"SpaceOrient", 0x735du, "48 8D 93 80 00 00 00 4D 8D 47 78 48 8D 4F 18 E8", 0, -157, 1744u,
+     0x9dfe798754c9c08bull, 253u, 46u},
 };
 static_assert(sizeof(kLocs) / sizeof(kLocs[0]) == kCount, "one row per id");
 

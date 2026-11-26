@@ -148,6 +148,14 @@ extern "C" __declspec(dllexport) void DcsQvPayload_GLoad(float gx, float gy, flo
 // first (loader export DcsQvCull_GLoadWanted) and returns before any Export call or allocation when not.
 extern "C" __declspec(dllexport) int DcsQvPayload_GLoadWanted() { return vrfx::g_wantGv.load() ? 1 : 0; }
 
+// Cockpit space (docs/COCKPIT_SPACE.md 8.3), through the loader's DcsQvCull_Audio* Lua callbacks: whether the hook
+// should ask DCS at all (3D audio and the space on), the player's unit type, and the canopy / camera state.
+extern "C" __declspec(dllexport) int DcsQvPayload_AudioWanted() { return audio::g_luaWanted.load() ? 1 : 0; }
+extern "C" __declspec(dllexport) void DcsQvPayload_AudioAircraft(const char* typeName) { audio::LuaAircraft(typeName); }
+extern "C" __declspec(dllexport) void DcsQvPayload_AudioState(double canopy, int canopySource, int inside) {
+  audio::LuaState(canopy, canopySource, inside);
+}
+
 // After Stop the loader keeps this payload's IAT and vtable hooks patched
 // until the next generation repoints each slot (one at a time, from its
 // worker) or RestoreStale puts the original back. Hooks that keep per-thread

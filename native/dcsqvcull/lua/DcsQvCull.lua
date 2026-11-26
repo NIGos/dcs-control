@@ -41,52 +41,123 @@ if ok then
   local gload = native('DcsQvCull_GLoad')
   -- R90: false while the payload does not use the samples ([VrFx] GVision off); nil from an older loader.
   local gloadWanted = native('DcsQvCull_GLoadWanted')
-  if (simStop or loadBegin or slotChange or gload) and DCS and type(DCS.setUserCallbacks) == 'function' then
+  -- Cockpit space (docs/COCKPIT_SPACE.md 8.3): the player's unit type, the canopy and the camera check for the
+  -- payload's 3D audio. Nothing is asked of DCS while it says it does not want them (3D audio or the space off).
+  local audioWanted = native('DcsQvCull_AudioWanted')
+  local audioAircraft = native('DcsQvCull_AudioAircraft')
+  local audioState = native('DcsQvCull_AudioState')
+  if not (audioWanted and audioAircraft and audioState) then audioWanted = nil end
+  local function clock(t)
+    return (os and type(os.clock) == 'function') and os.clock() or t or 0
+  end
+  -- R58: is the camera the cockpit's? The camera more than 15 m from the ownship's origin is an external one
+  -- (F2 / F6 / F10, a replay camera). Unknown (an export forbidden or missing) counts as the cockpit (known false).
+  -- Re-checked every 0.2 s (wall clock: a paused mission still switches views).
+  local cockpit, cockpitKnown, checkedAt = true, false, -1
+  local function inCockpit(t)
+    local now = clock(t)
+    if checkedAt >= 0 and now >= checkedAt and now - checkedAt < 0.2 then return cockpit, cockpitKnown end
+    checkedAt = now
+    cockpit, cockpitKnown = true, false
+    if not Export or type(Export.LoGetCameraPosition) ~= 'function' or type(Export.LoGetSelfData) ~= 'function' then
+      return cockpit, cockpitKnown
+    end
+    local okC, c = pcall(Export.LoGetCameraPosition)
+    local okS, s = pcall(Export.LoGetSelfData)
+    if okC and okS and type(c) == 'table' and type(c.p) == 'table' and type(s) == 'table' and
+        type(s.Position) == 'table' then
+      local dx = (c.p.x or 0) - (s.Position.x or 0)
+      local dy = (c.p.y or 0) - (s.Position.y or 0)
+      local dz = (c.p.z or 0) - (s.Position.z or 0)
+      local d2 = dx * dx + dy * dy + dz * dz
+      if d2 == d2 then cockpit, cockpitKnown = d2 < 15 * 15, true end
+    end
+    return cockpit, cockpitKnown
+  end
+  local audioTick = nil
+  if audioWanted then
+    local function unitType()
+      if DCS and type(DCS.getPlayerUnitType) == 'function' then
+        local okT, t = pcall(DCS.getPlayerUnitType)
+        if okT and type(t) == 'string' and t ~= '' then return t end
+      end
+      if Export and type(Export.LoGetSelfData) == 'function' then
+        local okS, s = pcall(Export.LoGetSelfData)
+        if okS and type(s) == 'table' and type(s.Name) == 'string' then return s.Name end
+      end
+      return ''
+    end
+    -- 0 closed .. 1 open: LoGetMechInfo().canopy.value, else draw argument 38, else unknown (-1). Nil in MP when the
+    -- server forbids ownship exports.
+    local function canopy()
+      if Export and type(Export.LoGetMechInfo) == 'function' then
+        local okM, m = pcall(Export.LoGetMechInfo)
+        if okM and type(m) == 'table' and type(m.canopy) == 'table' and type(m.canopy.value) == 'number' then
+          return m.canopy.value, 1
+        end
+      end
+      if Export and type(Export.LoGetAircraftDrawArgumentValue) == 'function' then
+        local okA, a = pcall(Export.LoGetAircraftDrawArgumentValue, 38)
+        if okA and type(a) == 'number' and a == a then return a, 2 end
+      end
+      return -1, 0
+    end
+    -- The type when it changed (checked every 2 s, sent again every 10 s: a reloaded payload hears it too), the
+    -- canopy and the camera every 0.2 s.
+    local lastType, typeAt, sentAt, stateAt = nil, -1, -1, -1
+    audioTick = function(force)
+      if audioWanted() ~= true then return end
+      local now = clock()
+      if force or typeAt < 0 or now < typeAt or now - typeAt >= 2 then
+        typeAt = now
+        local t = unitType()
+        if force or t ~= lastType or sentAt < 0 or now < sentAt or now - sentAt >= 10 then
+          lastType, sentAt = t, now
+          pcall(audioAircraft, t)
+        end
+      end
+      if force or stateAt < 0 or now < stateAt or now - stateAt >= 0.2 then
+        stateAt = now
+        local c, src = canopy()
+        local inside, known = inCockpit(now)
+        pcall(audioState, c, src, known and (inside and 1 or 0) or -1)
+      end
+    end
+  end
+  if (simStop or loadBegin or slotChange or gload or audioTick) and DCS and type(DCS.setUserCallbacks) == 'function' then
     local cb = {}
     if simStop then cb.onSimulationStop = function() pcall(simStop) end end
     if loadBegin then cb.onMissionLoadBegin = function() pcall(loadBegin) end end
+    if audioTick then cb.onSimulationStart = function() pcall(audioTick, true) end end
+    local gframe = nil
     if gload and Export and type(Export.LoGetAccelerationUnits) == 'function' then
-      -- R58: is the camera the cockpit's? The camera more than 15 m from the ownship's origin is an external one
-      -- (F2 / F6 / F10, a replay camera): the payload then draws no G field (a negative model time tells it).
-      -- Unknown (an export forbidden or missing) counts as the cockpit. Re-checked every 0.2 s (wall clock: a
-      -- paused mission still switches views).
-      local cockpit, checkedAt = true, -1
-      local function inCockpit(t)
-        local now = (os and type(os.clock) == 'function') and os.clock() or t
-        if checkedAt >= 0 and now >= checkedAt and now - checkedAt < 0.2 then return cockpit end
-        checkedAt = now
-        cockpit = true
-        if type(Export.LoGetCameraPosition) ~= 'function' or type(Export.LoGetSelfData) ~= 'function' then
-          return cockpit
-        end
-        local okC, c = pcall(Export.LoGetCameraPosition)
-        local okS, s = pcall(Export.LoGetSelfData)
-        if okC and okS and type(c) == 'table' and type(c.p) == 'table' and type(s) == 'table' and
-            type(s.Position) == 'table' then
-          local dx = (c.p.x or 0) - (s.Position.x or 0)
-          local dy = (c.p.y or 0) - (s.Position.y or 0)
-          local dz = (c.p.z or 0) - (s.Position.z or 0)
-          local d2 = dx * dx + dy * dy + dz * dz
-          if d2 == d2 then cockpit = d2 < 15 * 15 end
-        end
-        return cockpit
-      end
-      cb.onSimulationFrame = function()
+      gframe = function()
         -- R90: nothing to do, and nothing allocated, while the payload does not use the G samples.
         if gloadWanted and gloadWanted() == false then return end
         local okA, a = pcall(Export.LoGetAccelerationUnits)
         if okA and type(a) == 'table' and a.y then
           local t = DCS.getModelTime and DCS.getModelTime() or 0
+          -- R58: an external camera draws no G field (a negative model time tells the payload).
           local okV, inside = pcall(inCockpit, t)
           pcall(gload, a.x or 0, a.y, a.z or 0, (inside or not okV) and t or -1)
         end
       end
     end
-    if slotChange then
+    if gframe and audioTick then
+      cb.onSimulationFrame = function() gframe() audioTick(false) end
+    elseif gframe then
+      cb.onSimulationFrame = gframe
+    elseif audioTick then
+      cb.onSimulationFrame = function() audioTick(false) end
+    end
+    if slotChange or audioTick then
       -- Only our own slot changes (multiplayer reports every player's).
       cb.onPlayerChangeSlot = function(id)
         local okId, me = pcall(function() return net.get_my_player_id() end)
-        if not okId or me == nil or id == me then pcall(slotChange) end
+        if not okId or me == nil or id == me then
+          if slotChange then pcall(slotChange) end
+          if audioTick then pcall(audioTick, true) end
+        end
       end
     end
     pcall(DCS.setUserCallbacks, cb)

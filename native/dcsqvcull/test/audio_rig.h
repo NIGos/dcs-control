@@ -113,6 +113,15 @@ inline void ResetModule() {
   audio::g_loop = audio::Loop{};
   audio::g_pose = nullptr;
   audio::WriteRt(audio::Rt{});
+  // cockpit space: the control thread's state, the Lua bridge's values, the sim's last frame
+  audio::g_spaceSt = audio::SpaceState{};
+  audio::g_spaceCtlNow = audr::SpaceCtl{};
+  audr::WriteCtl(audio::g_spaceCtl, audr::SpaceCtl{});
+  audspace::SpaceWrite(audio::g_space, audspace::SpaceData{});
+  audio::LuaAircraft("");
+  audio::LuaState(-1.0, 0, -1);
+  audio::g_luaCalls = 0;
+  audio::g_luaWanted = false;
   if (g_rigResetExtra) g_rigResetExtra();
 }
 

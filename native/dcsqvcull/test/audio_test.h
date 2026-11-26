@@ -28,6 +28,7 @@ void ResetStandIn() {
   audiofake::g_spinUs = 0;
   audiofake::g_delayL = 0.0f;
   audiofake::g_delayR = 0.0f;
+  audiofake::ResetRoom();
 }
 
 // ---- 1. the real ed_sound.dll ----------------------------------------------------------------------------------------
@@ -86,6 +87,20 @@ void RealEdSound() {
   {
     audhk::Resolved rc;
     Check(audhk::Resolve(copy, audhk::Generated(), &RealImports, &rc), "audio hooks: an unaltered copy passes too");
+    Check(rc.spaceGain && rc.spaceOrient,
+          "cockpit space: the real ed_sound.dll's canopy damping (ctx+0xe1, sound+0x1a8 / +0x1b0) and listener-frame "
+          "orientation (sound+0xe8) code match the optional signature rows");
+    // The canopy damping's context-flag offset altered (0xe1 -> 0xe0): binaural accepted, only the space's reads off.
+    copy[0x7012] ^= 0x01;
+    audhk::Resolved rg;
+    const bool acc = audhk::Resolve(copy, audhk::Generated(), &RealImports, &rg);
+    copy[0x7012] ^= 0x01;
+    copy[0x7317 + 3] ^= 0x01;  // lea rdi, [rcx+0xd0] -> +0xd1: the orientation's base differs
+    audhk::Resolved ro;
+    const bool acc2 = audhk::Resolve(copy, audhk::Generated(), &RealImports, &ro);
+    copy[0x7317 + 3] ^= 0x01;
+    Check(acc && !rg.spaceGain && rg.spaceOrient && acc2 && ro.spaceGain && !ro.spaceOrient,
+          "cockpit space: an altered canopy-flag offset or orientation base turns only that read off (binaural accepted)");
   }
   struct Alt {
     const char* what;
@@ -2258,6 +2273,8 @@ void StopGrace() {
   RigDown(r);
 }
 
+#include "audio_space_test.h"  // cockpit space, the module's side (namespace audiotest::spacetest)
+
 inline void Run() {
   printf("---- binaural audio module\n");
   g_rigHrtf = &TestHrtf;
@@ -2297,6 +2314,7 @@ inline void Run() {
   NoSetNamesInLog();
   NoAlloc();
   Phrases();
+  spacetest::Run();
   Stress();
   audio::g_testNoThread = false;
   // The test folders (ini files, flags) away.
