@@ -11,8 +11,12 @@ the seat, and a short diffuse tail, fixed to the aircraft so they stay put when 
 small parametric model per aircraft family, with no per-aircraft simulation. The user gets one control: **Cockpit
 space: Off / Subtle / Normal / Strong** (default Subtle), Live.
 
-Status: design only (this commit). Nothing here is built yet. Labels as in the hook spec: **[V]** read in the
-disassembly or the files at the address or line given, **[A]** inferred, with what settles it.
+Status: CORE built and tested offline (branch `feat/cspace-core`: `native/binaural` `binaural_room.h`,
+`cockpit_space.h`, `src/room.cpp`, `src/room_model.h`, `src/room_fdn.h`, `test/room_test.cpp`, the
+`binaural_room_render` tool; results in section 13.1). MODULE and APP are not built yet. Where CORE's implementation
+differs from the first draft of this document, the text below says what was built and why (marked "Built:").
+Labels as in the hook spec: **[V]** read in the disassembly or the files at the address or line given, **[A]**
+inferred, with what settles it.
 
 Contents:
 1. What makes headphone sound leave the head
@@ -186,6 +190,29 @@ the head at audio rate.
   the late head correction. The core's own filter crossfade (0.5° threshold, 64 frames) makes the turn smooth. The
   tail is direction-free and needs no rotation.
 
+Built (CORE), where the implementation differs from the overview above:
+- **Wall filters per (tap, bus), not per voice.** The wall filters are linear and the same for every voice, so each
+  voice's 8 taps are mixed (ramped VBAP gains) into 8 x 14 accumulators, and Render runs each live accumulator through
+  its wall's one-pole high-pass and low-pass once for all voices (four accumulators per SSE vector). Per voice the cost
+  is one pass over its delay line per tap; per voice filters cost 10 µs per voice (measured, scalar, latency-bound).
+- **Send high-pass of fourth order** (two Butterworth sections), on each bus and on the late input, not per voice.
+  Early reflections arrive within a few ms, so below 200 Hz they add to the direct sound in phase; with a second-order
+  high-pass the DCS-like mix of R4 came out 1.3 dB louder, with fourth order -0.1 dB.
+- **Largest single reflection 3 dB under the preset's early energy** (`room_model.h TapCap`: -15 dB at Normal). A
+  voice 5 cm from the canopy otherwise gets one reflection a few dB under the direct sound 0.2 ms later; R9 measured
+  5 dB of ripple at Normal before the cap, 2.7 dB after.
+- **A fixed extra delay per tap, 0 to 0.29 ms** (`kTapJitterS`): the box is mirror-symmetric, so a median source got
+  left/right (and up-left/up-right) reflections at exactly the same delay, adding in phase at both ears (+3 dB over the
+  model) and identical at both ears.
+- **Energies relative to the set's diffuse-field average**, not to its front direction: the room's energy does not
+  depend on the voice's direction, the direct sound's does (on the synthetic set ±1.7 dB between the cockpit
+  sources, 6 dB quieter behind), so neutrality holds on average over directions.
+- **Calibrations at `SetHrtf`** (control thread, a few ms): κ (late chain vs the closed form) at RT60 0.05, 0.1, 0.2,
+  0.4 and 0.8 s, interpolated per block (the closed form was 2 dB off at 0.25 s); and an early (bus) gain that makes
+  the rendered energy of the generic preset's taps for six reference sources equal to the model's (-1.7 dB on the
+  synthetic set, -1.5 dB on the KU100: the three bus filters of a tap are correlated below a few kHz).
+- **AVX2/FMA tap mix** (`kernels_avx2.cpp RoomMixAvx2`, chosen at `Init` like the core's kernels; SSE2 otherwise).
+
 ### 4.2 The box and the image sources
 
 The box is described by the distances from the head (at the origin, aircraft frame: x forward, y up, z right) to six
@@ -235,6 +262,16 @@ a reverberated low end only adds boom and loudness. Externalisation cues live ab
   `R = cos θ x1 - sin θ x2`, so interaural coherence = cos 2θ. θ is frequency-dependent through a 1st-order crossover at
   400 Hz: low band θ = 0.23 rad (IC ≈ 0.9), high band θ = π/4 (IC ≈ 0): the diffuse-field coherence of a head, in two
   bands.
+  Built: a first-order crossover leaves the coherence at only 0.57 at 300 Hz (C7 asks ≥ 0.8 below 300 Hz). The mixer is
+  `L = (x1 + H x2) / √2`, `R = (x1 - H x2) / √2` with `H = 0.234 + 0.766 HP2(650 Hz)` (second-order Butterworth
+  high-pass), coherence `(1 - |H|²) / (1 + |H|²)`: 0.90 at DC (tan 0.23 = 0.234, as θ = 0.23), 0.96 at 300 Hz, 0.16 at
+  1 kHz, 0.06 at 1.4 kHz, → 0 above (`src/room_fdn.h` Mixer).
+- Built, absorption: each line's filter is `g_hi + (g_lo - g_hi) LP1(crossoverHz)`, a convex mix of the two band gains
+  (every line gain < 1 at every frequency: stable, C6), `g = 10^(-3 d / (RT60 fs))` per band.
+- Built, level: the late gain is `√(lateLin ⋅ E_front / (κ ⋅ E_model(RT60)))`, `E_model` the closed form
+  `Σ_bands w_band / (1 - mean g²)` of `room_model.h FdnEnergy`, κ the measured ratio of the real chain (FDN, mixer,
+  diffuse EQ) to it at a reference decay, computed in `SetHrtf` (control thread). `E_front` is the HRTF set's own
+  front energy (both ears), so the tail is `lateDb` under the direct sound of a source straight ahead, for any set.
 - Diffuse-field EQ: at `SetHrtf` (control thread) the room computes each ear's average power spectrum over all
   directions of the set and fits a low shelf + high shelf + one peak (3 biquads per ear) to it, normalised to 0 dB at
   1 kHz; the tail runs through it, so it has the same timbre as the HRTF-rendered voices.
@@ -275,6 +312,21 @@ a reverberated low end only adds boom and loudness. Externalisation cues live ab
   and ownership fades reach the room through the voice weight (section 6.1), so they are as smooth as the direct path.
 - **Off:** with `CockpitSpace=0` the wet target is 0; once the fade and the tails are done the room is idle and no
   room code runs: the output is bit-identical to a build without cockpit space (test M1).
+- Built (CORE), how the Room smooths what it is given, so a caller cannot make it click:
+  - `SetParams`: every parameter is interpolated from its current value to the new one over 100 ms (distances,
+    reflections, levels and RT60 linearly, filter corners on a log scale; the family and strength switch at half way),
+    and each block's taps, filters and FDN gains are derived from the interpolated values; changed tap delays crossfade
+    between the two read positions across the block, FDN gains ramp per sample. One tap set runs, not two (half the
+    CPU of the draft's two-set crossfade during a change); C10 shows it click-free for strength and family changes.
+  - `RoomFrame::wet` slews at most 0 → 1 in 50 ms (`kRoomWetSlewS`), on top of the module's own 0.3 s ramp; the wet
+    weight scales the sends (the input of the delay lines and the tail), so the tail of a voice decays naturally after
+    going outside instead of being cut.
+  - Early reflections (`frameValid && early`) fade in and out over 50 ms (`kRoomEarlyFadeMs`); while they are off and
+    the buses' tails are done (about 50 ms), the bus Renderer is not run at all (CPU back-off step 1 frees its cost).
+  - The canopy follows `RoomFrame::canopyOpen` with the 0.3 s time constant inside the Room (`kRoomCanopyTauS`): the
+    module passes the raw value (0 when unknown or `CockpitSpaceCanopy=0`).
+  - A new HRTF set: the buses crossfade in the core (10 ms per bus), the diffuse EQ crossfades over one block, the gains
+    that depend on the set ramp over one block.
 
 ## 5. Aircraft families and presets
 
@@ -301,6 +353,11 @@ read statically, and lists the unverified ones in the header comment): `F-16C_50
 `CH-47Fbl1`, `SA342L`, `SA342M`, `SA342Mistral`, `SA342Minigun`, `OH58D`; `P-51D`, `P-51D-30-NA`, `TF-51D`,
 `P-47D-30`, `P-47D-30bl1`, `P-47D-40`, `Bf-109K-4`, `FW-190A8`, `FW-190D9`, `SpitfireLFMkIX`, `SpitfireLFMkIXCW`,
 `MosquitoFBMkVI`, `F4U-1D`, `F4U-1D_CW`, `I-16`; `C-130J-30`.
+
+Built: checked on 2026-11-26 against `make_flyable(...)` in every `Mods\aircraft\*\entry.lua` of the 2.9.31 install
+(read-only): every name above is there except `Mirage-F1M-EE` (kept, [A]); added the variants found there:
+`F-14A-95-GR`, `F-14A-135-GR-Early`, `F-14BU`, `F-5E-3_FC`, `F-86F_FC`, `MiG-15bis_FC`, and `MiG-29 Fulcrum` ([A]: the
+full-fidelity module's `flyable_ID`; the prefix `MiG-29` covers it either way). `Hawk` is not installed (prefix only).
 
 The family the user picks in Advanced (`CockpitSpaceFamily`) overrides the table.
 
@@ -357,6 +414,11 @@ the wet weight and the voice's aircraft-frame position and class. Because the se
 sounds are low-frequency heavy, `d` slightly over-compensates the broadband level; the metric of section 10 decides
 whether `RoomDirectGain` uses the full energy or a fixed fraction of it (`kNeutralShare`, start 0.6). Typical values:
 Subtle `d` ≈ -0.1 dB, Normal ≈ -0.3 dB, Strong ≈ -0.6 dB. `d` ramps with the core's gain ramp.
+Built: `RoomDirectGain` evaluates the same model the Room runs (`src/room_model.h VoiceWetEnergy`: the voice's 8 taps
+with the early normalisation, each tap's wall filters as their white-noise power gain, the send high-pass, the distance
+law, `throughDb`, `kLateOnly`, the canopy's effect on the up taps, the late level and the decay), taking the filters'
+power gains at 48 kHz (it has no sample rate; at 44.1 or 96 kHz the wet energy differs by under 0.1 dB). Cost: one
+`ComputeTaps` and a few `exp`/`pow` per call, under 1 µs.
 
 ### 6.3 PanLevel, loudness factor, wide sounds
 
@@ -516,6 +578,22 @@ bool Preset(Family f, int strength, RoomParams* out);     // section 5.2 x 5.3
 constexpr const wchar_t* kTestSection = L"AudioTest";             // Active, Seed, Trials (listening test, section 11)
 ```
 
+Built (CORE), additions to the API above, nothing removed or renamed:
+- `binaural_room.h`: `kRoomWetSlewS` (0.05 s), `kRoomEarlyFadeMs` (50), `kRoomCanopyTauS` (0.3 s),
+  `kRoomSpeedOfSound` (343 m/s); `Room` has a private `Impl` (and a `RoomAccess` friend for the harness's probes).
+- `Room::ResetSource` lets the slot's last reflections play out: the next blocks run its taps on silence for
+  `kRoomMaxTapDelayMs` (plus 64 frames), then clear it; a voice added again without `kReset` continues, `kReset`
+  clears at once. A slot not added in a block (without `ResetSource`) is treated the same way; one missing for more
+  than one block (the module skipped the room) is cleared.
+- `cockpit_space.h`: `kNeutralShare`, `kStrengthOff/Subtle/Normal/Strong`, `FamilyName` (the UI name, for log lines),
+  `Sanitize` (the clamps `SetParams` applies: distances 0.1-3 m, reflection 0-0.95, levels -40-0 dB, RT60 0.03-1 s,
+  pre-delay 0-10 ms, send high-pass 20-1000 Hz, through -40-+6 dB, share 0-1), the tables `kTypes` and `kPrefixes`.
+- `binaural_config.h`: `kTestKeys` (`Active`, `Seed`, `Trials`), `kTestHotkeys` (the eight test hotkeys),
+  `IsValidCockpitSpaceFamily`; it now includes `cockpit_space.h`.
+- The `[Audio]` table has 13 keys: the module's test that every key is read (`audio_test.h`) fails until MODULE reads
+  the three new ones, as planned (merge order CORE, MODULE, APP); the payload compiles BinauralCore from its sources,
+  so MODULE adds `src/room.cpp` to `DcsQvBinauralCore` in `native/dcsqvcull/CMakeLists.txt`.
+
 ### 8.2 Module data per block
 
 Sim thread (PanWrap, ed mutex held), new reads per 3D sound (offsets of section 3):
@@ -604,6 +682,23 @@ empty otherwise; `ax..az` aircraft-frame position; `dcomp_db` 20 log10 d).
 - Expected cost (48 kHz, 480 frames, AVX2), to be measured by C9: taps 48 voices x 8 taps x (1 read + filter + 3
   adds) x 480 ≈ 0.6 M flops; 14 bus HRTF renders ≈ 14/48 of today's 0.21 ms ≈ 0.06 ms; FDN ≈ 0.02 ms. **Target: room
   ≤ 0.15 ms p99 per 10 ms block** next to today's 0.26-0.40 ms p99 (budget 2.5 ms at 25 %).
+- Measured (CORE, C9: thread CPU time per 480-frame block at 48 kHz, best of 5 x 1000 blocks, half the voices in the
+  cockpit and half through the canopy, the room alone):
+
+  | Kernels | Voices | Static p50 / p99 | Head turning 90°/s p50 / p99 | AddSource / Render (medians) |
+  |---|---|---|---|---|
+  | AVX2/FMA | 48 | 0.145 / 0.187 ms | 0.157 / 0.210 ms | 0.072 / 0.073-0.085 ms |
+  | AVX2/FMA | 64 | 0.168 / 0.201 ms | 0.181 / 0.239 ms | 0.095 / 0.073-0.085 ms |
+  | SSE2 | 48 | 0.202 / 0.242 ms | 0.229 / 0.310 ms | 0.090 / 0.111-0.138 ms |
+  | SSE2 | 64 | 0.231 / 0.279 ms | 0.258 / 0.324 ms | 0.119 / 0.111-0.138 ms |
+  | AVX2/FMA, early off (back-off step 1) | 48 | 0.043 / 0.058 ms | | |
+
+  The 0.15 ms p99 target is missed by about 0.04-0.06 ms with AVX2 (p50 meets it at 48 voices static); SSE2 meets its
+  0.30 ms only static. Render's fixed part is about 0.04 ms for the 14 bus HRTF sources (AVX2; 0.08 SSE2), 0.015 ms
+  for the pair filters and the bus high-pass, 0.015 ms for the tail; AddSource is 1.5 µs per voice. The harness gates
+  at p99 0.30 ms (AVX2) / 0.50 ms (SSE2) so a regression fails, and prints the target as met or MISSED. With the
+  module's 2.5 ms budget (25 % of the block) and today's 0.26-0.40 ms for the voices the total stays under 0.7 ms.
+  `RoomDirectGain` + `RoomSendDistanceGain`: 0.17 µs per voice (0.35 µs with the canopy partly open).
 - Room time is inside `dspTicks` (the module's budget measure).
 - Back-off ladder: over budget (> 10 % of the blocks of the last second) → **step 1: early reflections off** (late
   only, logged) → then the existing MaxObjects steps. Recovery in reverse: MaxObjects back to the setting, then after
@@ -743,6 +838,63 @@ file and the header in the same commit. Where two parts touch one file, the owne
 - C13 idle: wet 0 and silence for 3 x RT60 → `Idle()` true, Render adds nothing; a new send wakes it without a click.
 - C14 HRTF swap: `SetHrtf` during sound crossfades the buses, retires the old set only once unused; diffuse EQ
   recomputed.
+
+### 13.1 CORE results (2026-11-26, `scripts/build-binaural.ps1`, 7/7 ctest)
+
+`binaural_room` (synthetic sphere) and `binaural_room_default_data` (SADIE II KU100) in `test/room_test.cpp`;
+`binaural_room_test --cpu` repeats C9, `--long` runs R10 for 10 minutes, `--diag` prints the model's wet energies
+against the rendered ones per source.
+
+| Test | Result (synthetic; KU100 where run) | Design limit |
+|---|---|---|
+| C1 contract | headers, layouts (RoomParams 140 B, RoomFrame 32 B, RoomSource 20 B), presets, type table | pass |
+| C2 image sources | 0.0000 samples, 0.0000 dB against the closed form | 1 sample, 0.01 dB |
+| C3 outside sources | excitation on the box; throughDb -6: early and late -6.000 dB | |
+| C4 VBAP | energy error 3e-7 over 10 000 directions, on a bus = that bus only | |
+| C5 / R5 rotation | bus directions 0.000°; turned scene vs head-frame scene correlation 1.000 (head-locked room 0.13) | 1°, 0.98 |
+| C6 FDN decay | T20 within 11.6 % of the band's RT60 range; 0 unstable lines over 6 x 3 x 3 | 10 % (gated 15 %) |
+| C7 tail IACC | 100-300 Hz 0.99; 1-2 kHz 0.17, 2-4 kHz 0.26, 4-8 kHz 0.19 | >= 0.8; <= 0.2 (gated 0.3) |
+| C8 level, white, share 1 | 0.6 m ahead: +0.02 / +0.08 / +0.20 dB (KU100 +0.06 / +0.16 / +0.35); 4 families worst 0.24 (KU100 0.45) | 0.1 (gated 0.5) |
+| R4 loudness, share 0.7 | pink mean +0.11 / +0.20 / +0.35 dB, worst 0.80 (KU100 +0.42, worst 0.98); DCS-like -0.05 / -0.11 / -0.19 | 0.5 / 1.0 |
+| R2 DRR 1-4 kHz | 15.1 / 10.8 / 7.4 dB (KU100 13.9 / 9.7 / 6.5) | 13-19 / 9-15 / 6-11 |
+| R3 T20 | within 20 % of the preset per octave for all 5 cockpit sources (EDT 0.10-0.17 s, printed) | 20 % |
+| R9 ripple | 1.9 / 2.7 / 3.3 dB (KU100 1.9 / 2.7 / 3.3) | 2 / 3 / - |
+| R1 early IACC | lateral sources 0.93 → 0.88-0.90; median sources 1.00 → 0.98-0.99, front panel → 0.93 | median ≥ 0.05 lower: **not met** |
+| R1 late IACC (5 ms-end) | 1 kHz 0.21-0.48, 2 kHz 0.33-0.35, 4 kHz 0.22 | <= 0.3: **not met** at 1-2 kHz |
+| C9 / R8 CPU | section 9 (48 voices AVX2 p50 0.145, p99 0.19-0.21 ms) | p99 0.15: **missed** (gated 0.30) |
+| C10 / R6 clicks | 15 transitions (strength, family, canopy at once and over 1 s, wet both ways, early off/on, kill switch, voice end, frame both ways, head 90°/s, source 1 m/s, HRTF change): worst 7.6e-4 (family) | 1e-3 |
+| Block size | 480 vs random 1-2048: 1.6e-6 | 1e-5 |
+| C11 real time | 64 sources x 8192 frames 2.7 ms; 0 allocations; MXCSR restored; bad calls refused | |
+| C12 non-finite | NaN/Inf input, position, send refused and counted; NaN wet / rotation / canopy ignored | |
+| C13 idle | idle 0.98 s after going outside (helicopter Strong), skipped blocks silent, wakes without a click | |
+| C14 HRTF swap | old set retired once unused, diffuse EQ and calibrations recomputed | |
+| R10 stability | 2 min (10 with `--long`) white noise at helicopter Strong: 0.000 dB spread, CPU flat | |
+
+What the numbers mean for the design:
+- **R1 median sources** cannot pass in a left/right-symmetric box at the early level of section 5: the reflections of
+  a median source come in mirror pairs (decorrelated only above about 2 kHz by the per-tap offsets), and at -12 dB
+  they move the early IACC by 0.01-0.02. Lateral sources and the front panel do drop. Settled by the listening test
+  (A1 externalisation of frontal sources), or by an asymmetric box if it says so.
+- **Late IACC (5 ms to the end)** includes the taps between 5 and 12 ms; the tail alone is C7. In 2-4 kHz a
+  0.09 s decay leaves about 26 independent frequency regions per octave, so even a decorrelated pair measures
+  about 0.2 plus the maximum over ±1 ms: 0.26 is at that floor.
+- **C8 at share 1** is the incoherent energy model against the rendered sum: the taps' bus filters and taps of similar
+  delay add partly in phase (more on the KU100). With the shipped `kNeutralShare` 0.7 the loudness (R4) is within
+  0.5 dB on average for pink noise and DCS-like sound alike.
+
+`binaural_room_render` (the kit's tool, `test/room_render.cpp`):
+
+```
+binaural_room_render --out <dir> [--name <base>] [--family bubble|framed|helicopter|warbird|transport|generic]
+                     [--strength 0..3] [--source x,y,z]... [--yaw <deg>] [--canopy 0..1]
+                     [--signal impulse|pink|pinkbursts|clickhum|dcs] [--seconds <s>] [--hrtf <file.dcshrtf>]
+                     [--rate <Hz>] [--gain-db <dB>] [--seed <n>]
+```
+
+Writes `<dir>\<base>.wav` (16-bit PCM stereo, direct + room; `_direct.wav` and `_room.wav` too for `impulse`) and
+`<dir>\<base>.json` (R1, R2, R3, R9 of the first source, R4 pink-noise loudness change at 48 kHz, clipped samples).
+Strength 0 is Off (the direct path alone). A source outside the box is classed through the canopy. Default HRTF: the
+bundled KU100 set, else the synthetic sphere. Exit 0 written, 1 bad arguments, 2 HRTF or write failure.
 
 ### MODULE (`native/dcsqvcull/test`)
 
