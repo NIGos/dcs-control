@@ -38,6 +38,9 @@
 // main/views.inc before the model hooks (model_timing.h first).
 #pragma once
 
+#include <atomic>
+#include "sigscan.h"
+
 namespace ngb {
 
 enum : int { k2931 = 0, k2932 = 1 };
@@ -95,8 +98,8 @@ inline std::atomic<int> g_build{k2931};
 inline int BuildOf(const uint8_t* ng) {
   if (!ng) return k2931;
   __try {
-    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(ng + reinterpret_cast<const IMAGE_DOS_HEADER*>(ng)->e_lfanew);
-    return nt->FileHeader.TimeDateStamp == kStamp2932 && nt->OptionalHeader.SizeOfImage == kSize2932 ? k2932 : k2931;
+    const auto* nt = sigscan::NtHeaders(ng);
+    return nt && nt->FileHeader.TimeDateStamp == kStamp2932 && nt->OptionalHeader.SizeOfImage == kSize2932 ? k2932 : k2931;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return k2931;
   }
