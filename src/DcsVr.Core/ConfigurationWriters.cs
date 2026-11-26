@@ -405,9 +405,11 @@ public static class ConfigurationWriters
 
     /// <summary>Motion contract revision 4 (docs/FOCUS_MOTION.md): the focus views' motion vectors and the per-pixel depth
     /// plane for frame generation, written only while the profile turns them on (research options, off until a live A/B;
-    /// the module's default is off).</summary>
+    /// the module's default is off). OFXR's consumer (FrameGenFocusMotion, NVIDIA) needs the focus views' export, so it
+    /// turns that on too: without it the consumer would have nothing to read.</summary>
     private static string FocusMotionLines(VrProfile p) => p.FrameGen == FrameGeneration.Off || p.Desktop ? "" :
-        (p.FgFocusMotionVectors ? "\nCockpitMotionFocus=1" : "") + (p.FgPerPixelDepth ? "\nCockpitMotionDepth=1" : "");
+        (p.FgFocusMotionVectors || NvidiaOption(p, p.FrameGenFocusMotion) == 1 ? "\nCockpitMotionFocus=1" : "") +
+        (p.FgPerPixelDepth ? "\nCockpitMotionDepth=1" : "");
 
     /// <summary>1 for an OFXR quality option that is on with NVIDIA frame generation, else 0.</summary>
     private static int NvidiaOption(VrProfile p, bool on) => on && p.FrameGen == FrameGeneration.Nvidia ? 1 : 0;

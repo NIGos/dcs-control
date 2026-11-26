@@ -22,7 +22,10 @@ Engine details a reader may rely on:
 - A focus view's unknown DLSS jitter never resets the pair. Its own `jitter_proven` (and `true_motion_view`) gate it;
   views 0 and 1 keep the revision 2 reset rule.
 - The app writes the keys only when the profile turns them on (`FgFocusMotionVectors`, `FgPerPixelDepth`, profile
-  only, off).
+  only, off). OFXR's consumer setting `FrameGenFocusMotion` (NVIDIA frame generation) also writes
+  `CockpitMotionFocus=1`, since the consumer has nothing to read without it; it does not turn on the depth plane.
+- Integration branch `feat/fmv` (contract + engine + OFXR 0128) is built and tested offline only. The live A/B plan is
+  in "Live A/B plan (validation-08)" below.
 
 Before the work started, the motion study measured two things:
 
@@ -239,6 +242,110 @@ for both eyes; the whole pair is +155 us. The consumer's larger copy (the full a
 grid target and scatter. At 5424 px those are 1356 x 1339 x 6 slices x 8 B plus x 4 slices x 4 B, about 116 MB
 together. Each ring entry's copies grow to the full atlas plus the plane. VRAM is already near the budget
 (`ofxr-0009`), which is one more reason the key stays off.
+
+## Live A/B plan (validation-08)
+
+Nothing below has been flown. The harness is `artifacts/validation-08` (`go-v8.ps1`, `scenarios/make_scenarios.py`,
+`tools/run-scenario-v8.ps1`); its sessions, metrics and verdict rules are the ones in `ORBIT-STATUS.md` (orbit) and
+`ghostfree/stats.txt` (distant aircraft), unchanged. Only the keys and the gates are new.
+
+### What is toggled, and how
+
+`[ofxr] dcs_motion_focus` is **start-only** (read at `xrCreateSession`, 0128: "fixed for the session"), so it cannot be
+the live toggle. The live toggle is the engine's export instead. With the OFXR key on, an engine that stops publishing
+the focus views (`header_flags::focus_views` clear) gives exactly today's output (0128's fallback tests), so:
+
+| Where | Key | Both arms | Toggled |
+|---|---|---|---|
+| Draft profile (start) | `frameGen` NVIDIA, `frameGenFocusMotion: true` (-> `[ofxr] dcs_motion_focus=1`), `fgPerPixelDepth: true` | yes | no |
+| Draft profile (start) | `engineDevMode: true`, `engineDevIniPath` = the round's engine ini (below), `freeVram: false` | yes | no |
+| Engine ini `[Dev]` | `CockpitMotionFocusAssumeJitterFree=1` (only after gate P1 passed) | yes | no |
+| Engine ini `[Perception]` | `CockpitMotionFocus`, `CockpitMotionDepth` | launched at 1 / 1 | live, per group |
+
+- **Engine ini.** The round copies the `DcsQvCull.ini` that the package's CLI writes for the draft (so every other
+  setting is the pilot's) to `<run>\live\engine\DcsQvCull.ini`, adds the `[Dev]` line, and points `engineDevIniPath`
+  at it. The module reloads it on its write time (live mode, R143); `[Perception]` and `[Dev]` keys do not reset the
+  engine kill switch (R142).
+- **Harness change needed (not done):** `copyini` resolves `file` under `<run>\live`, so the copy above must exist
+  before launch, and `make_scenarios.py` must write the groups to `engine\DcsQvCull.ini` section `Perception` instead
+  of `ofxr\ofxr_bridge.ini` section `ofxr`. The rest of the schedule (ABBA, toggle >= 26 s before the changed
+  crossing / at the orbit block start, toggle + 5 s left out) stays as it is.
+- **Launch at 1 / 1.** The first switch-on of either key makes one new generation (held-set rule); launching with both
+  on makes that generation at load, so no toggle in the round re-lays out the set or makes OFXR reopen it.
+- **Package.** Orbit sessions need the rig extension hook of `dev/rig-orbit` (`DCSC_RIG_EXT`). Build the test package
+  from a throwaway merge of `feat/fmv` and `dev/rig-orbit` (`build-release -LocalOnly`), as the 0.7.1 rig-orbit
+  package was built; do not merge `dev/rig-orbit` into `feat/fmv`. ghostfree sessions can use the `feat/fmv` package.
+
+`scenarios/keys-fmv.json` (A = `off` in every group, as today's keys.json):
+
+| Group | On | What it isolates |
+|---|---|---|
+| `off` (A) | `CockpitMotionFocus=0`, `CockpitMotionDepth=0` | today's image (revision 3 records + revision 4 marker) |
+| g1 | `CockpitMotionFocus=1`, `CockpitMotionDepth=0` | focus MVs (the 0128 resample, class-only surface test) |
+| g2 | `CockpitMotionFocus=0`, `CockpitMotionDepth=1` | depth plane alone: **image must not change**; cost of the plane (engine dispatch + OFXR copy) |
+| g3 | `CockpitMotionFocus=1`, `CockpitMotionDepth=1` | the configuration a pilot would get |
+
+### Gates before the A/B (short flights, stop at the first failure)
+
+- **P1 focus jitter (R70 T1 on views 2 / 3).** Still frames with `[Suite] HoldPose`, `CockpitMotionFocus=1`,
+  `CockpitMotionDump` on, `motion_check.py` T1 on views 2 / 3. Pass: |mv| <= 0.001 px at p99 on still frames, as views
+  0 / 1 in R70. Fail: no A/B (the consumer refuses unproven views; forcing them would test jittered MVs).
+- **P2 writer cost.** Engine 30 s log line, focus + plane on: capture GPU time <= 60 us per frame; no
+  "larger motion set ... falls back" line; `motion contract revision 4` line shows the keys as written.
+- **P3 OFXR import.** OFXR log: focus views imported (no `true_motion_view` refusals after P1), no generation reopen
+  loop, `dcs_motion_focus=1` in the session's settings line.
+- **P4 Cheeky (only if the draft uses Cheeky / DLSS 5).** No "materialized" line, Cheeky log unchanged.
+
+### Sessions
+
+```powershell
+$v8 = 'E:\Storage\Code Projects\DCSControl\artifacts\validation-08'
+pwsh -NoProfile -File "$v8\go-v8.ps1" -Cli <fmv+rig-orbit package>\files\DcsVr.Cli.exe -Sessions orbitday,orbitdusk -NoRegress
+pwsh -NoProfile -File "$v8\go-v8.ps1" -Cli <fmv package>\files\DcsVr.Cli.exe -Sessions fgday,fgnight -NoRegress
+```
+
+- **orbitday / orbitdusk** (F2 silhouette band): `qvbench_ff_land.miz` and `missions\qvbench_v8_orbit_dusk.miz`; F2
+  orbit at a measured 20 deg/s; blocks of 26 s in group order g2, g1, g3 (ABBA each); captures at bearings +90 / -90.
+  Night is left out (every band error < 1 luma code in round 20261125-1851; ratios not meaningful).
+- **fgday / fgnight** (distant aircraft, ghostfree): `qvbench_v8_day.miz` / `qvbench_v8_night.miz`, 12 crossings = three
+  ABBA groups, captures timed to the AI crossings; analysis `ghostfree` as in `stats.txt` (covariates logRange,
+  speedPxS; aircraft-located gate).
+
+### Expected effect (from the 0128 fixtures; the live picture may differ)
+
+| Session | Measure | Expected g1 / g3 | Why |
+|---|---|---|---|
+| orbit day | errBand, trailing, leading | ratio about 0.6-0.8 | fixture "orbit day" x4: 5.39 -> 3.09 in the inset |
+| orbit dusk | errBand, trailing, leading | ratio about 0.6-0.8 | fixture "orbit dark" x4: 1.93 -> 1.18 |
+| orbit both | errFar (control far from the aircraft) | ratio 1 | outside the inset every fixture is within 0.01 |
+| fgday | objErr | lower (about -30 %) | fixture "small aircraft day" x4 model band 12.46 -> 8.58 |
+| fgday | leadW | possibly higher | fixture ahead band 5.14 -> 6.50 |
+| fgday / fgnight | ghostW | SAME | M0b: finer MVs do not remove the cross-fade halo (that is M1) |
+| fgnight | leadW, ringErr | SAME or slightly worse | fixture "small aircraft dark" ahead 2.52 -> 4.29; lights have no MVs |
+| all | g2 (depth only) | identical to A | 0128 reads the plane only for focus cells |
+
+Cost: composition +12.7 % per pair (bench +153 us on 1201 us at 5424 px x 2); the consumer's larger copy (about 25 MB
+per frame) and the engine capture (estimate 30-60 us) are not measured yet. VRAM with g3 on: engine +63 MB (3 slots,
+Q1 + Q2) and OFXR about +116 MB per synthesizer plus the larger ring copies.
+
+### Pass criteria
+
+The focus MVs may become a default candidate only if **all** of these hold; otherwise they stay off and the round's
+numbers go into this file as the input for M1.
+
+1. **orbit day and dusk, g1 and g3:** errBand verdict BETTER (ratio CI hi < 0.95) in at least one of the two scenes and
+   not WORSE (CI lo > 1.05) in either; trailing and leading edge not WORSE; errFar CI includes 1.
+2. **fgday and fgnight, g1 and g3:** not WORSE by the ghostfree rule (ghostW ON-OFF CI hi < +0.15 and no secondary
+   WORSE: leadW, rearW, ringErr CI entirely above 0); objErr not higher (CI hi <= 0) in fgday. NOT JUDGEABLE in a
+   scene counts as a re-fly of that scene, not as a pass.
+3. **g2 everywhere:** image SAME (orbit ratios' CI include 1; ghostfree ghostW inside +-0.15 and no secondary
+   difference). A difference here is a bug, not a result.
+4. **Pacing, every group, both frame regimes:** composition + pack per pair <= OFF + max(100 us, 20 %); late frames per
+   minute not FAIL by `ofxr_metrics.py`; 3X share not up; no KEY NOT LIVE line (the engine keys must show as reloaded in
+   DcsQvCull.log, the OFXR key is start-only by design).
+5. **VRAM** (`VramIntervalSec=10`, DXGI): g3 ON - OFF <= +250 MB; no OFXR VRAM-budget skip that OFF does not have.
+6. **Restore** as in `ORBIT-STATUS.md` (pilot's profile re-applied, `engineDevMode` off, user state files identical,
+   quiet.lock removed, PimaxClient closed).
 
 ## Task split
 

@@ -223,6 +223,10 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_focus=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=1\n")
         && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=0\n") && !new VrProfile().FrameGenFocusMotion
         && !qualitySaved.Contains("frameGenFocusMotion") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenFocusMotion = true }))!.FrameGenFocusMotion, "dcs_motion_focus: off by default, 1 only with NVIDIA frame generation");
+    // ... and the consumer turns on the engine's focus-view export it reads (motion contract revision 4), NVIDIA only.
+    Require(!ConfigurationWriters.DcsQvCull(nvidia).Contains("CockpitMotionFocus=1") && ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("\nCockpitMotionFocus=1")
+        && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("CockpitMotionFocus=1")
+        && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("CockpitMotionDepth=1"), "dcs_motion_focus brings the engine's CockpitMotionFocus, not the depth plane");
     // The occlusion fill of the 0.7.1 development builds (OFXR dcs_motion_occlusion_fill) is gone: never written.
     Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion=1\n") && !ConfigurationWriters.Ofxr(nvidia).Contains("occlusion_fill"), "no occlusion fill key");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.
