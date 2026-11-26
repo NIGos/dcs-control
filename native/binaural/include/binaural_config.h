@@ -21,6 +21,8 @@
 #include <cstring>
 #include <cwchar>
 
+#include "cockpit_space.h"
+
 namespace binaural_config {
 
 constexpr const wchar_t* kSection = L"Audio";
@@ -57,6 +59,10 @@ constexpr KeyInfo kKeys[] = {
     {L"CpuBudgetPercent", KeyType::Int, 25, 5, 50, "advanced"},          // of each audio block
     {L"ExcludeContexts", KeyType::Text, 0, 0, 0, "advanced"},            // comma list of context ids 0..7, default empty
     {L"LogVoices", KeyType::Bool, 0, 0, 1, "diagnostics"},               // per-voice CSV next to the log
+    // Cockpit space (docs/COCKPIT_SPACE.md 7). Effective only with Binaural=1.
+    {L"CockpitSpace", KeyType::Int, 1, 0, 3, "main"},                    // "Cockpit space": Off, Subtle, Normal, Strong
+    {L"CockpitSpaceFamily", KeyType::Text, 0, 0, 0, "advanced"},         // "auto" or a family key (cockpit_space.h FamilyKey)
+    {L"CockpitSpaceCanopy", KeyType::Bool, 1, 0, 1, "advanced"},         // the space opens with the canopy
 };
 constexpr int kKeyCount = static_cast<int>(sizeof(kKeys) / sizeof(kKeys[0]));
 
@@ -71,7 +77,25 @@ struct AudioConfig {
     int cpuBudgetPercent = 25;
     std::uint32_t excludeContextMask = 0;  // bit i = context id i excluded
     bool logVoices = false;
+    int cockpitSpace = 1;                       // 0 Off, 1 Subtle, 2 Normal, 3 Strong
+    wchar_t cockpitSpaceFamily[16] = L"auto";   // "auto" or cockpit_space::FamilyKey
+    bool cockpitSpaceCanopy = true;
 };
+
+// The listening test (docs/COCKPIT_SPACE.md 11): [AudioTest] Active (0/1), Seed (uint32), Trials (count), written only by
+// the app's `audio-test start`, removed by `audio-test stop` and Back to stock; the test hotkeys live in [Hotkeys]
+// (default none).
+constexpr const wchar_t* kTestSection = L"AudioTest";
+constexpr const wchar_t* kTestKeys[] = {L"Active", L"Seed", L"Trials"};
+constexpr const wchar_t* kTestHotkeys[] = {L"AudioTestNext",  L"AudioTestA",     L"AudioTestB",     L"AudioTestRate0",
+                                           L"AudioTestRate1", L"AudioTestRate2", L"AudioTestRate3", L"AudioTestRate4"};
+
+// A valid CockpitSpaceFamily value: "auto" or a family key (case-insensitive, surrounding spaces ignored).
+inline bool IsValidCockpitSpaceFamily(const wchar_t* s) {
+    cockpit_space::Family f;
+    bool isAuto;
+    return cockpit_space::ParseFamily(s, &f, &isAuto);
+}
 
 inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 

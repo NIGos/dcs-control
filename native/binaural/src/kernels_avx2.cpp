@@ -151,4 +151,39 @@ void FdAvx2(const float* table, const float* x, std::int32_t base, float d0, flo
 
 Set Avx2() { return {&FirAvx2, &FirNAvx2, &FdAvx2, "AVX2/FMA"}; }
 
+// The cockpit space's tap mix (room.cpp): acc[q][i] += (gs[q] + dg[q] i) src[i], i < n, q < nu (<= 6), eight frames at a
+// time, the source loaded once for all the tap's buses.
+void RoomMixAvx2(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n) {
+    __m256 g[6], st[6];
+    const __m256 ramp = _mm256_setr_ps(0, 1, 2, 3, 4, 5, 6, 7);
+    for (int q = 0; q < nu; ++q) {
+        g[q] = _mm256_fmadd_ps(_mm256_set1_ps(dg[q]), ramp, _mm256_set1_ps(gs[q]));
+        st[q] = _mm256_set1_ps(8.0f * dg[q]);
+    }
+    std::uint32_t i = 0;
+    if (nu == 3) {
+        __m256 ga = g[0], gb = g[1], gc = g[2];
+        float* pa = acc[0];
+        float* pb = acc[1];
+        float* pc = acc[2];
+        for (; i + 8 <= n; i += 8) {
+            const __m256 x = _mm256_loadu_ps(src + i);
+            _mm256_storeu_ps(pa + i, _mm256_fmadd_ps(ga, x, _mm256_loadu_ps(pa + i)));
+            _mm256_storeu_ps(pb + i, _mm256_fmadd_ps(gb, x, _mm256_loadu_ps(pb + i)));
+            _mm256_storeu_ps(pc + i, _mm256_fmadd_ps(gc, x, _mm256_loadu_ps(pc + i)));
+            ga = _mm256_add_ps(ga, st[0]), gb = _mm256_add_ps(gb, st[1]), gc = _mm256_add_ps(gc, st[2]);
+        }
+    } else {
+        for (; i + 8 <= n; i += 8) {
+            const __m256 x = _mm256_loadu_ps(src + i);
+            for (int q = 0; q < nu; ++q) {
+                _mm256_storeu_ps(acc[q] + i, _mm256_fmadd_ps(g[q], x, _mm256_loadu_ps(acc[q] + i)));
+                g[q] = _mm256_add_ps(g[q], st[q]);
+            }
+        }
+    }
+    for (; i < n; ++i)
+        for (int q = 0; q < nu; ++q) acc[q][i] += (gs[q] + dg[q] * static_cast<float>(i)) * src[i];
+}
+
 }  // namespace binaural::kernels

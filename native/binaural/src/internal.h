@@ -105,6 +105,9 @@ struct Set {
 Set Avx2();
 Set Sse2();
 bool CpuHasAvx2Fma();
+// The cockpit space's tap mix (room.cpp; its SSE2 version is there): acc[q][i] += (gs[q] + dg[q] i) src[i].
+using RoomMixFn = void (*)(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n);
+void RoomMixAvx2(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n);
 }  // namespace kernels
 
 namespace detail {
