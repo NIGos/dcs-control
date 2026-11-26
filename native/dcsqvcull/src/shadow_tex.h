@@ -844,7 +844,7 @@ void* __fastcall HookDtor(void* self, uint32_t flags) {
 // ---------------------------------------------------------------------------
 
 // False when a location is not found in this build (reloc.h logged which).
-bool ResolveAddrs(Addrs& a) {
+bool ResolveAddrs(Addrs& a, const char** reason = nullptr) {
   a.model = reloc::Rva(hooksig::NG_ModelMaterialMT_vtbl, kModelVtbl);
   a.slot5 = reloc::Rva(hooksig::NG_ModelMaterialMT_drawShadow, kSlot5);
   a.submit = reloc::Rva(hooksig::NG_ModelMaterialMT_submit, kSubmit);
@@ -868,11 +868,17 @@ bool ResolveAddrs(Addrs& a) {
   a.ret0 = reloc::Rva(hooksig::DX_ret0_stub, 0x5010);
   a.tech = reloc::Rva(hooksig::DX_STechnique_vtbl, kTechVtbl);
   a.pass = reloc::Rva(hooksig::DX_SPassBlock_vtbl, kPassVtbl);
-  static_assert(sizeof(Addrs) == 23 * sizeof(uint32_t), "Addrs holds RVAs only");
-  const uint32_t* v = &a.model;
-  for (size_t i = 0; i < sizeof(Addrs) / sizeof(uint32_t); ++i)
-    if (!v[i]) return false;
-  return true;
+  const bool modelOk = a.model && a.slot5 && a.submit && a.globals && a.iatGetTexture && a.iatValid;
+  const bool backendOk = a.shader && a.setTexture && a.getDesc && a.compat && a.getSrv && a.tex &&
+                         a.innerFile && a.innerArray && a.innerDummy && a.tech && a.pass && a.shaderDtor &&
+                         a.texSlot18 && a.texSlot11 && a.innerSlot4 && a.dummySlot4 && a.ret0;
+  if (reason) {
+    if (!modelOk && !backendOk) *reason = "shadow texture skip: NGModel and dx11backend checks both incomplete; skipped";
+    else if (!modelOk) *reason = "shadow texture skip: NGModel checks incomplete; skipped";
+    else if (!backendOk) *reason = "shadow texture skip: dx11backend checks incomplete; skipped";
+    else *reason = nullptr;
+  }
+  return modelOk && backendOk;
 }
 
 // Returns nullptr when NGModel and dx11backend are the analysed build (or
@@ -880,7 +886,8 @@ bool ResolveAddrs(Addrs& a) {
 // what does not match. Sets g_at.
 const char* VerifyBuild(uint8_t* ng, uint8_t* dx) {
   Addrs& a = g_at;
-  if (!ResolveAddrs(a)) return "shadow texture skip: a NGModel/dx11backend location is not in this build; skipped";
+  const char* reason = nullptr;
+  if (!ResolveAddrs(a, &reason)) return reason;
   auto** model = reinterpret_cast<void**>(ng + a.model);
   auto** shaderVtbl = reinterpret_cast<void**>(dx + a.shader);
   auto** texVtbl = reinterpret_cast<void**>(dx + a.tex);
