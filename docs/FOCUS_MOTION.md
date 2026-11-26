@@ -338,6 +338,48 @@ texel centre on it in this placement), 1800 m 0.25 -> 0.35; at d2: 1200 m 0.33 -
   differ are the "quality 15" ones, which now run kFgQualityAll = 31 (the cover included): dark occlusion aircraft
   0.44 -> 0.04, leading 3.02 -> 0.36, trailing 0.08 -> 0.23.
 
+Cost (`XRFG_TEST_FG_TRIPLE_BENCH`, 5424 x 5356 x 2, composition median): keys off 2X 1238 us / 3X 2080 us; cover alone
+(the `_cover` twin) 1112 / 2101 us; sky occlusion alone (the `_extras` twin) 1535 / 2886 us; both 1551 / 2897 us.
+`XRFG_TEST_DCS_MOTION_BENCH` with the sky behind the aircraft (`XRFG_TEST_DCS_MOTION_BENCH_SKY=1`, sRGB view): cover
+1196 -> 1257 us (+61 us); cover + sky occlusion 1206 -> 2227 us.
+
+Live (2026-11-26, local-only package from feat/fg-cover fac4f8b, headset untracked: the capture layer's head):
+
+- **Diagnosis flights** (`artifacts\motion-study\fg-diag\runs\20261126-0507`, `scenarios\fgcover.json`; the dev ini
+  issue fixed: the scenario needs `developerOptions: true`, else the app's ForPilots drops Developer mode and the
+  deployed ini has no `[Dev] IniPath`). Arm cover (periphery MVs) and arm coverfocus (`frameGenFocusMotion`, `[Dev]
+  CockpitMotionFocusAssumeJitterFree=1`). obj = the aircraft at the synthetic's instant; within1 = share of its pixels
+  composed along a vector within 1 px of the measured motion (now the recorded vector itself); xfade = the captured
+  synthetic against a cross-fade (recomposite median):
+
+  | Crossing | off (run 0237) within1 / xfade | cover | cover + focus MVs |
+  |---|---|---|---|
+  | 600 m (x3) | 0.50 / 0.53 | 0.18 / 0.39 | 0.72 / 0.36 |
+  | 1200 m (x1) | no records (twins not built yet) | 0.50 / 0.68 | 0.59 / 0.57 |
+  | 1800 m (x2) | 0.12 / 0.94 | 0.47 / 1.32 (obj MAE 0.5 vs 0.3: almost invisible) | 0.03 / 1.31 |
+  | 450 m (x4) | 0.18 / 0.92 | not located | not located |
+
+  The 0129 off numbers came from the grid and the scatter (the vector used was not recorded then), so within1 is not
+  strictly comparable. The cover's aircraft-vector path (lever 2's fixed-point composition) fired on 0 % of the
+  aircraft pixels; only its one-frame rule did (2-15 % of obj / trail / lead). Lever 1 lowered the sky gather on the
+  aircraft at 1200 m (0.29) but not at 600 m (0.74).
+- **Ghostfree A/B** (`artifacts\validation-08\runs\20261126-0526`, `scenarios\keys-cover.json`: three ABBA groups of
+  `dcs_motion_cover` on vs off, every other key off; `results\ghostfree\stats.txt`). ghostW ON - OFF (t CI):
+  - day: -0.128 [-0.205, -0.051] BETTER, -0.078 [-0.145, 0.009] SAME, -0.143 [-0.206, -0.080] BETTER (OFF mean
+    0.775); leadW -0.11..-0.21, rearW -0.30..-0.44, objErr -0.6..-5.8 (all down); ringErr +0.04..+0.06 (CIs touch 0).
+  - night: -0.056, -0.005, -0.017, all SAME (OFF mean 0.994).
+  - validation-08's own image verdict (fg_ghost trailShare / ghostIndex): day g1 WORSE (maeSky 0.74 -> 1.52,
+    trailShare 0.017 -> 0.034), day g2 NO GAIN, day g3 WORSE (tileMcResidual), night g3 PASS, night g1 / g2 NOT JUDGED.
+  - pacing: composition + pack +20..+24 us (fast regime), +79..+98 us (slow), all within the gate; late frames per
+    minute FAIL in day g2 (7.1 -> 34.0, with the optical flow itself 1706 -> 2328 us) and night g2 (0 -> 18.7), better
+    in day g1, night g1 and g3; 3X share 0 %.
+- **Verdict.** Lever 1 + 2: day ghosting clearly lower by the ghostfree rule, night unchanged; the diagnosis targets
+  (within1 > 0.8, cross-fade < 0.4) are met only at 600 m; two late-frame FAILs and validation-08's trail / sky
+  measures worse in two day groups. NO-GO as a default: the key stays off. Lever 3 (focus MVs through the cover):
+  better than the periphery cover at 600 / 1200 m in the diagnosis, worse at 1800 m; not A/B flown, and it needs gate
+  P1 (focus jitter) first. Next: why the aircraft-vector path never holds live (the fixed-point test: the class and
+  vector at the current end within 1 px) and the late frames of the g2 blocks.
+
 ## Live A/B plan (validation-08)
 
 Nothing below has been flown. The harness is `artifacts/validation-08` (`go-v8.ps1`, `scenarios/make_scenarios.py`,
