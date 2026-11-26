@@ -1296,10 +1296,10 @@ index 2063a6e..c1a6bb6 100644
              bench_dcs_motion_composition(bench_fixture, 5424, 5356);
 diff --git a/tests/fg_cover.inc b/tests/fg_cover.inc
 new file mode 100644
-index 0000000..6e01242
+index 0000000..cd654b3
 --- /dev/null
 +++ b/tests/fg_cover.inc
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,858 @@
 +// DCS Control (0130): fixtures for [ofxr] dcs_motion_cover (lever 1: a
 +// distant aircraft's vector and class spread over its edge; lever 2: a sky
 +// gather with an aircraft within reach accepted only after the aircraft's own
@@ -1634,6 +1634,27 @@ index 0000000..6e01242
 +        }
 +        scene.layers.push_back(FcLayer{"sky", kFcFull, 0, 0, 0, 2.0, 0.0, roll, 0x80, 65504.0,
 +            {150.0 * k, 185.0 * k, 225.0 * k}, -1, 1.0, true, 1.0});
++        scenes.push_back(std::move(scene));
++    }
++    // crossing night (live round 2, the pilot's reference: moonlight over Kola): a grey silhouette 6-14 codes above a
++    // sky of 3 codes (sRGB bytes), with a 2 px nav light at each nose (no MV); in linear light the silhouette differs
++    // from the sky by less than 1/255.
++    {
++        FcScene scene{"crossing night", {}};
++        const std::array<double, 4> range{450.0, 900.0, 1200.0, 1800.0};
++        const std::array<double, 4> length{93.0, 47.0, 35.0, 23.0};
++        const std::array<double, 4> speed{27.0, 14.0, 10.0, 7.0};
++        const std::array<double, 4> row{0.16, 0.36, 0.50, 0.64};
++        const std::array<double, 4> lift{14.0, 11.0, 9.0, 6.0};
++        for (std::size_t i = 0; i < range.size(); ++i) {
++            const std::string tag = "r" + std::to_string(int(range[i]));
++            scene.layers.push_back(FcLayer{tag + "light", kFcLight, w * 0.48 + length[i] * 0.5, h * row[i], 2.0, speed[i],
++                0.0, 0.0, 0x80, 65504.0, {255.0, 60.0, 50.0}, -1, 1.0, false, 1.0});
++            scene.layers.push_back(aircraft(tag, w * 0.48, h * row[i], length[i], speed[i],
++                {3.0 + lift[i], 3.0 + lift[i], 5.0 + lift[i]}, range[i]));
++        }
++        scene.layers.push_back(FcLayer{"sky", kFcFull, 0, 0, 0, 2.0, 0.0, roll, 0x80, 65504.0, {3.0, 3.0, 5.0}, -1, 1.0,
++            true, 1.0});
 +        scenes.push_back(std::move(scene));
 +    }
 +    // orbit: the F2 orbit (the aircraft still, the world sliding behind it).

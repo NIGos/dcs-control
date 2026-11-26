@@ -380,6 +380,68 @@ Live (2026-11-26, local-only package from feat/fg-cover fac4f8b, headset untrack
   P1 (focus jitter) first. Next: why the aircraft-vector path never holds live (the fixed-point test: the class and
   vector at the current end within 1 px) and the late frames of the g2 blocks.
 
+### Aircraft cover, round 2 (2026-11-26, OFXR 0130 e7a1c51)
+
+- **Why lever 2 never fired live** (`analysis\lever2_why.py` on the 16-byte records of run 20261126-0507): of the
+  sky gathers with an aircraft within reach, 22 % passed lever 2's gates; their aircraft candidates' fixed points fell
+  on a cell DCS calls the sky in 99.97 % of cases (the vector itself was right: 0.07 px median where the class
+  matched), and 65 % of those ends were within two cells of the aircraft's cells (85 % within three). DCS's class and MVs
+  cover only part of what DLSS draws of a distant aircraft, so the exact class test at the current end failed on drawn
+  aircraft. Fix: the fixed point counts within two cells of a cell of the candidate's class and vector, where the two
+  frames' samples agree (8/255 encoded); the cover reaches two MV texels. Live the aircraft-vector path now takes
+  8-12 % of the trail (was 0 %).
+- **Live-condition fixture** (`XRFG_TEST_FG_COVER_LIVE=<dir>`, pairs exported by `export_live_fixture.py` from the
+  dumps: the frame's own MV / class atlases, the real frames in the synthesizer's target pixels, the measured
+  motion and the colour-located aircraft): 1200 m pairs of the focus layer (1952 px), off -> cover, cross-fade
+  0.35-0.62 -> 0.12-0.28, within 1 px 0.58-0.83 -> 0.86-0.97; periphery layer (1076 px), 0.42-0.99 -> 0.23-0.78,
+  0.79-0.93 -> 0.92-0.98. The flown round-1 shader on the same pairs: 0.17-0.34. Pairs where the aircraft moves under
+  4 px are not meaningful (their cross-fade is the reference).
+- **Diagnosis flights round 2** (`runs\20261126-0747`), periphery cover, within1 / cross-fade: 1200 m 0.64 / 0.36
+  (round 1 0.50 / 0.68), 600 m 0.93 / 0.42 (0.18 / 0.39), 1800 m 0.19 / 1.00 (an aircraft of about one texel, contrast
+  0.1 code: nothing to measure or to cover). Cover + focus MVs: 0.40 / 0.53, 0.33 / 0.40, 0.30 / 0.99: worse than the
+  periphery cover.
+- **Gate P1** (`analysis\p1_check.py`, engine dumps of a flight with the simulated gaze still, then saccading 8-14
+  degrees): with the gaze still DCS's focus MVs of the sky match the periphery's MVs mapped with the CURRENT focus fovTan
+  at both ends exactly (0.000 px median and p90): jitter-free. The fovTan itself moves 0.3-1.0 focus texel every frame:
+  it is DCS's jittered projection's. When the gaze moves (the inset shifted 28-428 px between frames) DCS's focus MVs
+  carry that shift (|MV| 28-374 px on still sky) and match the PREVIOUS frame's fovTan (residual 0.4-1.1 px, the jitter
+  difference), not the current one (residual = the shift): `gPrevFrameViewProj` of a focus view is that view's previous
+  camera, projection included (review HIGH-1 confirmed). OFXR therefore keeps the current fovTan (exact while the
+  gaze holds) and refuses a pair whose fovTan moved more than 1.5 texels (a gaze move); the refused pairs take the
+  periphery's MVs. `[Dev] CockpitMotionFocusAssumeJitterFree` could become the default (the jitter check passed).
+- **Ghostfree A/B re-flown with the lock held** (`validation-08\runs\20261126-0806`; go-v8.ps1 now takes
+  `quiet.lock` itself for the whole round): ghostW ON - OFF by day -0.176 [-0.386, 0.034], +0.004 [-0.198, 0.207],
+  -0.033 [-0.235, 0.169], all NOT JUDGEABLE (round 1: -0.128, -0.078, -0.143); at night +0.004 / -0.113 / not
+  judgeable. Pooled over the two rounds the day effect is about -0.09: lower, not clearly.
+- **Late frames**: round 1 failed in day g2 and night g2, round 2 in night g3 and day g1 (slow regime), while round 2's
+  day g2 had fewer with the key (23.2 -> 0.0 fast, 50.3 -> 3.7 slow); the optical flow's own time, which the key does
+  not touch, swings with them (1706 -> 2328 us, 7856 us in one off block). Noise of the scene and the GPU, not the key.
+  composition + pack: +20..+30 us fast, -63..+116 us slow (one slow group over the 20 % gate: 202 -> 318 us).
+- **Night** (the pilot's reference, the F-14B(U) "Night Intercept" instant action, Kola 2001-04-05 01:40 moonlight,
+  clean sky; a read-only copy with the fg-diag crossings and the player's autopilot engaged, `missions\
+  qvbench_v8_kolanight2.miz`: the unpiloted F-14 of the first copy wandered off course and crashed at about FLY + 61 s,
+  so its windows were invalid; with the autopilot every crossing passed in front at the planned time, the ownship alive
+  to the end, all four windows valid in both arms). Located from DCS's class atlas, not from colour
+  (`analysis\class_ghost.py`), in the swapchain's sRGB codes: the moonlit sky 3.3-5.3 codes, the silhouette 0.3-0.7
+  code DARKER than the sky. Cross-fade fraction off -> cover on the same crossings: 1800 m 0.79 -> 0.50, 450 m 0.96 ->
+  0.70 (codes; log luminance and local-contrast-normalised give the same within 0.04). The validation-08 night
+  captures (I23 base, same date and weather, 4 km): the located "object" is the nav light and its renderer trail; the
+  silhouette is not above the sky's noise either. What the swapchain holds of the night silhouette is below 1 code, so
+  the headset's own brightness / gamma (Pimax brightness, display) or the pilot's DCS gamma must be what lifts it to the
+  5-20/255 the pilot sees; lever 2's 2/255 gates cannot see sub-code differences, lever 1 (class-based) acts anyway.
+  Offline, a moonlit fixture ("crossing night": sky 3 codes, silhouette 6-14 codes above it, a 2 px nav light at each
+  nose): cross-fade 0.56 -> 0.17, within 1 px 0.90 -> 0.98, lights 14.3 -> 12.3, with the focus MVs 0.49 -> 0.11. A
+  silhouette the swapchain holds at 5-20 codes is handled: the cover does not go through the 16/255 colour check (its
+  own gates are 2/255 encoded), so no lower or relative check is needed for it.
+
+Verdict, against the targets (within 1 px > 0.8, cross-fade < 0.4, ghostW clearly lower, no pacing regression):
+- Lever 1 + 2 (periphery): 600 m meets the image targets, 1200 m meets the cross-fade target (within1 0.64), 1800 m
+  cannot (an aircraft of one MV texel, below one code of contrast); ghostW lower by day but not clearly; pacing within
+  the gate except one slow-regime group. NO-GO as a default; useful as an option.
+- Lever 3 (focus MVs through the cover): worse than the periphery cover in both diagnosis rounds. NO-GO.
+- Limit: DCS's class and MVs cover a fraction of a distant aircraft's drawn pixels, and the farthest aircraft are
+  smaller than one MV texel; no composition rule can move pixels the G-buffer does not hold.
+
 ## Live A/B plan (validation-08)
 
 Nothing below has been flown. The harness is `artifacts/validation-08` (`go-v8.ps1`, `scenarios/make_scenarios.py`,
