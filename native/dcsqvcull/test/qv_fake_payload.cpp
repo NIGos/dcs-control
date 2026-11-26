@@ -2,6 +2,8 @@
 // test executable (exports QvTestStarted / QvTestStopping), nothing else.
 #include <windows.h>
 
+#include <cstring>
+
 #include "../src/loader_api.h"
 
 namespace {
@@ -45,3 +47,50 @@ extern "C" __declspec(dllexport) int DcsQvCull_GLoad(void*) {
   return 0;
 }
 extern "C" __declspec(dllexport) long QvFakeGLoadCalls() { return g_fakeGLoadCalls; }
+
+// Cockpit space: stand-ins for the loader's DcsQvCull_Audio* callbacks (audio_space_test.h LuaBridge). AudioWanted pushes
+// the boolean QV_TEST_AUDIO_WANTED says ("1" true, else false: unset is false, so the other Lua checks see no audio
+// work); AudioAircraft and AudioState keep what they were given (QvFakeAudioType, QvFakeAudioState).
+namespace {
+char g_fakeAudioType[256] = {};
+double g_fakeCanopy = -9;
+int g_fakeCanopySrc = -9, g_fakeInside = -9;
+long g_fakeStates = 0;
+}  // namespace
+extern "C" __declspec(dllexport) int DcsQvCull_AudioWanted(void* ls) {
+  using PushBooleanFn = void(__cdecl*)(void*, int);
+  HMODULE lua = GetModuleHandleW(L"lua.dll");
+  auto push = lua ? reinterpret_cast<PushBooleanFn>(GetProcAddress(lua, "lua_pushboolean")) : nullptr;
+  if (!push || !ls) return 0;
+  char v[8] = "0";
+  GetEnvironmentVariableA("QV_TEST_AUDIO_WANTED", v, sizeof(v));
+  push(ls, v[0] == '1');
+  return 1;
+}
+extern "C" __declspec(dllexport) int DcsQvCull_AudioAircraft(void* ls) {
+  using ToLStringFn = const char*(__cdecl*)(void*, int, size_t*);
+  HMODULE lua = GetModuleHandleW(L"lua.dll");
+  auto toL = lua ? reinterpret_cast<ToLStringFn>(GetProcAddress(lua, "lua_tolstring")) : nullptr;
+  size_t n = 0;
+  const char* s = toL && ls ? toL(ls, 1, &n) : nullptr;
+  if (s) strncpy_s(g_fakeAudioType, s, _TRUNCATE);
+  return 0;
+}
+extern "C" __declspec(dllexport) int DcsQvCull_AudioState(void* ls) {
+  using ToNumberFn = double(__cdecl*)(void*, int);
+  HMODULE lua = GetModuleHandleW(L"lua.dll");
+  auto num = lua ? reinterpret_cast<ToNumberFn>(GetProcAddress(lua, "lua_tonumber")) : nullptr;
+  if (!num || !ls) return 0;
+  g_fakeCanopy = num(ls, 1);
+  g_fakeCanopySrc = static_cast<int>(num(ls, 2));
+  g_fakeInside = static_cast<int>(num(ls, 3));
+  ++g_fakeStates;
+  return 0;
+}
+extern "C" __declspec(dllexport) const char* QvFakeAudioType() { return g_fakeAudioType; }
+extern "C" __declspec(dllexport) void QvFakeAudioState(double* canopy, int* src, int* inside, long* calls) {
+  *canopy = g_fakeCanopy;
+  *src = g_fakeCanopySrc;
+  *inside = g_fakeInside;
+  *calls = g_fakeStates;
+}

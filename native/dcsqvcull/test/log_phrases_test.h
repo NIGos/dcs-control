@@ -102,7 +102,8 @@ void Run() {
       {"audio: off (<reason>)", "\"audio: off (%s)\""},
       {"audio: running, <n> sounds, p99 <ms> ms per block", "\"audio: running, %u sounds, p99 %.2f ms per block"},
       {"audio: on (<rate> Hz stereo, HRTF <name>", "\"audio: on (%.0f Hz stereo, HRTF %ls: %u directions"},
-      {"audio: ...; head pose on|off|unused", "\"%llu), overruns %llu; head pose %s\""},
+      // The cockpit space's part sits before "; head pose": the line still ends with it (BinauralAudio.cs PoseRegex).
+      {"audio: ...; head pose on|off|unused", "\"%llu), overruns %llu; space %s; head pose %s\""},
       {"audio: HRTF <name> (crossfading)", "\"audio: HRTF %ls (crossfading)\""},
       {"audio: kill switch (<by>): binaural OFF|ON", "\"audio: kill switch (%s): binaural %s\""},
       {"audio: kill switch ...: binaural OFF (...) / ON", "off ? \"OFF (DCS's own panning)\" : \"ON\""},

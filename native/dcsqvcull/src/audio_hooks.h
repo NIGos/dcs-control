@@ -76,6 +76,12 @@ struct Resolved {
   uint8_t* ctxArray = nullptr;
   volatile int32_t* ctxCount = nullptr;
   char why[200] = {};
+  // Cockpit space (docs/COCKPIT_SPACE.md 3.1-3.2; the optional rows of audio_sigs.h): ed_sound's use-cockpit-gain flag
+  // (ctx+0xe1), the host's allow flag (sound+0x1a8) and the applied cockpit_gain (sound+0x1b0) are read only with
+  // spaceGain; a sound's listener-frame orientation (sound+0xe8) only with spaceOrient. A mismatch turns those reads off
+  // (the space falls back to the camera check and has no aircraft frame), never binaural.
+  bool spaceGain = false, spaceOrient = false;
+  char spaceWhy[200] = {};
 };
 
 // ---- thunk pages ----------------------------------------------------------------------------------------------------
@@ -230,6 +236,24 @@ inline bool InData(const uint8_t* base, const void* p, size_t n) {
   return sigscan::InImage(base, p, n) && !InCode(base, static_cast<const uint8_t*>(p), n);
 }
 
+// The optional rows (cockpit space): each found and hashed like the required ones; the orientation also needs
+// lea rdi, [rcx+0xd0] earlier in its function (rdi + 0x18 = sound+0xe8). Sets spaceGain / spaceOrient and, when one is
+// missing, spaceWhy. Never fails Resolve.
+inline void ResolveSpace(const uint8_t* base, const SigTable& t, Resolved* r) {
+  static Resolved tmp;  // Resolve runs on one thread at a time (as MaskedHash's buffer)
+  tmp.why[0] = 0;
+  r->spaceGain = Locate(base, t, audsig::kSpaceGain, r->analysedBuild, &tmp) != nullptr;
+  if (!r->spaceGain) snprintf(r->spaceWhy, sizeof(r->spaceWhy), "%s", tmp.why);
+  tmp.why[0] = 0;
+  const uint8_t* o = Locate(base, t, audsig::kSpaceOrient, r->analysedBuild, &tmp);
+  if (o && !BytesAt(o - 0x46, "48 8D B9 D0 00 00 00")) {
+    o = nullptr;
+    snprintf(tmp.why, sizeof(tmp.why), "SpaceOrient not found (the sound's listener-frame fields differ)");
+  }
+  r->spaceOrient = o != nullptr;
+  if (!r->spaceOrient && !r->spaceWhy[0]) snprintf(r->spaceWhy, sizeof(r->spaceWhy), "%s", tmp.why);
+}
+
 inline bool Resolve(const uint8_t* base, const SigTable& t, ImportFn imports, Resolved* r) {
   *r = Resolved{};
   r->base = const_cast<uint8_t*>(base);
@@ -237,7 +261,7 @@ inline bool Resolve(const uint8_t* base, const SigTable& t, ImportFn imports, Re
   if (!nt) return Fail(r, "ed_sound.dll not found (no PE image)");
   r->analysedBuild = nt->FileHeader.TimeDateStamp == t.timestamp && nt->OptionalHeader.SizeOfImage == t.sizeOfImage;
   uint8_t* loc[audsig::kCount] = {};
-  for (int i = 0; i < audsig::kCount; ++i)
+  for (int i = 0; i < audsig::kRequired; ++i)
     if (!(loc[i] = Locate(base, t, i, r->analysedBuild, r))) return false;
   r->panner = reinterpret_cast<PannerFn>(loc[audsig::kPanner]);
   r->voiceRender = reinterpret_cast<VoiceRenderFn>(loc[audsig::kVoiceRender]);
@@ -319,6 +343,7 @@ inline bool Resolve(const uint8_t* base, const SigTable& t, ImportFn imports, Re
   if (!InData(base, const_cast<uint32_t*>(r->frameCounter), 4) || !InData(base, const_cast<int32_t*>(r->engineState), 4) ||
       !InData(base, r->ctxArray, 8 * audv::off::kCtxStride) || !InData(base, const_cast<int32_t*>(r->ctxCount), 4))
     return Fail(r, "SND_process globals not found (outside the data sections)");
+  ResolveSpace(base, t, r);
   return true;
 }
 

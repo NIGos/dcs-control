@@ -610,18 +610,23 @@ Sim thread (PanWrap, ed mutex held), new reads per 3D sound (offsets of section 
 and `C_now`, so the late correction is applied once, to both. New `meta_flags`: `kThroughCanopy = 128`,
 `kCockpitCtx = 256`; new field `float cockpitGain` (sound+0x1b0 when applied, else 1).
 
-New seqlock block `SpaceState` (new `audio_space.h`, sim thread writes once per frame, render thread reads per block):
+New seqlock block `SpaceState` (new `audio_space.h`, sim thread writes once per frame, render thread reads per block).
+As built, the canopy and the family are not in it (the control thread publishes them with the preset, `audr::SpaceCtl`);
+it carries what the sim reads:
 
 ```cpp
 struct SpaceData {
     uint32_t frame;          // SND_process frame
-    uint32_t flags;          // kInside, kFrameValid, kFrameFromSound, kCanopyKnown
+    uint32_t flags;          // kInside, kFrameValid, kFrameFromSound, kInsideKnown, kPoseValid, kReads
     float c[4];              // C_dcs: aircraft -> listener frame (x, y, z, w)
-    float qUsed[4];          // head pose DCS used this frame (as MetaData)
+    float qUsed[4];          // head pose DCS used for it (as MetaData)
     uint64_t poseBase;
-    float canopy;            // 0..1 from the Lua bridge (last value), 0 unknown
-    uint8_t family;          // cockpit_space::Family resolved (setting or table)
+    int64_t frameQpc;        // when c was taken
     uint8_t cockpitCtx;      // context id voted as cockpit (8 unknown)
+    uint8_t worldCtx;        // the context the listener probe read (8 none)
+    float spreadDeg;         // the last frame's spread of C between the cockpit sounds
+    uint32_t unreliable;     // frames whose C was refused
+    float lgGain, lgPitch, lgLowpass;  // the listener probe
 };
 ```
 
@@ -639,10 +644,21 @@ called. Skip all room calls while `Room::Idle()` and the wet target is 0.
 |---|---|---|
 | `DcsQvCull_AudioWanted() -> bool` | gate | false while `Binaural=0` or `CockpitSpace=0`: nothing below runs, nothing allocated |
 | `DcsQvCull_AudioAircraft(typeName: string)` | `DCS.getPlayerUnitType()`, else `Export.LoGetSelfData().Name` | `onSimulationStart`, `onPlayerChangeSlot` (own), and every 2 s of model time if it changed (cheap string compare in Lua) |
-| `DcsQvCull_AudioState(canopy: number or -1, inside: number -1/0/1)` | `Export.LoGetMechInfo().canopy.value`, else `LoGetAircraftDrawArgumentValue(38)`, else -1; inside from the existing `inCockpit` check | every 0.2 s (wall clock, like `inCockpit`) while wanted |
+| `DcsQvCull_AudioState(canopy: number or -1, source: 1 mech / 2 arg38 / 0 none, inside: number -1/0/1)` | `Export.LoGetMechInfo().canopy.value`, else `LoGetAircraftDrawArgumentValue(38)`, else -1; inside from the existing `inCockpit` check (-1 when its exports are missing) | every 0.2 s (wall clock, like `inCockpit`) while wanted |
 
-Every call in `pcall`; nil exports (MP restrictions) give -1. The payload copies the values into atomics read by the
-control thread, which resolves the family and publishes them into `SpaceState` (the sim thread copies the atomics).
+Every call in `pcall`; nil exports (MP restrictions) give -1. The type is sent when it changed (checked every 2 s) and
+again every 10 s, so a hot-reloaded payload hears it too. The payload copies the values into atomics read by the
+control thread, which resolves the family and publishes the preset, the canopy and the camera check for the render side
+(`audr::SpaceCtl`); the sim thread publishes what it reads from ed_sound in `SpaceState` (`audio_space.h`).
+
+As built (MODULE, `feat/cspace-module`): the payload exports behind them are `DcsQvPayload_AudioWanted()`,
+`DcsQvPayload_AudioAircraft(const char*)` and `DcsQvPayload_AudioState(double canopy, int source, int inside)`
+(`loader_api.h`). Until CORE is merged the module builds against stand-in copies of `binaural_room.h` and
+`cockpit_space.h` (`native/dcsqvcull/src/standin`, used only while `native/binaural/src/room.cpp` does not exist) with
+`DCSQV_HAVE_ROOM=0`: the payload creates no Room and its output is unchanged; the module's tests link a recording fake
+Room. The module skips every room call while the block-end wet weight and the previous one are 0 and `Room::Idle()` is
+true; CORE's `Idle()` must therefore become true once the wet weight is 0 and the tail has decayed, whatever the
+sends (voices keep playing in external views).
 
 ### 8.4 Control thread
 
@@ -661,8 +677,12 @@ audio: cockpit space: inside <0|1>, canopy <0.00..1.00|unknown> (<mech|arg38|non
 audio: cockpit space: frame from <sound|none>, cockpit ctx <i>, spread <deg> deg, unreliable frames <n>   (on change, and once per minute while unreliable)
 audio: cockpit space: early reflections off (CPU budget) | early reflections on again
 audio: ctx <i> listener gain=<f> pitch=<f> lowpass=<f>                                       (probe: at enable and on any change > 1 %)
-audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB
+audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB; head pose <on|off|unused>
+audio: cockpit space: ed_sound's cockpit fields not found (<why>); <what is off>               (at install, only when a signature row is missing)
 ```
+
+As built, the space's part of the running line sits before `; head pose ...` (the app's parser expects the line to end
+with it), and reads `space Off` while the space is off.
 
 The probe line answers [A] of section 3.1: open and close the canopy once in the first live flight and see whether the
 world context's listener gain or low-pass moves with it.

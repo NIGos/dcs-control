@@ -192,6 +192,9 @@ std::atomic<DcsQvPayloadQuiesceFn> g_quiesceActive{nullptr};
 std::atomic<DcsQvPayloadMissionEventFn> g_missionActive{nullptr};
 std::atomic<DcsQvPayloadGLoadFn> g_gloadActive{nullptr};  // R51
 std::atomic<DcsQvPayloadGLoadWantedFn> g_gloadWantedActive{nullptr};  // R90
+std::atomic<DcsQvPayloadAudioWantedFn> g_audioWantedActive{nullptr};      // cockpit space
+std::atomic<DcsQvPayloadAudioAircraftFn> g_audioAircraftActive{nullptr};
+std::atomic<DcsQvPayloadAudioStateFn> g_audioStateActive{nullptr};
 // DCS is shutting down (DcsQvCull_Shutdown): the watcher loads nothing more.
 std::atomic<bool> g_exiting{false};
 // Serializes a payload swap (watcher) with the exit quiesce (Lua thread).
@@ -241,6 +244,9 @@ LoadResult LoadPayload(const std::wstring& src) {
   auto gload = reinterpret_cast<DcsQvPayloadGLoadFn>(GetProcAddress(m, "DcsQvPayload_GLoad"));  // R51
   auto gloadWanted =
       reinterpret_cast<DcsQvPayloadGLoadWantedFn>(GetProcAddress(m, "DcsQvPayload_GLoadWanted"));  // R90
+  auto audioWanted = reinterpret_cast<DcsQvPayloadAudioWantedFn>(GetProcAddress(m, "DcsQvPayload_AudioWanted"));
+  auto audioAircraft = reinterpret_cast<DcsQvPayloadAudioAircraftFn>(GetProcAddress(m, "DcsQvPayload_AudioAircraft"));
+  auto audioState = reinterpret_cast<DcsQvPayloadAudioStateFn>(GetProcAddress(m, "DcsQvPayload_AudioState"));
   std::unique_lock<std::timed_mutex> swap(g_swapMutex);
   if (g_exiting.load()) {
     Logf("loader: DCS is shutting down; payload not started");
@@ -250,6 +256,9 @@ LoadResult LoadPayload(const std::wstring& src) {
   g_missionActive.store(nullptr);
   g_gloadActive.store(nullptr);
   g_gloadWantedActive.store(nullptr);
+  g_audioWantedActive.store(nullptr);
+  g_audioAircraftActive.store(nullptr);
+  g_audioStateActive.store(nullptr);
   g_status.store(0, std::memory_order_release);  // not ready during the swap
   g_dualStatus.store(0, std::memory_order_release);
   DcsQvPayloadStopFn previous = g_stopActive;
@@ -294,6 +303,9 @@ LoadResult LoadPayload(const std::wstring& src) {
   g_missionActive.store(mission);
   g_gloadActive.store(gload);
   g_gloadWantedActive.store(gloadWanted);
+  g_audioWantedActive.store(audioWanted);
+  g_audioAircraftActive.store(audioAircraft);
+  g_audioStateActive.store(audioState);
   // The new payload patches from its own worker thread; slots it does not
   // claim within 60 s are restored by the watcher (see Watcher()).
   return kLoadOk;
@@ -460,6 +472,51 @@ extern "C" __declspec(dllexport) int DcsQvCull_GLoadWanted(void* ls) {
     wanted = g_gloadActive.load() != nullptr;
   pushBoolean(ls, wanted);
   return 1;
+}
+
+// Cockpit space (docs/COCKPIT_SPACE.md 8.3): the hook's callbacks for the payload's audio module. Lua 5.1 C functions
+// through DCS's own lua.dll (resolved once, no link dependency); they never fail and never raise a Lua error.
+namespace {
+template <class F>
+F LuaFn(const char* name) {
+  HMODULE lua = GetModuleHandleW(L"lua.dll");
+  return lua ? reinterpret_cast<F>(GetProcAddress(lua, name)) : nullptr;
+}
+}  // namespace
+// DcsQvCull_AudioWanted() -> boolean: true while 3D audio and the cockpit space are on (the hook asks DCS nothing for
+// it otherwise); false without a payload or with one that predates the space.
+extern "C" __declspec(dllexport) int DcsQvCull_AudioWanted(void* ls) {
+  using PushBooleanFn = void(__cdecl*)(void*, int);
+  static const PushBooleanFn pushBoolean = LuaFn<PushBooleanFn>("lua_pushboolean");
+  if (!pushBoolean || !ls) return 0;
+  const DcsQvPayloadAudioWantedFn f = g_audioWantedActive.load();
+  pushBoolean(ls, f && f() != 0 ? 1 : 0);
+  return 1;
+}
+// DcsQvCull_AudioAircraft(typeName): the player's unit type name (a string; anything else is "unknown").
+extern "C" __declspec(dllexport) int DcsQvCull_AudioAircraft(void* ls) {
+  using ToLStringFn = const char*(__cdecl*)(void*, int, size_t*);
+  using TypeFn = int(__cdecl*)(void*, int);
+  static const ToLStringFn toLString = LuaFn<ToLStringFn>("lua_tolstring");
+  static const TypeFn type = LuaFn<TypeFn>("lua_type");
+  if (!toLString || !type || !ls) return 0;
+  const DcsQvPayloadAudioAircraftFn f = g_audioAircraftActive.load();
+  if (!f) return 0;
+  constexpr int kLuaTString = 4;
+  size_t n = 0;
+  const char* s = type(ls, 1) == kLuaTString ? toLString(ls, 1, &n) : nullptr;
+  f(s && n < 256 ? s : "");
+  return 0;
+}
+// DcsQvCull_AudioState(canopy, source, inside): canopy 0..1 or -1, its source (1 mech, 2 draw argument 38, 0 none), the
+// camera check (1 cockpit, 0 external, -1 unknown). Missing arguments read as 0 (lua_tonumber).
+extern "C" __declspec(dllexport) int DcsQvCull_AudioState(void* ls) {
+  using ToNumberFn = double(__cdecl*)(void*, int);
+  static const ToNumberFn toNumber = LuaFn<ToNumberFn>("lua_tonumber");
+  if (!toNumber || !ls) return 0;
+  if (const DcsQvPayloadAudioStateFn f = g_audioStateActive.load())
+    f(toNumber(ls, 1), static_cast<int>(toNumber(ls, 2)), static_cast<int>(toNumber(ls, 3)));
+  return 0;
 }
 
 // R90: one log line stamped with the time the payload's asynchronous log path took it (loader_api.h).

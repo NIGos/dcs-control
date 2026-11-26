@@ -45,7 +45,18 @@ LOCS = [
      "int voice_render(Voice*, float* out, uint32 frames)"),
     ("Mix", 0x1B180, "48 89 5C 24 10 48 89 6C 24 18 56 57 41 54 41 56 41 57 48 83 EC 20 48 8B F1 4C 8D 79 20", 0,
      "void mix(Renderer*, float* out, uint32 frames)"),
+    # Optional (cockpit space, docs/COCKPIT_SPACE.md 3.1-3.2): a mismatch turns the space's reads of ed_sound off,
+    # never binaural. The sound update's canopy damping: cmp byte [ctx+0xe1], 0 / cmp byte [sound+0x1a8], 0 /
+    # sound+0x1b0 = proto->+0x18->+0xa0 (cockpit_gain).
+    ("SpaceGain", 0x7010, "80 BF E1 00 00 00 00 74 ?? 80 BB A8 01 00 00 00 74 ?? 48 8B 43 50 48 85 C0 74 ?? 48 8B 40 18 "
+     "8B 88 A0 00 00 00 89 8B B0 01 00 00", 0,
+     "sound update: the context's use-cockpit-gain flag, the host's allow flag, the sdef's cockpit_gain"),
+    # The listener-frame orientation of a sound: sound+0xe8 = f(sound+0x80, ctx+0x78) (rdi = sound+0xd0).
+    ("SpaceOrient", 0x735D, "48 8D 93 80 00 00 00 4D 8D 47 78 48 8D 4F 18 E8", 0,
+     "sound update: the source's orientation in the listener frame (sound+0xe8)"),
 ]
+# The first REQUIRED rows must resolve for binaural audio; the rest are optional (src/audio_hooks.h ResolveSpace).
+REQUIRED = 7
 
 
 def find_bin(arg):
@@ -215,6 +226,8 @@ def render(img: Image, rows, masks):
     w.append(f"inline constexpr uint32_t kSizeOfImage = 0x{pe.OPTIONAL_HEADER.SizeOfImage:x}u;")
     w.append("")
     w.append("enum Id : uint8_t { " + ", ".join(f"k{r['id']}" for r in rows) + ", kCount };")
+    w.append(f"inline constexpr int kRequired = {REQUIRED};  // rows before it must resolve; the rest are optional "
+             "(cockpit space)")
     w.append("")
     w.append("inline constexpr Mask kMasks[] = {")
     line = "   "

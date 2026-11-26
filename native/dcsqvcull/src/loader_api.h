@@ -53,6 +53,15 @@ using DcsQvPayloadGLoadFn = void (*)(float gx, float gy, float gz, double modelT
 // DcsQvCull_GLoadWanted returns it to the Lua hook, whose onSimulationFrame then skips its Export calls.
 // Payloads without it count as wanting them (the hook samples every frame, as before).
 using DcsQvPayloadGLoadWantedFn = int (*)();
+// Optional exports (cockpit space, docs/COCKPIT_SPACE.md 8.3), behind the loader's Lua callbacks DcsQvCull_AudioWanted,
+// DcsQvCull_AudioAircraft and DcsQvCull_AudioState. Any thread; lock-free except a short lock around the type name.
+//   AudioWanted: nonzero while 3D audio and the cockpit space are on (else the hook makes no Export call for it).
+//   AudioAircraft: the player's unit type name (DCS.getPlayerUnitType(), else Export.LoGetSelfData().Name); "" unknown.
+//   AudioState: the canopy 0 (closed) .. 1 (open), negative unknown; its source 1 LoGetMechInfo, 2 draw argument 38,
+//     0 none; the camera check 1 cockpit, 0 external view, -1 unknown.
+using DcsQvPayloadAudioWantedFn = int (*)();
+using DcsQvPayloadAudioAircraftFn = void (*)(const char* typeName);
+using DcsQvPayloadAudioStateFn = void (*)(double canopy, int canopySource, int inside);
 
 // Loader export (R90): void DcsQvCull_LogAt(const char* line, const SYSTEMTIME* st) appends one line stamped with
 // st (the time the payload's asynchronous log path took the line; nullptr = now). Payloads find it in the module

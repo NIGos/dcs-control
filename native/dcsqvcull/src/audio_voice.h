@@ -219,6 +219,9 @@ constexpr uint32_t kStereo = 32;    // a stereo wave (counted; every owned voice
 constexpr uint32_t kWide = 64;      // a stereo wave whose sdef sets auto_width: informational (the sound log). ED's
                                     // flag only narrows a sound with distance; point or wide is decided by kNear and
                                     // the render side's diffuse detector (audio_render.h)
+constexpr uint32_t kThroughCanopy = 128;  // cockpit space: an outside voice heard through the canopy (its context uses
+                                          // cockpit gain and its host allows it; audio_space.h ThroughCanopy)
+constexpr uint32_t kCockpitCtx = 256;     // cockpit space: a voice of the context voted as the cockpit's
 }  // namespace meta_flags
 
 struct MetaData {
@@ -234,6 +237,7 @@ struct MetaData {
   float qUsed[4];         // head pose (OpenXR, base space) DCS used: x, y, z, w
   float tUsed[3];
   uint64_t poseBase;      // its base space handle
+  float cockpitGain;      // cockpit space: DCS's canopy damping applied to this voice (sound+0x1b0; 1 when not)
 };
 
 struct MetaSlot {

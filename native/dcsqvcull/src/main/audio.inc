@@ -52,6 +52,46 @@ std::atomic<dcsvr_headpose::Block*> g_pose{nullptr};
 std::atomic<uint32_t> g_selfPid{0};       // the pose block's writer must be this process (set by Start)
 thread_local audr::Block* t_block = nullptr;
 
+// Cockpit space (docs/COCKPIT_SPACE.md): the sim's SpaceState (audio_space.h), the control thread's settings for the
+// render side's room (audio_render.h SpaceCtl), and what the Lua bridge reports (loader exports DcsQvCull_Audio*: the
+// Lua thread writes, the control thread reads).
+audspace::SpaceSlot g_space;
+audr::SpaceCtlSlot g_spaceCtl;
+audr::SpaceCtl g_spaceCtlNow;               // control thread: the last published copy
+std::atomic<bool> g_luaWanted{false};       // DcsQvCull_AudioWanted: binaural and the space on (control thread sets)
+SRWLOCK g_luaLock = SRWLOCK_INIT;
+char g_luaType[64] = {};                    // under g_luaLock: the player's unit type ("" unknown)
+std::atomic<float> g_luaCanopy{-1.0f};      // 0..1, -1 unknown
+std::atomic<int> g_luaCanopySrc{0};         // 1 LoGetMechInfo, 2 draw argument 38, 0 none
+std::atomic<int> g_luaInside{-1};           // the camera check: 1 cockpit, 0 external, -1 unknown
+std::atomic<uint64_t> g_luaCalls{0};        // bridge calls received (tests)
+
+void LuaAircraft(const char* type) {
+  g_luaCalls.fetch_add(1, std::memory_order_relaxed);
+  char t[64] = {};
+  if (type) {
+    // A unit type name: printable ASCII only (it reaches the log and the app's status line).
+    size_t n = 0;
+    for (; type[n] && n < sizeof(t) - 1; ++n) t[n] = type[n] >= 0x20 && type[n] < 0x7f ? type[n] : '?';
+  }
+  AcquireSRWLockExclusive(&g_luaLock);
+  memcpy(g_luaType, t, sizeof(t));
+  ReleaseSRWLockExclusive(&g_luaLock);
+}
+void LuaState(double canopy, int src, int inside) {
+  g_luaCalls.fetch_add(1, std::memory_order_relaxed);
+  const bool known = std::isfinite(canopy) && canopy >= 0.0;
+  g_luaCanopy.store(known ? static_cast<float>(canopy > 1.0 ? 1.0 : canopy) : -1.0f, std::memory_order_relaxed);
+  g_luaCanopySrc.store(known ? (src == 2 ? 2 : 1) : 0, std::memory_order_relaxed);
+  g_luaInside.store(inside > 0 ? 1 : (inside == 0 ? 0 : -1), std::memory_order_relaxed);
+}
+std::string LuaType() {
+  AcquireSRWLockShared(&g_luaLock);
+  std::string s(g_luaType);
+  ReleaseSRWLockShared(&g_luaLock);
+  return s;
+}
+
 // The head pose readers' limits (head_pose_reader.h): 150 ms staleness, 50 ms horizon, speed guards, this process.
 inline dcsvr_headpose::ReaderLimits PoseLimits() {
   dcsvr_headpose::ReaderLimits l;
@@ -67,6 +107,7 @@ struct Rt {
   int maxObjects = 48;
   int cpuBudget = 25;
   uint32_t exclude = 0;
+  int spaceLevel = 0;  // CockpitSpace (the sim reads ed_sound's space fields only when > 0)
 };
 struct RtSlot {
   std::atomic<uint32_t> seq{0};
@@ -157,6 +198,9 @@ void SimFrame(uint32_t f) {
   g_simCfg.on = on;
   g_simCfg.limit = std::min<int>(rt.maxObjects, static_cast<int>(g_cnt.limitNow.load(std::memory_order_relaxed)));
   g_simCfg.excludeMask = rt.exclude;
+  // Cockpit space: ed_sound's space fields are read only while it is wanted and their code matched (audio_hooks.h).
+  g_sim.space.gainReads = on && rt.spaceLevel > 0 && g_res.spaceGain;
+  g_sim.space.orientReads = on && rt.spaceLevel > 0 && g_res.spaceOrient;
   audsim::Env& e = g_simEnv;
   e.boundRenderer = b ? b->renderer : nullptr;
   e.ctxArray = g_res.ctxArray;
@@ -313,6 +357,20 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
       g_cnt.poseBlocks.fetch_add(1, std::memory_order_relaxed);
     }
   }
+  // Cockpit space: the room's block-end targets and its BeginBlock (skipped, no call at all, while it is off and idle).
+  int64_t roomTicks = 0;
+  if (b->room) {
+    audspace::SpaceData sd;
+    const bool haveSd = audspace::SpaceRead(g_space, &sd);
+    static thread_local audr::SpaceCtl ctl;  // this thread's last good copy (a busy writer keeps it)
+    audr::ReadCtl(g_spaceCtl, &ctl);
+    const int64_t r0 = Qpc();
+    {
+      audr::MxcsrScope fz;
+      audr::RoomBlockBegin(blk, haveSd ? &sd : nullptr, ctl, now, freq);
+    }
+    roomTicks += Qpc() - r0;
+  }
   t_block = &blk;
   g_res.mix(rend, out, frames);
   t_block = nullptr;
@@ -320,11 +378,25 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
     audr::MxcsrScope fz;
     audr::CoreEnd(b->core);
   }
+  if (blk.roomOn) {
+    // After every voice's send: the room's buses and tail are added to the block, inside our FTZ / DAZ scope and the
+    // budget's measure.
+    const int64_t r0 = Qpc();
+    {
+      audr::MxcsrScope fz;
+      audr::RoomRender(b->room, out, frames);
+      audr::RoomEnd(b->room);
+    }
+    roomTicks += Qpc() - r0;
+    blk.dspTicks += roomTicks;
+  }
+  if (b->room) audr::RoomBlockEnd(blk, g_cnt, roomTicks, freq);
   b->lastUseQpc.store(now, std::memory_order_relaxed);
   g_cnt.armedBlocks.fetch_add(1, std::memory_order_relaxed);
   g_cnt.activeLastBlock.store(blk.hrtfVoices, std::memory_order_relaxed);
   g_cnt.ownedWideNow.store(blk.wideVoices, std::memory_order_relaxed);
-  audr::BudgetTick(*b, g_cnt, g_ev, {rt.cpuBudget, rt.maxObjects}, frames, blk.dspTicks, now, freq);
+  audr::BudgetTick(*b, g_cnt, g_ev, {rt.cpuBudget, rt.maxObjects}, frames, blk.dspTicks, now, freq,
+                   blk.roomOn && blk.roomEarly && blk.roomFrameValid);
   // ED's overrun counter counts any slow block, ours or not (a system or DCS hitch). An overrun is held against binaural
   // only when our own work took a real share of this block or the one before (half the CPU budget or more); our usual
   // cost (a few percent of a block) never stops it for somebody else's hitch.
@@ -397,7 +469,9 @@ bool Install() {
   g_sim.meta = &g_meta;
   g_sim.cnt = &g_cnt;
   g_sim.ev = &g_ev;
+  g_sim.spaceOut = &g_space;
   g_sim.Reset();
+  audspace::SpaceWrite(g_space, audspace::SpaceData{});
   g_installed.store(true, std::memory_order_release);
   // The render side first (it passes through until a block is armed), then the panner calls under ED's mutex.
   bool ok = audhk::WriteCall(r.site[audhk::kP4], audhk::ThunkOf(page, audhk::kP4), false) &&
@@ -424,6 +498,11 @@ bool Install() {
   const IMAGE_NT_HEADERS64* nt = sigscan::NtHeaders(base);
   Log("audio: hooks in (ed_sound.dll 0x%08x, %s)", nt ? nt->FileHeader.TimeDateStamp : 0u,
       r.analysedBuild ? "the analysed build" : "located by pattern");
+  if (!r.spaceGain || !r.spaceOrient)
+    Log("audio: cockpit space: ed_sound's cockpit fields not found (%s); %s", r.spaceWhy,
+        !r.spaceGain && !r.spaceOrient ? "inside from the camera, no through-canopy class, no aircraft frame"
+        : !r.spaceGain                 ? "inside from the camera, no through-canopy class"
+                                       : "no aircraft frame (late reflections only)");
   return true;
 }
 
@@ -463,6 +542,7 @@ struct LoadedSet {
 };
 std::vector<LoadedSet> g_sets;                 // every set ever loaded and not yet released
 std::vector<audr::Binding*> g_retiredBindings; // freed 2 s after their last block
+std::vector<const binaural::HrtfSet*> g_retiredByCore, g_retiredByRoom;  // sets given back, waiting for the other one
 audcfg::Read g_cfgRead;
 bool g_haveCfg = false;
 std::wstring g_hrtfName;                       // the set the current binding uses
@@ -694,6 +774,20 @@ void Bind(void* rend, const char* how) {
     LogOff("no memory for the binaural renderer");
     return;
   }
+  // Cockpit space: the room renders with the voices' set and head; it exists only in builds with the core's Room.
+  if (audr::kHaveRoom) {
+    binaural::Room* room = audr::RoomNew();
+    char rerr[160] = {};
+    if (room && audr::RoomInit(room, b->rate, binaural::kMaxSources, rerr, sizeof(rerr))) {
+      audr::RoomSetHrtf(room, set);
+      audr::RoomSetHeadRadius(room, cc.headRadiusM);
+      if (g_spaceCtlNow.haveParams) audr::RoomSetParams(room, g_spaceCtlNow.params);
+      b->room = room;
+    } else {
+      audr::RoomDelete(room);
+      Log("audio: cockpit space: off (the room did not start: %s)", rerr[0] ? rerr : "no memory");
+    }
+  }
   b->lastUseQpc.store(Qpc());
   audr::Binding* old = g_binding.exchange(b, std::memory_order_acq_rel);
   if (old) {
@@ -721,6 +815,7 @@ void LogOnAgain(const char* why) {
 }
 
 void FreeBinding(audr::Binding* b) {
+  audr::RoomDelete(b->room);
   audr::CoreDelete(b->core);
   _aligned_free(b->scratch);
   delete b;
@@ -747,7 +842,9 @@ void PublishRt() {
   r.maxObjects = c.maxObjects;
   r.cpuBudget = c.cpuBudgetPercent;
   r.exclude = c.excludeContextMask;
+  r.spaceLevel = c.binaural ? g_cfgRead.space.level : 0;
   WriteRt(r);
+  g_luaWanted.store(c.binaural && g_cfgRead.space.level > 0, std::memory_order_relaxed);
 }
 
 std::wstring g_devDirAudio;
@@ -768,6 +865,7 @@ void ReadConfig(bool force) {
   for (int i = 0; i < r.noteCount; ++i) Log("%s", r.notes[i]);
   const bool first = !g_haveCfg;
   const binaural_config::AudioConfig prev = g_cfgRead.cfg;
+  const audcfg::SpaceConfig prevSpace = g_cfgRead.space;
   g_cfgRead = r;
   g_haveCfg = true;
   g_rejectedRenderer = nullptr;  // a refused output is looked at again with the new settings
@@ -778,6 +876,9 @@ void ReadConfig(bool force) {
         "LevelTrimDb=%.1f CpuBudgetPercent=%d ExcludeContexts=0x%02x LogVoices=%d",
         c.binaural ? 1 : 0, LogSetName(c.hrtf), c.headCircumferenceCm, c.lateHeadTracking ? 1 : 0, c.nearField ? 1 : 0, c.maxObjects,
         c.levelTrimDb, c.cpuBudgetPercent, c.excludeContextMask, c.logVoices ? 1 : 0);
+  if (first || !audcfg::SameSpace(prevSpace, r.space))
+    Log("audio: config: CockpitSpace=%d CockpitSpaceFamily=%ls CockpitSpaceCanopy=%d", r.space.level,
+        r.space.familyAuto ? L"auto" : cockpit_space::FamilyKey(r.space.family), r.space.canopy ? 1 : 0);
   // Live changes the core takes directly (each ramps inside the next block).
   if (audr::Binding* b = g_binding.load()) {
     bool newSet = false;
@@ -788,6 +889,7 @@ void ReadConfig(bool force) {
       binaural::HrtfSet* set = SetFor(c.hrtf, b->rate, &why, &used);
       if (set && used != g_hrtfName) {
         audr::CoreSetHrtf(b->core, set);
+        if (b->room) audr::RoomSetHrtf(b->room, set);  // the room's buses use the voices' set (retired by both)
         g_curSet = set;
         newSet = true;
         g_hrtfName = used;
@@ -797,8 +899,11 @@ void ReadConfig(bool force) {
     // The head size is relative to the set's own measured head (binaural_config.h PilotItdRadiusM): set again for a new
     // circumference or a new set.
     // The near-field ear positions use the real head radius (C / 2 pi), never the set's fitted one.
-    if ((first || newSet || prev.headCircumferenceCm != c.headCircumferenceCm) && g_curSet)
-      audr::CoreSetHeadRadius(b->core, binaural_config::PilotItdRadiusM(audr::CoreDescribe(g_curSet).datasetHeadRadiusM, c.headCircumferenceCm));
+    if ((first || newSet || prev.headCircumferenceCm != c.headCircumferenceCm) && g_curSet) {
+      const float itd = binaural_config::PilotItdRadiusM(audr::CoreDescribe(g_curSet).datasetHeadRadiusM, c.headCircumferenceCm);
+      audr::CoreSetHeadRadius(b->core, itd);
+      if (b->room) audr::RoomSetHeadRadius(b->room, itd);
+    }
     if (first || prev.headCircumferenceCm != c.headCircumferenceCm)
       audr::CoreSetEarRadius(b->core, binaural_config::HeadRadiusFromCircumferenceCm(c.headCircumferenceCm));
     if (first || prev.nearField != c.nearField) audr::CoreSetNearField(b->core, c.nearField);
@@ -830,6 +935,12 @@ void HandleEvents() {
         break;
       case audr::kEvBudgetUp:
         Log("audio: CPU budget: at most %u sounds now (10 s under half the budget)", e.a);
+        break;
+      case audr::kEvEarlyOff:
+        Log("audio: cockpit space: early reflections off (CPU budget)");
+        break;
+      case audr::kEvEarlyOn:
+        Log("audio: cockpit space: early reflections on again");
         break;
       case audr::kEvOverrunsOff:
         LogOff("DCS reported 3 audio overruns within 10 s; binaural off for this DCS session");
@@ -933,7 +1044,12 @@ void LogVoicesTick() {
   // Then the render side's view of that voice in its last block (Counters::VoiceView; empty when we did not render it):
   // comp the loudness factor, diffuse 0/1, wide 0/1 (DCS's side kept: near or diffuse), panLevel DCS's level for the
   // direction, power the smoothed per-frame power of m L', m R' (the point / wide energy share: sum power by wide).
-  if (!exists) fprintf(f, "time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags,comp,diffuse,wide,panLevel,power\r\n");
+  // Cockpit space (after power): room 1 when sent to the room in its last block, send_db its send gain, through 1 heard
+  // through the canopy, cgain DCS's canopy damping when applied (empty otherwise), ax..az its aircraft-frame position,
+  // dcomp_db the direct gain d. Empty when not sent.
+  if (!exists)
+    fprintf(f, "time,slot,gen,ctx,owned,x,y,z,dist,m,gL,gR,flags,comp,diffuse,wide,panLevel,power,room,send_db,through,"
+               "cgain,ax,ay,az,dcomp_db\r\n");
   SYSTEMTIME st;
   GetLocalTime(&st);
   for (int s = 0; s < audv::kSlots; ++s) {
@@ -945,13 +1061,182 @@ void LogVoicesTick() {
             d.dist, d.mTag, d.gL, d.gR, d.flags);
     const audr::Counters::VoiceView& vv = g_cnt.view[s];
     const uint32_t vs = vv.state.load(std::memory_order_relaxed);
-    if ((vs & audr::Counters::kViewTagged) && vv.gen.load(std::memory_order_relaxed) == d.gen)
-      fprintf(f, ",%.4f,%d,%d,%.4f,%.4g\r\n", vv.comp.load(std::memory_order_relaxed),
+    const bool viewed = (vs & audr::Counters::kViewTagged) && vv.gen.load(std::memory_order_relaxed) == d.gen;
+    if (viewed)
+      fprintf(f, ",%.4f,%d,%d,%.4f,%.4g", vv.comp.load(std::memory_order_relaxed),
               (vs & audr::Counters::kViewDiffuse) ? 1 : 0, (vs & audr::Counters::kViewWide) ? 1 : 0,
               vv.panLevel.load(std::memory_order_relaxed), vv.power.load(std::memory_order_relaxed));
     else
-      fprintf(f, ",,,,,\r\n");
+      fprintf(f, ",,,,,");
+    const bool through = (d.flags & audv::meta_flags::kThroughCanopy) != 0;
+    char cg[24] = "";
+    if (through) snprintf(cg, sizeof(cg), "%.4g", d.cockpitGain);
+    if (viewed && vv.room.load(std::memory_order_relaxed))
+      fprintf(f, ",1,%.2f,%d,%s,%.3f,%.3f,%.3f,%.2f\r\n", vv.sendDb.load(std::memory_order_relaxed), through ? 1 : 0, cg,
+              vv.ax.load(std::memory_order_relaxed), vv.ay.load(std::memory_order_relaxed),
+              vv.az.load(std::memory_order_relaxed), vv.dcompDb.load(std::memory_order_relaxed));
+    else
+      fprintf(f, ",0,,%d,%s,,,,\r\n", through ? 1 : 0, cg);
   }
+  fclose(f);
+}
+
+// ---- control thread: cockpit space ----------------------------------------------------------------------------------
+const char* SpaceLevelName(int l) { return l == 1 ? "Subtle" : l == 2 ? "Normal" : l == 3 ? "Strong" : "Off"; }
+
+// The room's own time per block: p50 / p99 of the last 1024 room blocks, microseconds.
+void RoomTimes(double* p50Us, double* p99Us) {
+  *p50Us = *p99Us = 0;
+  const uint32_t h = g_cnt.roomHead.load(std::memory_order_acquire);
+  const uint32_t n = h < 1024 ? h : 1024;
+  if (!n) return;
+  std::vector<uint32_t> v(n);
+  for (uint32_t i = 0; i < n; ++i) v[i] = g_cnt.roomRing[(h - 1 - i) & 1023].load(std::memory_order_relaxed);
+  std::sort(v.begin(), v.end());
+  *p50Us = v[n / 2] / 10.0;
+  *p99Us = v[std::min<size_t>(n - 1, static_cast<size_t>(n * 0.99))] / 10.0;
+}
+
+struct SpaceState {
+  bool havePub = false;
+  int level = 0;
+  cockpit_space::Family family = cockpit_space::Family::Generic;
+  bool familyAuto = true;
+  std::string type;
+  // log line state
+  bool logged = false;
+  int inside = -2, canopySrc = -2;
+  float canopy = -2;
+  int frameSrc = -1, cockpitCtx = -1;
+  uint32_t unreliable = 0;
+  ULONGLONG unreliableAt = 0;
+  int probeCtx = -1;
+  float probe[3] = {};
+  bool stubLogged = false;
+  int insideNow = 1;           // what the render side uses (for the running line and audio_space.csv)
+  ULONGLONG lastCsv = 0;
+};
+SpaceState g_spaceSt;
+
+// Every 250 ms: the family (setting, else the aircraft's type, else generic), the preset for the room, the canopy and
+// the camera check for the render side; the log lines of docs/COCKPIT_SPACE.md 8.5.
+void SpaceTick() {
+  SpaceState& S = g_spaceSt;
+  const audcfg::SpaceConfig& sc = g_cfgRead.space;
+  const int level = g_cfgRead.cfg.binaural ? sc.level : 0;
+  const std::string type = LuaType();
+  const cockpit_space::Family fam = sc.familyAuto ? cockpit_space::FamilyForType(type.c_str()) : sc.family;
+  audr::SpaceCtl& ctl = g_spaceCtlNow;
+  const bool changed = !S.havePub || level != S.level || fam != S.family || sc.familyAuto != S.familyAuto || type != S.type;
+  if (changed) {
+    // A new preset for every room (crossfaded inside the room); level 0 publishes none: the room fades out and idles.
+    if (level > 0) {
+      binaural::RoomParams p{};
+      if (cockpit_space::Preset(fam, level, &p)) {
+        ctl.params = p;
+        ctl.haveParams = true;
+        if (audr::Binding* b = g_binding.load())
+          if (b->room) audr::RoomSetParams(b->room, p);
+      }
+    }
+    ctl.level = level;
+    Log("audio: cockpit space: %s (%ls %s, aircraft %s)", SpaceLevelName(level), cockpit_space::FamilyKey(fam),
+        sc.familyAuto ? "auto" : "setting", type.empty() ? "unknown" : type.c_str());
+    if (level > 0 && !audr::kHaveRoom && !S.stubLogged) {
+      S.stubLogged = true;
+      Log("audio: cockpit space: this build has no room renderer yet; the sound is unchanged");
+    }
+    S.havePub = true;
+    S.level = level, S.family = fam, S.familyAuto = sc.familyAuto, S.type = type;
+  }
+  const float luaCanopy = g_luaCanopy.load(std::memory_order_relaxed);
+  ctl.canopy = sc.canopy ? luaCanopy : -1.0f;
+  ctl.luaInside = g_luaInside.load(std::memory_order_relaxed);
+  audr::WriteCtl(g_spaceCtl, ctl);
+  if (!g_installed.load() || level == 0) return;
+  // inside / canopy (on change; canopy steps of 0.1)
+  audspace::SpaceData sd{};
+  const bool haveSd = audspace::SpaceRead(g_space, &sd);
+  const bool reads = haveSd && (sd.flags & audspace::flags::kReads);
+  const int inside = reads && (sd.flags & audspace::flags::kInsideKnown) ? ((sd.flags & audspace::flags::kInside) ? 1 : 0)
+                     : ctl.luaInside >= 0                                  ? ctl.luaInside
+                                                                           : 1;
+  S.insideNow = inside;
+  const int csrc = ctl.canopy >= 0 ? g_luaCanopySrc.load(std::memory_order_relaxed) : 0;
+  if (inside != S.inside || csrc != S.canopySrc || (ctl.canopy >= 0) != (S.canopy >= 0) ||
+      (ctl.canopy >= 0 && std::fabs(ctl.canopy - S.canopy) >= 0.1f)) {
+    if (ctl.canopy >= 0)
+      Log("audio: cockpit space: inside %d, canopy %.2f (%s)", inside, ctl.canopy, csrc == 2 ? "arg38" : "mech");
+    else
+      Log("audio: cockpit space: inside %d, canopy unknown (none)", inside);
+    S.inside = inside, S.canopySrc = csrc, S.canopy = ctl.canopy;
+  }
+  // the aircraft frame (on change; once a minute while frames are refused)
+  if (haveSd) {
+    const LONGLONG ageMs = sd.frameQpc ? (Qpc() - sd.frameQpc) * 1000 / QpcFreq() : -1;
+    const int src = (sd.flags & audspace::flags::kFrameValid) && ageMs >= 0 && ageMs < 1000 ? 1 : 0;
+    const ULONGLONG now = GetTickCount64();
+    const bool refusing = sd.unreliable != S.unreliable && now - S.unreliableAt >= 60000;
+    if (src != S.frameSrc || sd.cockpitCtx != S.cockpitCtx || refusing) {
+      Log("audio: cockpit space: frame from %s, cockpit ctx %d, spread %.2f deg, unreliable frames %u",
+          src ? "sound" : "none", sd.cockpitCtx, sd.spreadDeg, sd.unreliable);
+      S.frameSrc = src, S.cockpitCtx = sd.cockpitCtx;
+      if (refusing || sd.unreliable != S.unreliable) S.unreliableAt = now;
+      S.unreliable = sd.unreliable;
+    }
+    // The listener-parameter probe (docs/COCKPIT_SPACE.md 3.1): at enable and on any change over 1 %.
+    if (reads && sd.worldCtx < 8) {
+      const float v[3] = {sd.lgGain, sd.lgPitch, sd.lgLowpass};
+      bool moved = S.probeCtx != sd.worldCtx;
+      for (int k = 0; k < 3 && !moved; ++k)
+        moved = std::fabs(v[k] - S.probe[k]) > 0.01f * std::fmax(std::fabs(S.probe[k]), 1e-6f);
+      if (moved) {
+        Log("audio: ctx %d listener gain=%.4g pitch=%.4g lowpass=%.4g", sd.worldCtx, v[0], v[1], v[2]);
+        S.probeCtx = sd.worldCtx;
+        memcpy(S.probe, v, sizeof(v));
+      }
+    }
+  }
+}
+
+// audio_space.csv (LogVoices): one row a second while the space is on.
+std::wstring g_spaceCsv;
+void SpaceCsvTick() {
+  if (!g_cfgRead.cfg.logVoices || !g_installed.load() || g_spaceSt.level == 0) return;
+  if (g_spaceCsv.empty()) g_spaceCsv = g_dir + L"audio_space.csv";
+  WIN32_FILE_ATTRIBUTE_DATA fa{};
+  const bool exists = GetFileAttributesExW(g_spaceCsv.c_str(), GetFileExInfoStandard, &fa) != 0;
+  if (exists && (static_cast<uint64_t>(fa.nFileSizeHigh) << 32 | fa.nFileSizeLow) > (8ull << 20)) return;
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, g_spaceCsv.c_str(), L"ab") || !f) return;
+  if (!exists)
+    fprintf(f, "time,level,family,type,inside,canopy,canopy_src,frame_src,cockpit_ctx,yaw_deg,pitch_deg,roll_deg,"
+               "spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass\r\n");
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  audspace::SpaceData sd{};
+  audspace::SpaceRead(g_space, &sd);
+  const float c[4] = {g_cnt.roomC[0].load(), g_cnt.roomC[1].load(), g_cnt.roomC[2].load(), g_cnt.roomC[3].load()};
+  float yaw = 0, pitch = 0, roll = 0;
+  const bool frame = g_cnt.roomFrameValid.load() != 0;
+  if (frame) audspace::YawPitchRoll(c, &yaw, &pitch, &roll);
+  double p50 = 0, p99 = 0;
+  RoomTimes(&p50, &p99);
+  const float canopy = g_spaceCtlNow.canopy;
+  char canopyText[16] = "";
+  if (canopy >= 0) snprintf(canopyText, sizeof(canopyText), "%.2f", canopy);
+  const int csrc = canopy >= 0 ? g_luaCanopySrc.load() : 0;
+  const bool probe = (sd.flags & audspace::flags::kReads) && sd.worldCtx < 8;
+  char lg[48] = ",";
+  if (probe) snprintf(lg, sizeof(lg), "%.4g,%.4g", sd.lgGain, sd.lgLowpass);
+  fprintf(f, "%02d:%02d:%02d.%03d,%s,%ls,%s,%d,%s,%s,%s,%d,", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+          SpaceLevelName(g_spaceSt.level), cockpit_space::FamilyKey(g_spaceSt.family),
+          g_spaceSt.type.empty() ? "unknown" : g_spaceSt.type.c_str(), g_spaceSt.insideNow, canopyText,
+          csrc == 2 ? "arg38" : csrc == 1 ? "mech" : "none", frame ? "sound" : "none", sd.cockpitCtx);
+  if (frame) fprintf(f, "%.1f,%.1f,%.1f,", yaw, pitch, roll);
+  else fprintf(f, ",,,");
+  fprintf(f, "%.2f,%.3f,%d,%u,%.1f,%.1f,%.2f,%s\r\n", sd.spreadDeg, g_cnt.roomWet.load(), g_cnt.roomEarly.load() ? 1 : 0,
+          g_cnt.roomVoicesNow.load(), p50, p99, g_cnt.dcompMeanDb.load(), lg);
   fclose(f);
 }
 
@@ -1003,6 +1288,7 @@ void ControlTick() {
     else if (Install()) LogContexts();
   }
   PoseTick();
+  SpaceTick();
   if (now - L.lastWorld >= 1000) {
     L.lastWorld = now;
     WorldTick();
@@ -1068,8 +1354,20 @@ void ControlTick() {
       ++i;
     }
   }
-  if (audr::Binding* b = g_binding.load())
-    while (const binaural::HrtfSet* s = audr::CoreTakeRetired(b->core)) {
+  if (audr::Binding* b = g_binding.load()) {
+    // A set is released only once both renderers gave it back: the voices' core and, with cockpit space, the room.
+    while (const binaural::HrtfSet* s = audr::CoreTakeRetired(b->core)) g_retiredByCore.push_back(s);
+    if (b->room)
+      while (const binaural::HrtfSet* s = audr::RoomTakeRetired(b->room)) g_retiredByRoom.push_back(s);
+    for (size_t k = 0; k < g_retiredByCore.size();) {
+      const binaural::HrtfSet* s = g_retiredByCore[k];
+      const auto inRoom = std::find(g_retiredByRoom.begin(), g_retiredByRoom.end(), s);
+      if (b->room && inRoom == g_retiredByRoom.end()) {
+        ++k;
+        continue;
+      }
+      if (inRoom != g_retiredByRoom.end()) g_retiredByRoom.erase(inRoom);
+      g_retiredByCore.erase(g_retiredByCore.begin() + static_cast<ptrdiff_t>(k));
       for (size_t i = 0; i < g_sets.size(); ++i)
         if (g_sets[i].set == s) {
           audr::CoreReleaseHrtf(g_sets[i].set);
@@ -1077,6 +1375,7 @@ void ControlTick() {
           break;
         }
     }
+  }
   HandleEvents();
   if (now - L.lastFlag >= 1000) {  // kill switch: toggle_audio.flag next to the payload or the dev ini
     L.lastFlag = now;
@@ -1111,10 +1410,20 @@ void ControlTick() {
       // The sounds' make-up: mono waves, stereo ones, and the voices kept wide in the last block (DCS's own side around
       // the binaural mid: under 1.4 / 1.6 m, or a diffuse bed by its own signal; mono or stereo waves alike).
       const uint32_t owned = g_cnt.ownedNow.load(), st = std::min(owned, g_cnt.ownedStereoNow.load());
+      // Cockpit space: its level and family, inside, the voices sent to the room in the last block, the early
+      // reflections, the room's own p99 and the mean direct-gain compensation (before "; head pose", which ends the line).
+      char space[200] = "Off";
+      if (g_spaceSt.level > 0) {
+        double p50 = 0, p99 = 0;
+        RoomTimes(&p50, &p99);
+        snprintf(space, sizeof(space), "%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB",
+                 SpaceLevelName(g_spaceSt.level), cockpit_space::FamilyKey(g_spaceSt.family), g_spaceSt.insideNow,
+                 g_cnt.roomVoicesNow.load(), g_cnt.roomEarly.load() ? "on" : "off", p99 / 1000.0, g_cnt.dcompMeanDb.load());
+      }
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
           "%u; mono %u, stereo %u; wide %u (near or diffuse); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "
           "pan solves %llu (median %llu, mismatch "
-          "%llu), overruns %llu; head pose %s",
+          "%llu), overruns %llu; space %s; head pose %s",
           owned, P99Ms(), g_cfgRead.cfg.cpuBudgetPercent, budgetMs,
           std::min<uint32_t>(g_cnt.limitNow.load(), static_cast<uint32_t>(g_cfgRead.cfg.maxObjects)), owned - st, st,
           std::min(owned, g_cnt.ownedWideNow.load()),
@@ -1123,7 +1432,7 @@ void ControlTick() {
           static_cast<unsigned long long>(g_meta.torn.load()), static_cast<unsigned long long>(g_cnt.tornSnaps.load()),
           static_cast<unsigned long long>(g_cnt.panSolves.load()),
           static_cast<unsigned long long>(g_cnt.panMedian.load()), static_cast<unsigned long long>(g_cnt.panMismatch.load()),
-          static_cast<unsigned long long>(g_cnt.overruns.load()), pose);
+          static_cast<unsigned long long>(g_cnt.overruns.load()), space, pose);
       L.statsHrtf = hc;
     } else if (g_cfgRead.cfg.binaural && !g_userOff.load() && g_offReason.load() == kOffNone) {
       // Binaural on and nothing rendered in 3D for 10 s: what reached the module meanwhile, so a silent session can be
@@ -1153,6 +1462,7 @@ void ControlTick() {
   if (now - L.lastVoices >= 1000) {
     L.lastVoices = now;
     LogVoicesTick();
+    SpaceCsvTick();
   }
   audr::g_status.store(StatusBitsNow(), std::memory_order_release);
 }
@@ -1259,6 +1569,8 @@ void Stop() {
     g_retiredBindings.clear();
     for (LoadedSet& s : g_sets) audr::CoreReleaseHrtf(s.set);
     g_sets.clear();
+    g_retiredByCore.clear();
+    g_retiredByRoom.clear();
   }
   audr::g_status.store(0);
 }

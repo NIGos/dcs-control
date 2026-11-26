@@ -686,3 +686,44 @@ sound within 1 dB of DCS's output in five directions at 1 m and 5 m, and a voice
 - Cockpit stereo sounds kept wide: no hollow or phasey colour against the kill switch (the side now arrives with the
   mid), and the image not pulled toward DCS's panning.
 - Wind, rain and cabin ambiences still wide (not collapsed to a point) with binaural on.
+
+## 11. Cockpit space: what the module reads for the room ([COCKPIT_SPACE.md](COCKPIT_SPACE.md) 3, 8.2)
+
+Read on ed_sound 2.9.31 (`0x6acb8057`) with `pefile` + `capstone`; DCS not started. All reads are on the simulation
+thread inside PanWrap (ed mutex held), plain memory of the context array and of sound instances the panner is given.
+
+### 11.1 Offsets [V]
+
+| Field | Where read | Code |
+|---|---|---|
+| `ctx+0xe1` (u8) use cockpit gain | `sub_6f70` `0x7010` `cmp byte [rdi+0xe1], 0` (rdi = the sound's context) | inside / outside: any 3D context with it set is the cockpit listener |
+| `sound+0x1a8` (u8) host allows cockpit gain | `0x7019` `cmp byte [rbx+0x1a8], 0` | through the canopy (with `ctx+0xe1`) |
+| `sound+0x1b0` (float) the applied `cockpit_gain` | `0x7022..0x7035` `sound+0x1b0 = proto(sound+0x50)->+0x18->+0xa0` | logged per voice (CSV `cgain`) |
+| `ctx+0x58`, `+0x5c`, `+0x60` (float) listener gain, pitch, low-pass cap | `0x6ff2`, `0x705c`, `0x7083` | the listener-parameter probe line |
+| `sound+0xe8` (double4, x y z w) the source's orientation in the listener frame | `sub_72c0` `0x7317` `lea rdi, [rcx+0xd0]`; `0x735d..0x736c` `lea rdx, [rbx+0x80]` (world orientation), `lea r8, [r15+0x78]` (the context's listener term), `lea rcx, [rdi+0x18]` (= `+0xe8`), `call 0x1300` | the aircraft frame `C_dcs` from the cockpit context's sounds |
+
+### 11.2 Signatures: optional rows of `src/audio_sigs.h`
+
+`tools/gen_audio_sigs.py` has two more rows after the seven required ones (`kRequired = 7`):
+
+- `SpaceGain` at `0x7010`: pattern `80 BF E1 00 00 00 00 74 ?? 80 BB A8 01 00 00 00 74 ?? 48 8B 43 50 48 85 C0 74 ?? 48 8B 40 18
+  8B 88 A0 00 00 00 89 8B B0 01 00 00` (the offsets `0xe1`, `0x1a8`, `0x18`, `0xa0`, `0x1b0` are literal bytes of the
+  pattern), plus the masked hash of its function `0x6f70..0x72ba`;
+- `SpaceOrient` at `0x735d`: pattern `48 8D 93 80 00 00 00 4D 8D 47 78 48 8D 4F 18 E8`, the masked hash of `0x72c0..0x7990`,
+  and `lea rdi, [rcx+0xd0]` (`48 8D B9 D0 00 00 00`) at `location - 0x46`.
+
+`audhk::ResolveSpace` (after every required check passed) sets `Resolved::spaceGain` / `spaceOrient` and, when one is
+missing, `spaceWhy`. A DCS update that moves them never turns binaural off: without `spaceGain` the module reads no
+`ctx+0xe1` / `sound+0x1a8` / `+0x1b0` (inside / outside from the Lua bridge's camera check, no through-canopy class,
+no probe); without `spaceOrient` no `sound+0xe8` (no aircraft frame: the room's early reflections stay out). The log
+says it once at install: `audio: cockpit space: ed_sound's cockpit fields not found (<why>); <what is off>`.
+`--check` covers the new rows as the others.
+
+### 11.3 What is still [A]
+
+- That every cockpit host carries the aircraft's orientation (`sound+0xe8` equal across the cockpit context's sounds
+  and turning against the head): checked live per frame (spread over 1 deg or a 30 deg jump without a head turn:
+  unreliable, counted; `audio_space.csv` `spread_deg`, the `frame from` log line).
+- Whether opening the canopy moves the world context's listener gain or low-pass (WorldGeneral.dll is protected):
+  the probe line `audio: ctx <i> listener gain=... pitch=... lowpass=...` (at enable and on any change over 1 %) and the
+  CSV's `lg_gain`, `lg_lowpass` settle it in the first flight with a canopy cycle.

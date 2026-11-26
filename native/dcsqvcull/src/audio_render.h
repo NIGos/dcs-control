@@ -56,8 +56,10 @@
 #include <cstring>
 #include <new>
 
+#include "audio_space.h"
 #include "audio_voice.h"
 #include "binaural_core.h"
+#include "binaural_room.h"  // cockpit space (native/binaural, or the module's stand-in until CORE is merged)
 #include "head_pose_reader.h"  // head_pose_shm.h and its checked readers (staleness, writer, speed guards)
 
 namespace audr {
@@ -130,6 +132,94 @@ inline void CoreReleaseHrtf(binaural::HrtfSet*) {}
 inline binaural::HrtfInfo CoreDescribe(const binaural::HrtfSet*) { return binaural::HrtfInfo{}; }
 #endif
 
+// ---- cockpit space (docs/COCKPIT_SPACE.md 4, 8.2): the core's Room (binaural_room.h). Builds without a Room
+// implementation (the core's src/room.cpp not merged yet: the module's stand-in header) create none: no room call is
+// ever made and the output is exactly today's. ----------------------------------------------------------------------
+#ifndef DCSQV_HAVE_ROOM
+#define DCSQV_HAVE_ROOM 0
+#endif
+constexpr bool kHaveRoom = DCSQV_HAVE_ROOM != 0;
+#if DCSQV_HAVE_ROOM
+inline binaural::Room* RoomNew() { return new (std::nothrow) binaural::Room(); }
+inline void RoomDelete(binaural::Room* r) { delete r; }
+inline bool RoomInit(binaural::Room* r, uint32_t rate, uint32_t n, char* e, size_t en) { return r->Init(rate, n, e, en); }
+inline void RoomSetHrtf(binaural::Room* r, const binaural::HrtfSet* s) { r->SetHrtf(s); }
+inline const binaural::HrtfSet* RoomTakeRetired(binaural::Room* r) { return r->TakeRetiredHrtf(); }
+inline void RoomSetHeadRadius(binaural::Room* r, float m) { r->SetHeadRadius(m); }
+inline void RoomSetParams(binaural::Room* r, const binaural::RoomParams& p) { r->SetParams(p); }
+inline void RoomBegin(binaural::Room* r, uint32_t frames, const binaural::RoomFrame& f) { r->BeginBlock(frames, f); }
+inline bool RoomAdd(binaural::Room* r, uint32_t slot, const binaural::RoomSource& s, const binaural::MonoInput& in,
+                    uint32_t frames, float w0, float w1) {
+  return r->AddSource(slot, s, in, frames, w0, w1);
+}
+inline void RoomReset(binaural::Room* r, uint32_t slot) { r->ResetSource(slot); }
+inline void RoomRender(binaural::Room* r, float* out, uint32_t frames) { r->Render(out, frames); }
+inline void RoomEnd(binaural::Room* r) { r->EndBlock(); }
+inline bool RoomIdle(const binaural::Room* r) { return r->Idle(); }
+inline float RoomDirect(const binaural::RoomParams& p, float wet, float canopy, bool early, const float pos[3], uint32_t f) {
+  return binaural::RoomDirectGain(p, wet, canopy, early, pos, f);
+}
+inline float RoomSendGain(const binaural::RoomParams& p, const float pos[3], uint32_t f) {
+  return binaural::RoomSendDistanceGain(p, pos, f);
+}
+#else
+inline binaural::Room* RoomNew() { return nullptr; }
+inline void RoomDelete(binaural::Room*) {}
+inline bool RoomInit(binaural::Room*, uint32_t, uint32_t, char* e, size_t en) {
+  if (en) strncpy_s(e, en, "no room renderer in this build", _TRUNCATE);
+  return false;
+}
+inline void RoomSetHrtf(binaural::Room*, const binaural::HrtfSet*) {}
+inline const binaural::HrtfSet* RoomTakeRetired(binaural::Room*) { return nullptr; }
+inline void RoomSetHeadRadius(binaural::Room*, float) {}
+inline void RoomSetParams(binaural::Room*, const binaural::RoomParams&) {}
+inline void RoomBegin(binaural::Room*, uint32_t, const binaural::RoomFrame&) {}
+inline bool RoomAdd(binaural::Room*, uint32_t, const binaural::RoomSource&, const binaural::MonoInput&, uint32_t, float, float) {
+  return false;
+}
+inline void RoomReset(binaural::Room*, uint32_t) {}
+inline void RoomRender(binaural::Room*, float*, uint32_t) {}
+inline void RoomEnd(binaural::Room*) {}
+inline bool RoomIdle(const binaural::Room*) { return true; }
+inline float RoomDirect(const binaural::RoomParams&, float, float, bool, const float*, uint32_t) { return 1.0f; }
+inline float RoomSendGain(const binaural::RoomParams&, const float*, uint32_t) { return 1.0f; }
+#endif
+
+// What the control thread publishes for the render side's room (seqlock, read once per armed block).
+struct SpaceCtl {
+  int level = 0;              // CockpitSpace 0..3 (0: the room fades out and goes idle; no SetParams)
+  bool haveParams = false;    // params hold a preset (the room got the same through SetParams)
+  binaural::RoomParams params{};
+  float canopy = -1.0f;       // 0..1 from the Lua bridge (CockpitSpaceCanopy on), -1 unknown (closed)
+  int luaInside = -1;         // the Lua bridge's camera check: 1 cockpit, 0 external view, -1 unknown
+};
+struct SpaceCtlSlot {
+  std::atomic<uint32_t> seq{0};
+  SpaceCtl d;
+};
+inline void WriteCtl(SpaceCtlSlot& s, const SpaceCtl& c) {
+  const uint32_t q = s.seq.load(std::memory_order_relaxed);
+  s.seq.store(q + 1, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);
+  s.d = c;
+  std::atomic_thread_fence(std::memory_order_release);
+  s.seq.store(q + 2, std::memory_order_release);
+}
+inline bool ReadCtl(const SpaceCtlSlot& s, SpaceCtl* out) {
+  for (int i = 0; i < 8; ++i) {
+    const uint32_t a = s.seq.load(std::memory_order_acquire);
+    if (a & 1u) continue;
+    SpaceCtl c = s.d;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (s.seq.load(std::memory_order_relaxed) != a) continue;
+    *out = c;
+    return true;
+  }
+  return false;
+}
+constexpr double kWetRampS = 0.3;     // inside <-> outside, level on <-> off: linear
+constexpr double kCanopyTauS = 0.3;   // canopy: smoothed (it moves over seconds)
+
 // Status word bits 53-55 (status_word.h), published by the audio module's control thread.
 std::atomic<uint64_t> g_status{0};
 
@@ -142,6 +232,8 @@ enum EvCode : uint16_t {
   kEvPanLawOff,      // a: mismatches, b: solves (10 s window)
   kEvNewRenderer,    // c: renderer address (the control thread validates it)
   kEvFramesTooLong,  // b: frames
+  kEvEarlyOff,       // cockpit space back-off step 1: early reflections off (b: over-budget blocks, per mille)
+  kEvEarlyOn,        // early reflections on again (10 s under half the budget, MaxObjects back first)
 };
 struct Ev {
   uint16_t code;
@@ -228,6 +320,11 @@ struct Counters {
     std::atomic<float> comp{1.0f};        // the loudness factor sqrt((P_M + P_S) / P_M)
     std::atomic<float> panLevel{1.0f};    // DCS's level for the direction (PanLevel)
     std::atomic<float> power{0.0f};       // smoothed P_M + P_S of m L', m R' (per frame): the point / wide energy share
+    // cockpit space (audio_voices.csv): sent to the room in its last block, the send and direct gains, the
+    // aircraft-frame position
+    std::atomic<uint32_t> room{0};
+    std::atomic<float> sendDb{0.0f}, dcompDb{0.0f};
+    std::atomic<float> ax{0.0f}, ay{0.0f}, az{0.0f};
   };
   static constexpr uint32_t kViewTagged = 1, kViewDiffuse = 2, kViewWide = 4;
   VoiceView view[audv::kSlots];
@@ -235,6 +332,16 @@ struct Counters {
   std::atomic<uint32_t> timeRing[1024];
   std::atomic<uint32_t> timeHead{0};
   std::atomic<uint32_t> worstTenthUs{0};
+  // Cockpit space: the room's own time per armed block it ran (microseconds x 10, last 1024), the voices sent to it in
+  // the last armed block, their mean direct-gain compensation (dB), the room's state at the last block's end.
+  std::atomic<uint32_t> roomRing[1024];
+  std::atomic<uint32_t> roomHead{0};
+  std::atomic<uint32_t> roomVoicesNow{0};
+  std::atomic<float> dcompMeanDb{0.0f};
+  std::atomic<float> roomWet{0.0f}, roomCanopy{0.0f};
+  std::atomic<uint32_t> roomFrameValid{0}, roomEarly{1};
+  std::atomic<float> roomC[4] = {};  // C_now of the last room block (aircraft -> head)
+  std::atomic<uint64_t> roomBlocks{0}, roomSends{0}, roomRefused{0};
   void Reset() {  // the module's install (and the tests): every counter back to its start value
     for (std::atomic<uint64_t>* c : {&blocks, &armedBlocks, &candidateCalls, &hrtfCalls, &repanCalls, &fadeIns, &fadeOuts,
                                      &steady, &passCandidates, &coreRejected, &orphanTagged, &nonFinite, &framesTooLong,
@@ -253,6 +360,15 @@ struct Counters {
     activeLastBlock.store(0, std::memory_order_relaxed);
     timeHead.store(0, std::memory_order_relaxed);
     worstTenthUs.store(0, std::memory_order_relaxed);
+    roomHead.store(0, std::memory_order_relaxed);
+    roomVoicesNow.store(0, std::memory_order_relaxed);
+    dcompMeanDb.store(0.0f, std::memory_order_relaxed);
+    roomWet.store(0.0f, std::memory_order_relaxed);
+    roomCanopy.store(0.0f, std::memory_order_relaxed);
+    roomFrameValid.store(0, std::memory_order_relaxed);
+    roomEarly.store(1, std::memory_order_relaxed);
+    for (std::atomic<uint64_t>* c : {&roomBlocks, &roomSends, &roomRefused}) c->store(0, std::memory_order_relaxed);
+    for (VoiceView& v : view) v.room.store(0, std::memory_order_relaxed);
   }
 };
 
@@ -544,6 +660,10 @@ struct Rs {
   uint32_t sideZero = 0;    // SideDelayed's zeroRun
   MetaData meta{};          // the last consistent read
   MetaData prev{};          // the one before (pairs a snapshot written before the newest metadata)
+  bool roomLive = false;    // cockpit space: the room's slot holds this voice's tap line (else the next send resets it)
+  float roomPos[3] = {0, 0, 0};  // its last send: aircraft-frame position, send gain, room flags
+  float roomSend = 0;
+  uint32_t roomFlags = 0;
 };
 
 struct Binding {
@@ -568,6 +688,11 @@ struct Binding {
   int overrunHead = 0;
   double prevShare = 0;        // our share of the previous block (dspTicks / block duration)
   uint32_t overrunGen = 0;     // the module's re-arm generation these overrun times belong to
+  // cockpit space (render thread, except `room`: created and freed with the binding by the control thread)
+  binaural::Room* room = nullptr;
+  bool earlyOff = false;       // back-off step 1
+  float wet = 0;               // the room's wet weight at the end of the last block
+  float canopy = 0;            // the smoothed canopy at the end of the last block
 };
 
 // What one armed device block carries (render thread, set by MixWrap, read by RenderWrap).
@@ -583,6 +708,16 @@ struct Block {
   int64_t dspTicks = 0;     // QPC ticks spent in our DSP this block
   uint32_t hrtfVoices = 0;
   uint32_t wideVoices = 0;  // tagged voices kept wide (Counters::ownedWideNow)
+  // cockpit space: the room runs in this block (its BeginBlock called); the block-end targets it got
+  bool roomOn = false;
+  bool roomFrameValid = false;
+  float roomC[4] = {0, 0, 0, 1};  // C_now: aircraft -> head
+  float roomWet = 0, roomCanopy = 0;
+  bool roomEarly = true;
+  binaural::RoomParams roomParams{};
+  uint32_t roomVoices = 0;
+  double dcompSumDb = 0;
+  int64_t roomTicks = 0;    // QPC ticks inside the room's own calls (also in dspTicks)
 };
 
 struct MxcsrScope {  // FTZ | DAZ for our DSP, the caller's mode back afterwards
@@ -612,6 +747,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   }
   if (rs.voice != voice || rs.gen != meta.gen) {
     if (rs.live) audr::CoreResetSource(b.core, static_cast<uint32_t>(slot));
+    if (rs.roomLive) audr::RoomReset(b.room, static_cast<uint32_t>(slot));
     rs = Rs{};
     rs.voice = voice;
     rs.gen = meta.gen;
@@ -668,6 +804,11 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
       audr::CoreResetSource(b.core, static_cast<uint32_t>(slot));
       rs.live = false;
     }
+    if (rs.roomLive) {  // DCS's own again (or ended): the room's tap line for it starts afresh at its next send
+      audr::RoomReset(b.room, static_cast<uint32_t>(slot));
+      rs.roomLive = false;
+    }
+    cnt.view[slot].room.store(0, std::memory_order_relaxed);
     return;
   }
 
@@ -716,11 +857,32 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   const float hw0 = w0 * h0, hw1 = w1 * h1;
   float rpw0 = w0 * (1.0f - h0), rpw1 = w1 * (1.0f - h1);
   bool hrtfDone = false;
+  bool roomSent = false;
   float gT = 1.0f;  // the late-translation gain (kNear): the mid's and the kept side's alike
+  float dcomp = 1.0f;  // cockpit space: the direct gain d (section 6.2), the mid's and the kept side's alike
   if (hw0 > 0.0f || hw1 > 0.0f) {
     binaural::SourceUpdate u{};
     CorrectedPosition(pm, blk.pose, blk.late, u.position, &gT);
     u.gain = blk.trim * gT * panLevel * ((1.0f - q1) * rs.loud.comp + q1);
+    // Cockpit space: the voice's aircraft-frame position (conj(C_now) applied to its corrected head-frame position),
+    // its send (the HRTF gain before d, times the distance law) and d. Diffuse beds feed the tail only; voices heard
+    // through the canopy get their excitation on the box.
+    float posA[3] = {u.position[0], u.position[1], u.position[2]};
+    uint32_t rflags = 0;
+    float send = 0.0f;
+    if (blk.roomOn) {
+      if (blk.roomFrameValid) {
+        const float ci[4] = {-blk.roomC[0], -blk.roomC[1], -blk.roomC[2], blk.roomC[3]};
+        audspace::QRotate(ci, u.position, posA);
+      }
+      rflags = (rs.loud.diffuse ? binaural::room_flags::kLateOnly : 0u) |
+               ((pm.flags & audv::meta_flags::kThroughCanopy) ? binaural::room_flags::kThroughCanopy : 0u);
+      send = u.gain * audr::RoomSendGain(blk.roomParams, posA, rflags);
+      dcomp = audr::RoomDirect(blk.roomParams, blk.roomWet, blk.roomCanopy, blk.roomEarly, posA, rflags);
+      if (!(dcomp > 0.0f && dcomp <= 1.0f)) dcomp = 1.0f;  // never louder, never a non-finite gain
+      if (!std::isfinite(send)) send = 0.0f;
+      u.gain *= dcomp;
+    }
     // Near field on/off is the core's own (Renderer::SetNearField fades it); no per-source exclusion here.
     u.flags = rs.live ? 0u : binaural::source_flags::kReset;
     binaural::MonoInput in{a, bb, 2, scale};
@@ -745,6 +907,34 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
       cnt.hrtfCalls.fetch_add(1, std::memory_order_relaxed);
       if (pm.flags & audv::meta_flags::kStereo) cnt.stereoCalls.fetch_add(1, std::memory_order_relaxed);
       ++blk.hrtfVoices;
+      if (blk.roomOn) {
+        // The room gets exactly the core's input and weights: it follows every fade of the direct path. A voice that
+        // was not sent in the last block starts a fresh tap line.
+        binaural::RoomSource src{};
+        memcpy(src.posAircraft, posA, sizeof(posA));
+        src.send = send;
+        src.flags = rflags | (rs.roomLive ? 0u : binaural::room_flags::kReset);
+        if (audr::RoomAdd(b.room, static_cast<uint32_t>(slot), src, in, frames, cw0, cw1)) {
+          rs.roomLive = true;
+          roomSent = true;
+          memcpy(rs.roomPos, posA, sizeof(posA));
+          rs.roomSend = send;
+          rs.roomFlags = rflags;
+          ++blk.roomVoices;
+          blk.dcompSumDb += 20.0 * std::log10(static_cast<double>(dcomp));
+          cnt.roomSends.fetch_add(1, std::memory_order_relaxed);
+          Counters::VoiceView& vv = cnt.view[slot];
+          vv.sendDb.store(send > 0.0f ? static_cast<float>(20.0 * std::log10(static_cast<double>(send))) : -999.0f,
+                          std::memory_order_relaxed);
+          vv.dcompDb.store(static_cast<float>(20.0 * std::log10(static_cast<double>(dcomp))), std::memory_order_relaxed);
+          vv.ax.store(posA[0], std::memory_order_relaxed);
+          vv.ay.store(posA[1], std::memory_order_relaxed);
+          vv.az.store(posA[2], std::memory_order_relaxed);
+        } else {
+          rs.roomLive = false;
+          cnt.roomRefused.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
     } else {
       // Refused (or no core): that share is re-panned with DCS's gains instead.
       cnt.coreRejected.fetch_add(1, std::memory_order_relaxed);
@@ -756,6 +946,19 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   } else if (rs.live) {
     // The core skipped this block (no HRTF share): its slot's history is stale now; the next call starts afresh.
     rs.live = false;
+  }
+  if (!roomSent && rs.roomLive) {
+    // Not sent in this block (its HRTF share ended, or the room was skipped): the room's tap line plays out what it
+    // holds with zero input weight, once, then starts afresh at the voice's next send.
+    if (blk.roomOn) {
+      binaural::RoomSource src{};
+      memcpy(src.posAircraft, rs.roomPos, sizeof(src.posAircraft));
+      src.send = rs.roomSend;
+      src.flags = rs.roomFlags;
+      const binaural::MonoInput in{a, bb, 2, scale};
+      audr::RoomAdd(b.room, static_cast<uint32_t>(slot), src, in, frames, 0.0f, 0.0f);
+    }
+    rs.roomLive = false;
   }
   if (rpw0 > 0.0f || rpw1 > 0.0f) {
     const uint32_t bad = RePan(a, bb, scale, frames, rpw0, rpw1, rs.rL, rL1, rs.rR, rR1, out);
@@ -772,7 +975,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   {
     const float rp1 = rpw1;
     const float rp0 = rs.haveSide ? rs.sideRp : rpw0;
-    const float gS = blk.trim * gT;
+    const float gS = blk.trim * gT * dcomp;  // the kept side gets the mid's direct gain (its mid / side balance kept)
     const float v1 = hrtfDone ? hw1 * q1 * gS : 0.0f;
     const float v0 = rs.haveSide ? rs.sideV : (hrtfDone ? hw0 * q0 * gS : 0.0f);
     uint32_t bad = SidePan(a, bb, frames, rp0, rp1, rs.rL, rL1, rs.rR, rR1, out);
@@ -818,6 +1021,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     vv.state.store(Counters::kViewTagged | (rs.loud.diffuse ? Counters::kViewDiffuse : 0u) |
                        (wideNow ? Counters::kViewWide : 0u),
                    std::memory_order_relaxed);
+    vv.room.store(roomSent ? 1u : 0u, std::memory_order_relaxed);
   }
   rs.qW = q1;
   rs.haveQ = true;
@@ -830,6 +1034,8 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   if (!tagged && !owned) ackGen[slot].store(meta.gen, std::memory_order_release);  // faded back: DCS's again
   if (ended) {
     if (rs.live) audr::CoreResetSource(b.core, static_cast<uint32_t>(slot));
+    if (rs.roomLive) audr::RoomReset(b.room, static_cast<uint32_t>(slot));
+    rs.roomLive = false;
     rs.live = false;
     rs.prevTagged = false;
     rs.tornS0 = 0.0f;
@@ -840,14 +1046,99 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   }
 }
 
+// ---- cockpit space, once per armed block (render thread) -----------------------------------------------------------
+// Before the mix: the block-end targets (wet: inside x level on x binaural on, ramped linearly over kWetRampS; canopy:
+// smoothed over kCanopyTauS; C_now: C_dcs with the late head correction since the pose DCS used, else C_dcs as is while
+// it is younger than 1 s) and the room's BeginBlock. The room is skipped entirely (no call at all) while its wet weight
+// stays 0 and it is idle: CockpitSpace=0 and every external view cost nothing and leave the output exactly as without it.
+inline void RoomBlockBegin(Block& blk, const audspace::SpaceData* sd, const SpaceCtl& ctl, int64_t now, int64_t freq) {
+  Binding& b = *blk.b;
+  blk.roomOn = false;
+  if (!kHaveRoom || !b.room || !b.rate) return;
+  const bool reads = sd && (sd->flags & audspace::flags::kReads);
+  const bool inside = reads && (sd->flags & audspace::flags::kInsideKnown) ? (sd->flags & audspace::flags::kInside) != 0
+                      : ctl.luaInside >= 0                                  ? ctl.luaInside != 0
+                                                                            : true;  // unknown: the cockpit
+  const float target = ctl.level > 0 && ctl.haveParams && blk.on && inside ? 1.0f : 0.0f;
+  const float step = static_cast<float>(static_cast<double>(blk.frames) / (kWetRampS * b.rate));
+  float wet = b.wet + (target > b.wet ? step : -step);
+  if ((target > b.wet && wet > target) || (target < b.wet && wet < target) || target == b.wet) wet = target;
+  if (wet == 0.0f && b.wet == 0.0f && audr::RoomIdle(b.room)) {
+    b.canopy = ctl.canopy > 0.0f ? ctl.canopy : 0.0f;  // the room starts at the canopy's position
+    return;
+  }
+  const float cTarget = ctl.canopy > 0.0f ? (ctl.canopy > 1.0f ? 1.0f : ctl.canopy) : 0.0f;
+  const double kc = 1.0 - std::exp(-static_cast<double>(blk.frames) / (kCanopyTauS * b.rate));
+  float canopy = b.canopy + static_cast<float>(kc) * (cTarget - b.canopy);
+  if (std::fabs(canopy - cTarget) < 1e-4f) canopy = cTarget;
+  // The aircraft frame.
+  bool valid = false;
+  float c[4] = {0, 0, 0, 1};
+  if (sd && (sd->flags & audspace::flags::kFrameValid)) {
+    const double ageS = freq ? static_cast<double>(now - sd->frameQpc) / static_cast<double>(freq) : 1e9;
+    namespace hp = dcsvr_headpose;
+    hp::Quat cq = hp::Normalize({sd->c[0], sd->c[1], sd->c[2], sd->c[3]});
+    bool late = false;
+    if (blk.late && blk.pose.valid && (sd->flags & audspace::flags::kPoseValid) && sd->poseBase == blk.pose.base) {
+      const hp::Quat qu = hp::Normalize({sd->qUsed[0], sd->qUsed[1], sd->qUsed[2], sd->qUsed[3]});
+      const hp::LateCorrection lc = hp::ComputeLateCorrection(qu, {0, 0, 0}, blk.pose.q, {0, 0, 0});
+      const double w = std::fabs(lc.rotation.w) > 1.0 ? 1.0 : std::fabs(lc.rotation.w);
+      if (2.0 * std::acos(w) <= kMaxLateRad) {
+        cq = hp::Normalize(hp::Mul(lc.rotation, cq));
+        late = true;
+      }
+    }
+    valid = late || ageS < audspace::kFrameMaxAgeS;
+    c[0] = static_cast<float>(cq.x), c[1] = static_cast<float>(cq.y), c[2] = static_cast<float>(cq.z), c[3] = static_cast<float>(cq.w);
+    if (!(std::isfinite(c[0]) && std::isfinite(c[1]) && std::isfinite(c[2]) && std::isfinite(c[3]))) valid = false;
+  }
+  binaural::RoomFrame f{};
+  memcpy(f.aircraftToHead, valid ? c : blk.roomC, sizeof(f.aircraftToHead));
+  f.frameValid = valid;
+  f.wet = wet;
+  f.canopyOpen = canopy;
+  f.early = !b.earlyOff;
+  audr::RoomBegin(b.room, blk.frames, f);
+  blk.roomOn = true;
+  blk.roomFrameValid = valid;
+  memcpy(blk.roomC, f.aircraftToHead, sizeof(blk.roomC));
+  blk.roomWet = wet;
+  blk.roomCanopy = canopy;
+  blk.roomEarly = f.early;
+  blk.roomParams = ctl.params;
+  b.wet = wet;
+  b.canopy = canopy;
+}
+
+// After the mix: the room's buses and tail added to the block (inside the caller's MxcsrScope), its time recorded.
+inline void RoomBlockEnd(Block& blk, Counters& cnt, int64_t roomTicks, int64_t freq) {
+  Binding& b = *blk.b;
+  cnt.roomVoicesNow.store(blk.roomOn ? blk.roomVoices : 0u, std::memory_order_relaxed);
+  cnt.roomWet.store(b.wet, std::memory_order_relaxed);
+  cnt.roomCanopy.store(b.canopy, std::memory_order_relaxed);
+  if (!blk.roomOn) return;
+  cnt.roomBlocks.fetch_add(1, std::memory_order_relaxed);
+  cnt.roomFrameValid.store(blk.roomFrameValid ? 1u : 0u, std::memory_order_relaxed);
+  cnt.roomEarly.store(blk.roomEarly ? 1u : 0u, std::memory_order_relaxed);
+  for (int k = 0; k < 4; ++k) cnt.roomC[k].store(blk.roomC[k], std::memory_order_relaxed);
+  if (blk.roomVoices) cnt.dcompMeanDb.store(static_cast<float>(blk.dcompSumDb / blk.roomVoices), std::memory_order_relaxed);
+  if (freq) {
+    const uint32_t tenth = static_cast<uint32_t>(std::fmin(static_cast<double>(roomTicks) / static_cast<double>(freq) * 1e7, 4e9));
+    const uint32_t h = cnt.roomHead.load(std::memory_order_relaxed);
+    cnt.roomRing[h & 1023].store(tenth, std::memory_order_relaxed);
+    cnt.roomHead.store(h + 1, std::memory_order_release);
+  }
+}
+
 // ---- CPU budget and back-off (binaural_core.h) -------------------------------------------------------------------
 struct BudgetCfg {
   int cpuBudgetPercent = 25;
   int maxObjects = 48;
 };
 // Called once per armed block after the mix. Returns the new limit in use when the back-off changed (else 0).
+// roomEarly: the cockpit space's early reflections ran in this block (back-off step 1 is theirs).
 inline uint32_t BudgetTick(Binding& b, Counters& cnt, EvRing& ev, const BudgetCfg& cfg, uint32_t frames, int64_t ticks,
-                           int64_t now, int64_t freq) {
+                           int64_t now, int64_t freq, bool roomEarly = false) {
   if (!b.rate || !freq) return 0;
   const double blockS = static_cast<double>(frames) / b.rate;
   const double usedS = static_cast<double>(ticks) / static_cast<double>(freq);
@@ -872,10 +1163,16 @@ inline uint32_t BudgetTick(Binding& b, Counters& cnt, EvRing& ev, const BudgetCf
     const uint32_t limit = cap < cfgMax ? cap : cfgMax;
     const double secS = static_cast<double>(now - b.secStart) / freq;
     if (b.secBlocks && b.secOver * 10 > b.secBlocks) {  // more than 10 % of the blocks of the last second
-      const uint32_t nl = limit > 16 ? limit - 8 : 8;
-      if (nl != limit) {
-        ev.Push({kEvBudgetDown, static_cast<uint16_t>(nl), b.secOver * 1000 / b.secBlocks, 0});
-        newCap = nl;
+      if (roomEarly && !b.earlyOff) {
+        // Cockpit space, step 1: the early reflections go first (the late tail only), before any sound is dropped.
+        b.earlyOff = true;
+        ev.Push({kEvEarlyOff, 0, b.secOver * 1000 / b.secBlocks, 0});
+      } else {
+        const uint32_t nl = limit > 16 ? limit - 8 : 8;
+        if (nl != limit) {
+          ev.Push({kEvBudgetDown, static_cast<uint16_t>(nl), b.secOver * 1000 / b.secBlocks, 0});
+          newCap = nl;
+        }
       }
       b.calmSeconds = 0;
     } else if (b.secHalf == 0) {  // a whole second under half the budget
@@ -884,6 +1181,10 @@ inline uint32_t BudgetTick(Binding& b, Counters& cnt, EvRing& ev, const BudgetCf
         const uint32_t nl = limit + 4;
         newCap = nl >= cfgMax ? binaural::kMaxSources : nl;
         ev.Push({kEvBudgetUp, static_cast<uint16_t>(nl >= cfgMax ? cfgMax : nl), 0, 0});
+        b.calmSeconds = 0;
+      } else if (b.calmSeconds >= 10.0 && b.earlyOff) {  // the sounds are back: then the early reflections
+        b.earlyOff = false;
+        ev.Push({kEvEarlyOn, 0, 0, 0});
         b.calmSeconds = 0;
       }
     } else {
