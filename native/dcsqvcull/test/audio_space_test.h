@@ -435,14 +435,19 @@ void Budget() {
     SimFrame(r);
     Block(r, a.data(), b.data(), 480);
   }
-  audio::g_binding.load()->calmSeconds = 9.5;
-  t0 = GetTickCount64();
-  while (GetTickCount64() - t0 < 1300) {
-    SimFrame(r);
-    Block(r, a.data(), b.data(), 480);
+  // A calm second needs every block under half of the 5 % budget (0.25 ms of wall time): on a PC busy with other
+  // builds or tests one slow block restarts it, so up to three tries.
+  bool earlyOn = false;
+  for (int attempt = 0; attempt < 3 && !earlyOn; ++attempt) {
+    audio::g_binding.load()->calmSeconds = 9.5;
+    t0 = GetTickCount64();
+    while (GetTickCount64() - t0 < 1300) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+    }
+    Tick();
+    earlyOn = audiofake::g_roomLastFrame.early;
   }
-  Tick();
-  const bool earlyOn = audiofake::g_roomLastFrame.early;
   const std::string log = StopReportCapture();
   const size_t off = log.find("audio: cockpit space: early reflections off (CPU budget)");
   const size_t down = log.find("audio: CPU budget: at most");
