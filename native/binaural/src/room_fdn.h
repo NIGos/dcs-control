@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <emmintrin.h>
 #include <memory>
 
 #include "binaural_room.h"
@@ -39,6 +40,11 @@ inline Biquad Highpass(double fc, double q, double fs) {
     fc = std::clamp(fc, 5.0, 0.45 * fs);
     const double w = 2 * kPi * fc / fs, c = std::cos(w), al = std::sin(w) / (2 * q);
     return Normalised((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
+}
+inline Biquad Lowpass(double fc, double q, double fs) {
+    fc = std::clamp(fc, 5.0, 0.45 * fs);
+    const double w = 2 * kPi * fc / fs, c = std::cos(w), al = std::sin(w) / (2 * q);
+    return Normalised((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al);
 }
 inline Biquad LowShelf(double fc, double db, double fs) {
     const double A = std::pow(10.0, db / 40.0), w = 2 * kPi * fc / fs, c = std::cos(w), s = std::sin(w);
@@ -126,28 +132,52 @@ public:
             dLo[l] = (gLo1[l] - gLo0[l]) * inv, dHi[l] = (gHi1[l] - gHi0[l]) * inv;
             lo[l] = gLo0[l], hi[l] = gHi0[l];
         }
+        // Lines 0-3 and 4-7 in two SSE vectors: the absorption filters, the outputs, the fast Walsh-Hadamard transform
+        // (Sylvester order: pairs, then pairs of pairs within a vector, then across the two) and the write-back.
+        __m128 loA = _mm_loadu_ps(lo), loB = _mm_loadu_ps(lo + 4), hiA = _mm_loadu_ps(hi), hiB = _mm_loadu_ps(hi + 4);
+        const __m128 dLoA = _mm_loadu_ps(dLo), dLoB = _mm_loadu_ps(dLo + 4), dHiA = _mm_loadu_ps(dHi), dHiB = _mm_loadu_ps(dHi + 4);
+        __m128 lpA = _mm_loadu_ps(lp_), lpB = _mm_loadu_ps(lp_ + 4);
+        const __m128 vxA = _mm_set1_ps(xA), vScale = _mm_set1_ps(scale);
+        const __m128 o1A = _mm_loadu_ps(kOut1), o1B = _mm_loadu_ps(kOut1 + 4), o2A = _mm_loadu_ps(kOut2), o2B = _mm_loadu_ps(kOut2 + 4);
+        const __m128 inA = _mm_mul_ps(_mm_loadu_ps(kIn), vScale), inB = _mm_mul_ps(_mm_loadu_ps(kIn + 4), vScale);
+        const __m128 s1 = _mm_setr_ps(1, -1, 1, -1), s2 = _mm_setr_ps(1, 1, -1, -1);
+        float* line[kLines];
+        for (std::uint32_t l = 0; l < kLines; ++l) line[l] = b + l * size_;
         for (std::uint32_t i = 0; i < n; ++i) {
-            float f[kLines];
-            float a1 = 0.0f, a2 = 0.0f;
-            for (std::uint32_t l = 0; l < kLines; ++l) {
-                lo[l] += dLo[l], hi[l] += dHi[l];
-                const float y = b[l * size_ + ((w_ - len_[l]) & mask)];
-                lp_[l] += xA * (y - lp_[l]);
-                f[l] = hi[l] * y + (lo[l] - hi[l]) * lp_[l];
-                a1 += kOut1[l] * f[l], a2 += kOut2[l] * f[l];
+            loA = _mm_add_ps(loA, dLoA), loB = _mm_add_ps(loB, dLoB), hiA = _mm_add_ps(hiA, dHiA), hiB = _mm_add_ps(hiB, dHiB);
+            const __m128 yA = _mm_setr_ps(line[0][(w_ - len_[0]) & mask], line[1][(w_ - len_[1]) & mask],
+                                          line[2][(w_ - len_[2]) & mask], line[3][(w_ - len_[3]) & mask]);
+            const __m128 yB = _mm_setr_ps(line[4][(w_ - len_[4]) & mask], line[5][(w_ - len_[5]) & mask],
+                                          line[6][(w_ - len_[6]) & mask], line[7][(w_ - len_[7]) & mask]);
+            lpA = _mm_add_ps(lpA, _mm_mul_ps(vxA, _mm_sub_ps(yA, lpA)));
+            lpB = _mm_add_ps(lpB, _mm_mul_ps(vxA, _mm_sub_ps(yB, lpB)));
+            __m128 fA = _mm_add_ps(_mm_mul_ps(hiA, yA), _mm_mul_ps(_mm_sub_ps(loA, hiA), lpA));
+            __m128 fB = _mm_add_ps(_mm_mul_ps(hiB, yB), _mm_mul_ps(_mm_sub_ps(loB, hiB), lpB));
+            {
+                __m128 t1 = _mm_add_ps(_mm_mul_ps(o1A, fA), _mm_mul_ps(o1B, fB));
+                __m128 t2 = _mm_add_ps(_mm_mul_ps(o2A, fA), _mm_mul_ps(o2B, fB));
+                // Horizontal sums of both at once: (t1 lanes, t2 lanes) -> o1, o2.
+                const __m128 lo2 = _mm_unpacklo_ps(t1, t2), hi2 = _mm_unpackhi_ps(t1, t2);  // t1_0 t2_0 t1_1 t2_1 | ...
+                const __m128 s = _mm_add_ps(lo2, hi2);                                     // (t1_0+t1_2) (t2_0+t2_2) ...
+                const __m128 r = _mm_add_ps(s, _mm_movehl_ps(s, s));
+                o1[i] = _mm_cvtss_f32(r) * scale;
+                o2[i] = _mm_cvtss_f32(_mm_shuffle_ps(r, r, _MM_SHUFFLE(1, 1, 1, 1))) * scale;
             }
-            o1[i] = a1 * scale, o2[i] = a2 * scale;
-            // Fast Walsh-Hadamard transform (Sylvester order), 24 additions.
-            for (std::uint32_t h = 1; h < kLines; h <<= 1)
-                for (std::uint32_t j = 0; j < kLines; j += h << 1)
-                    for (std::uint32_t k = j; k < j + h; ++k) {
-                        const float x = f[k], y = f[k + h];
-                        f[k] = x + y, f[k + h] = x - y;
-                    }
-            const float x = in ? in[i] * scale : 0.0f;
-            for (std::uint32_t l = 0; l < kLines; ++l) b[l * size_ + (w_ & mask)] = f[l] * scale + kIn[l] * x;
+            // Hadamard: stage 1 (h = 1) and stage 2 (h = 2) inside each vector, stage 3 (h = 4) across.
+            fA = _mm_add_ps(_mm_shuffle_ps(fA, fA, _MM_SHUFFLE(2, 2, 0, 0)), _mm_mul_ps(s1, _mm_shuffle_ps(fA, fA, _MM_SHUFFLE(3, 3, 1, 1))));
+            fB = _mm_add_ps(_mm_shuffle_ps(fB, fB, _MM_SHUFFLE(2, 2, 0, 0)), _mm_mul_ps(s1, _mm_shuffle_ps(fB, fB, _MM_SHUFFLE(3, 3, 1, 1))));
+            fA = _mm_add_ps(_mm_shuffle_ps(fA, fA, _MM_SHUFFLE(1, 0, 1, 0)), _mm_mul_ps(s2, _mm_shuffle_ps(fA, fA, _MM_SHUFFLE(3, 2, 3, 2))));
+            fB = _mm_add_ps(_mm_shuffle_ps(fB, fB, _MM_SHUFFLE(1, 0, 1, 0)), _mm_mul_ps(s2, _mm_shuffle_ps(fB, fB, _MM_SHUFFLE(3, 2, 3, 2))));
+            const __m128 hA = _mm_add_ps(fA, fB), hB = _mm_sub_ps(fA, fB);
+            const __m128 x = _mm_set1_ps(in ? in[i] : 0.0f);
+            float wA[4], wB[4];
+            _mm_storeu_ps(wA, _mm_add_ps(_mm_mul_ps(hA, vScale), _mm_mul_ps(inA, x)));
+            _mm_storeu_ps(wB, _mm_add_ps(_mm_mul_ps(hB, vScale), _mm_mul_ps(inB, x)));
+            const std::uint32_t wp = w_ & mask;
+            for (int l = 0; l < 4; ++l) line[l][wp] = wA[l], line[l + 4][wp] = wB[l];
             ++w_;
         }
+        _mm_storeu_ps(lp_, lpA), _mm_storeu_ps(lp_ + 4, lpB);
     }
     // The energy held in the lines (sum of squares), for the silence check.
     float StoredEnergy() const {

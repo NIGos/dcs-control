@@ -285,26 +285,29 @@ inline float SendDistanceGain(const RoomParams& p, const float pos[3], std::uint
 struct WetEnergy {
     float early, late;
 };
-inline WetEnergy VoiceWetEnergy(const RoomParams& p, float canopy, bool early, const float pos[3], std::uint32_t flags) {
-    const float sd = SendDistanceGain(p, pos, flags);
-    const float s = sd * ThroughGain(p, flags);
-    const float hp = SendHighpassPower(p.sendHpHz, kModelRate);
-    WetEnergy w{0.0f, 0.0f};
+// What VoiceWetEnergy needs that depends on the parameters and the canopy only (not on the voice): computed once and
+// reused while they stay the same (RoomDirectGainMix keeps the last one per thread).
+struct WetConsts {
+    float K = 0.0f, cap = 0.0f, hp = 1.0f, late = 0.0f, through = 1.0f;
+    float tapPower[kRoomTaps] = {};  // each tap's wall filters' white-noise power gain
+};
+inline WetConsts ComputeWetConsts(const RoomParams& p, float canopy) {
+    WetConsts w;
     const float c = std::clamp(std::isfinite(canopy) ? canopy : 0.0f, 0.0f, 1.0f);
-    if (early && !(flags & room_flags::kLateOnly)) {
-        Tap t[kRoomTaps];
-        ComputeTaps(p, c, pos, flags, t);
-        const float k = EarlyNorm(p), cap = TapCap(p);
-        float e = 0.0f;
-        for (const Tap& x : t) {
-            const float a = OnePoleLowpassCoef(x.lowpassHz, kModelRate), b = OnePoleHighpassCoef(x.highpassHz, kModelRate);
-            const float g = CappedTapGain(x.gain * k, sd, cap);
-            e += g * g * LowpassPower(a) * HighpassPower(b);
+    w.K = EarlyNorm(p), w.cap = TapCap(p), w.hp = SendHighpassPower(p.sendHpHz, kModelRate);
+    w.through = std::pow(10.0f, p.throughDb / 20.0f);
+    for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+        float lp = 0.0f, hpz = 0.0f;
+        for (int j = 0; j < 2; ++j) {
+            const int sf = kTapSurface[k][j];
+            if (sf < 0) continue;
+            const SurfaceParams& sp = p.surface[sf];
+            if (sp.lowpassHz > 0.0f) lp = lp > 0.0f ? std::min(lp, sp.lowpassHz) : sp.lowpassHz;
+            hpz = std::max(hpz, sp.highpassHz);
         }
-        w.early = e * s * s * hp;
+        w.tapPower[k] = LowpassPower(OnePoleLowpassCoef(lp, kModelRate)) * HighpassPower(OnePoleHighpassCoef(hpz, kModelRate));
     }
-    float late = std::pow(10.0f, p.lateDb / 10.0f) * s * s * hp;
-    if (flags & room_flags::kLateOnly) late *= kLateOnlyGain * kLateOnlyGain;
+    float late = std::pow(10.0f, p.lateDb / 10.0f);
     if (c > 0.0f) {
         const float cl = CanopyLate(c);
         late *= cl * cl;
@@ -314,6 +317,30 @@ inline WetEnergy VoiceWetEnergy(const RoomParams& p, float canopy, bool early, c
     }
     w.late = late;
     return w;
+}
+inline WetEnergy VoiceWetEnergy(const RoomParams& p, const WetConsts& wc, float canopy, bool early, const float pos[3],
+                                std::uint32_t flags) {
+    const float sd = SendDistanceGain(p, pos, flags);
+    const float s = sd * ((flags & room_flags::kThroughCanopy) ? wc.through : 1.0f);
+    WetEnergy w{0.0f, 0.0f};
+    const float c = std::clamp(std::isfinite(canopy) ? canopy : 0.0f, 0.0f, 1.0f);
+    if (early && !(flags & room_flags::kLateOnly)) {
+        Tap t[kRoomTaps];
+        ComputeTaps(p, c, pos, flags, t);
+        float e = 0.0f;
+        for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+            const float g = CappedTapGain(t[k].gain * wc.K, sd, wc.cap);
+            e += g * g * wc.tapPower[k];
+        }
+        w.early = e * s * s * wc.hp;
+    }
+    float late = wc.late * s * s * wc.hp;
+    if (flags & room_flags::kLateOnly) late *= kLateOnlyGain * kLateOnlyGain;
+    w.late = late;
+    return w;
+}
+inline WetEnergy VoiceWetEnergy(const RoomParams& p, float canopy, bool early, const float pos[3], std::uint32_t flags) {
+    return VoiceWetEnergy(p, ComputeWetConsts(p, canopy), canopy, early, pos, flags);
 }
 
 }  // namespace binaural::room_model
@@ -332,4 +359,6 @@ float EarlyMix(const Room& r);
 bool BusActive(const Room& r);
 bool LateActive(const Room& r);
 std::uint32_t FdnLength(const Room& r, std::uint32_t l);
+void Profile(Room& r, std::uint64_t out[6]);                 // TSC cycles per Render section since the last call
+double BusKept(const Room& r);                               // the smallest energy share the buses' cut filters keep
 }  // namespace binaural::room_probe

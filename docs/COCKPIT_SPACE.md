@@ -424,7 +424,37 @@ Built: `RoomDirectGain` evaluates the same model the Room runs (`src/room_model.
 with the early normalisation, each tap's wall filters as their white-noise power gain, the send high-pass, the distance
 law, `throughDb`, `kLateOnly`, the canopy's effect on the up taps, the late level and the decay), taking the filters'
 power gains at 48 kHz (it has no sample rate; at 44.1 or 96 kHz the wet energy differs by under 0.1 dB). Cost: one
-`ComputeTaps` and a few `exp`/`pow` per call, under 1 µs.
+`ComputeTaps` per call (the preset's part, `WetConsts`, is kept per thread while the parameters and canopy stay the
+same), about 0.1 µs.
+
+**The level match (built after the live flight of 2026-11-26).** The first live run (validation-08, F-16C, about 30
+owned voices) played the space louder than Off: Subtle +0.7 dB, Normal +1.3 dB broadband, +1 / +2 dB at 200-1000 Hz,
+while `d` was only -0.04 / -0.10 dB. Cause: `RoomDirectGain` adds energies (direct, each reflection, the tail as
+incoherent powers, white noise). In the cockpit that does not hold below about 1 kHz:
+- the early reflections arrive 0.3-2 ms after the direct sound (a small box, and voices outside it, like DCS's engine
+  layers 0.42 m above-behind the head, are excited on the canopy itself), so below 1 kHz they add to the direct sound
+  in amplitude: the rendered direct + early response of those voices is +1.3..+2.4 dB at 250-315 Hz and -0.5..-2.3 dB
+  around 400-630 Hz (third octaves, KU100), not the model's +0.05 dB;
+- DCS's cockpit mix puts as much power at 200-1000 Hz as below 200 Hz, and its engine harmonics sit on those peaks;
+- many voices carry the same engine signal (six layers at one position, three at another, more at the consoles):
+  their reflections and tail add coherently in the shared buses and FDN, which a per-voice estimate cannot see.
+The per-voice model stays as the fast part (it follows a voice the moment it starts). On top of it the Room measures
+and matches, when the module passes it the block's direct sound (`Room::Render(out, frames, directLR)`; the module
+renders the owned voices' HRTF output and kept sides into its own buffer while the room runs):
+- three bands measured on the direct sound and on direct + room (Butterworth: fourth-order low-pass at 200 Hz,
+  second-order band-pass 200-1000 Hz, fourth-order high-pass at 1 kHz), energies smoothed with a one-pole of
+  `kRoomMatchTauS` = 1.5 s; the correction is the middle band's gain times a low shelf at 200 Hz and a high shelf at
+  1 kHz for the other two (minimum phase, redesigned per block; a subtractive split was tried first: its middle band
+  is not a band with fourth-order filters, the gains went the wrong way);
+- the target per band is `10 log10(E_direct / (m² E_total))`, `m²` the voices' energy-weighted `d²`
+  (`RoomSource::direct`): what Off would have played over what plays, coherent sums and the actual spectrum included;
+- the gain moves to it at most `kRoomMatchSlewDbPerS` = 1 dB/s and stays within ±`kRoomMatchMaxDb` = 2 dB; it is
+  measured only at full wet and while there is sound (it holds otherwise: kill switch, silence, a fade), applied to
+  direct + room (the DRR stays the design's) as `gain^wet` ramped across the block, so Off, the kill switch and outside
+  views meet it at 0 dB;
+- cost about 3 µs per block (eight SSE biquads per sample: six for the measure on four lanes, two shelves).
+The gains are in `RoomStats::matchDb`, the running line (`match lo/mid/hi dB`) and `audio_space.csv`
+(`match_lo_db,match_mid_db,match_hi_db`).
 
 ### 6.3 PanLevel, loudness factor, wide sounds
 
@@ -588,6 +618,13 @@ bool Preset(Family f, int strength, RoomParams* out);     // section 5.2 x 5.3
 constexpr const wchar_t* kTestSection = L"AudioTest";             // Active, Seed, Trials, Level (listening test, section 11)
 ```
 
+Built after the live flight (level match and CPU, 2026-11-26): `RoomSource::direct` (the d the voice's Render got; 0
+counts as 1; RoomSource is 24 bytes), `Room::Render(outLR, frames, directLR)` (the level match of section 6.2: the
+caller's direct sound in, level-matched direct + room added to outLR; the direct sound is added even when the room
+cannot render), `RoomStats::matchDb[3]`, the `kRoomMatch*` constants. The buses render a copy of the voices' set with
+filters cut to 96 taps at 48 kHz (`CopyHrtfShortened`, `src/internal.h`); `TakeRetiredHrtf` still returns the voices'
+set, once the buses let go of its copy.
+
 Built (CORE), additions to the API above, nothing removed or renamed:
 - `binaural_room.h`: `kRoomWetSlewS` (0.05 s), `kRoomEarlyFadeMs` (50), `kRoomCanopyTauS` (0.3 s),
   `kRoomSpeedOfSound` (343 m/s); `Room` has a private `Impl` (and a `RoomAccess` friend for the harness's probes).
@@ -644,7 +681,8 @@ Render thread per armed block: read `SpaceData`; `C_now = R_late ⋅ C_dcs` (or 
 wet = inside ⋅ (CockpitSpace > 0) ⋅ blk.on, canopy, early = !backoffEarly}`; `Room::BeginBlock`. In `ProcessVoice`,
 after the voice's `CoreRender`: `posA = rotate(conj(C_now), u.position)`; `RoomSource{posA, send = u.gain ⋅
 RoomSendDistanceGain(...), flags}`; `Room::AddSource(slot, src, in, frames, cw0, cw1)`; `u.gain *= RoomDirectGain(...)`
-before the `CoreRender` call (and `gS` of the side). After the mix: `Room::Render(out, frames)` inside the same
+before the `CoreRender` call (and `gS` of the side). As built, the voices' HRTF output and kept side go to the binding's
+`dry` buffer while the room runs, and `RoomSource::direct = d`. After the mix: `Room::Render(out, frames, dry)` inside the same
 `MxcsrScope` and `dspTicks` measurement, then `Room::EndBlock`. `Room::ResetSource` wherever `CoreResetSource` is
 called. Skip all room calls while `Room::Idle()` and the wet target is 0.
 
@@ -690,7 +728,7 @@ audio: cockpit space: inside signals: ed_sound <inside|outside|unknown>, camera 
 audio: cockpit space: frame from <sound|none>, cockpit ctx <i>, spread <deg> deg, unreliable frames <n>, outlier sounds <n>   (on change, and once per minute while unreliable)
 audio: cockpit space: early reflections off (CPU budget) | early reflections on again
 audio: ctx <i> listener gain=<f> pitch=<f> lowpass=<f>                                       (probe: at enable and on any change > 1 %)
-audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB; head pose <on|off|unused>
+audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB, match <lo>/<mid>/<hi> dB; head pose <on|off|unused>
 audio: cockpit space: ed_sound's cockpit fields not found (<why>); <what is off>               (at install, only when a signature row is missing)
 ```
 
@@ -710,7 +748,8 @@ world context's listener gain or low-pass moves with it.
 empty otherwise; `ax..az` aircraft-frame position; `dcomp_db` 20 log10 d).
 
 `audio_space.csv` (new, LogVoices, one row per second):
-`time,level,family,type,inside,canopy,canopy_src,frame_src,cockpit_ctx,yaw_deg,pitch_deg,roll_deg,spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass`
+`time,level,family,type,inside,canopy,canopy_src,frame_src,cockpit_ctx,yaw_deg,pitch_deg,roll_deg,spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass,match_lo_db,match_mid_db,match_hi_db`
+(`match_*`: the level match's gains at full wet, section 6.2)
 (`yaw..roll`: the head against the aircraft from `C_now`; `lg_*`: the world context's listener gain and low-pass).
 
 ## 9. CPU budget and real-time rules
@@ -735,6 +774,44 @@ empty otherwise; `ax..az` aircraft-frame position; `dcomp_db` 20 log10 d).
   at p99 0.30 ms (AVX2) / 0.50 ms (SSE2) so a regression fails, and prints the target as met or MISSED. With the
   module's 2.5 ms budget (25 % of the block) and today's 0.26-0.40 ms for the voices the total stays under 0.7 ms.
   `RoomDirectGain` + `RoomSendDistanceGain`: 0.17 µs per voice (0.35 µs with the canopy partly open).
+- **After the live flight (2026-11-26: room p99 0.26-0.33 ms live, module +0.2 ms).** The harness now profiles Render
+  per section (`room_probe::Profile`) and C9 also runs on the KU100 set (the live default). Before, at 48 voices
+  (AVX2, synthetic set): AddSource 71 µs (1.5 µs per voice), Render 73-85 µs, most of it the 14 bus HRTF sources on
+  the set's 128-tap filters (the KU100 has 128 taps too; more with the head turning: every block crossfades), then the
+  tail (16 µs measured once the buses were cut). What changed, the
+  perceptual design kept:
+  - the buses render a copy of the set with filters cut to 64 taps (1.3 ms; minimum phase: the worst direction and ear
+    keeps 98.3 % of its energy on the KU100, the synthetic set 100 %; the early calibration runs on the cut filters);
+  - the send high-pass runs on the buses' binaural output (2 channels) instead of on the 14 buses (linear and the same
+    for every bus);
+  - per-block buffers (the 112 (tap, bus) accumulators, the buses) are packed at a stride of the block plus 16 floats in
+    the order of first use: at a stride of 32 KB every accumulator of a frame shared one L1 and L2 set;
+  - the wall filters run eight (AVX2, FMA) or four (SSE2) pairs per vector, two vectors side by side, the recursion one
+    FMA on its chain;
+  - the tail's FDN (eight lines in two SSE vectors, the Hadamard by shuffles) and the diffuse EQ (both ears in one
+    vector);
+  - per voice: taps reused while the voice stays within 0.5 mm of where they were computed (and nothing else that
+    shapes them changed), one gain product when no ramp moves, the stereo input summed four frames at a time, the
+    non-finite check without a float dependency chain (it was about 1 µs per voice), the preset's part of
+    `RoomDirectGain` kept per thread.
+  Measured after (C9, thread CPU time, best of 5 x 1000 blocks, 480 frames, the level match included; on a quiet PC):
+
+  | Kernels, set | Voices | Static p50 / p99 | Head turning 90°/s p50 / p99 |
+  |---|---|---|---|
+  | AVX2/FMA, synthetic | 48 | 0.097 / 0.119 ms | 0.108 / 0.138 ms |
+  | AVX2/FMA, synthetic | 64 | 0.112 / 0.145 ms | 0.125 / 0.153 ms |
+  | AVX2/FMA, KU100 | 48 | 0.098 / 0.124 ms | 0.112 / 0.145 ms |
+  | SSE2, synthetic | 48 | 0.147 / 0.186 ms | 0.170 / 0.211 ms |
+  | AVX2/FMA, early off | 48 | 0.027 / 0.037 ms | |
+
+  Render now (AVX2, 48 voices, static): bus HRTF 30 µs (42 µs turning), tail 8.5 µs, wall filters 7.5 µs, early
+  high-pass 1 µs, output and level match 3-4 µs; AddSource about 1.0 µs per voice. `RoomDirectGain` +
+  `RoomSendDistanceGain` 0.13 µs per voice. On a loaded PC (other builds running) the same runs read up to 30 % higher
+  (AVX2 48 static p99 0.16-0.17 ms). The live `room p99` (wall time on DCS's audio thread, the per-voice sends
+  included) was about 1.7x the harness's p99 in the first flight; the next flight decides. Considered and not done:
+  sharing one tap computation between voices at the same position (DCS plays engine layers six at one point): with
+  the taps reused per voice it saves about 0.3 µs per duplicate, not worth a second mixing path; fewer buses or taps
+  per voice (a perceptual change).
 - Room time is inside `dspTicks` (the module's budget measure).
 - Back-off ladder: over budget (> 10 % of the blocks of the last second) → **step 1: early reflections off** (late
   only, logged) → then the existing MaxObjects steps. Recovery in reverse: MaxObjects back to the setting, then after
@@ -786,7 +863,9 @@ override and the arm name per level; `hrtf_audio.py` needs to read `audio_space.
   the ceiling of the offline gates) and the module's p99 within 0.2 ms of the Off arm;
 - `audio_space.csv`: `inside 1` while in the cockpit, `type` the aircraft's, `frame_src` sound with `spread_deg` under
   1°, `yaw_deg` following the head sweep (the [A] of section 3.2), `wet 1`, `early 1`, `dcomp_mean_db` between -0.1 and
-  -0.4 dB;
+  -0.4 dB (first flight: -0.04 / -0.10 dB, the per-voice model alone; since the level match, `dcomp_mean_db` plus
+  `match_mid_db` is the direct cut at 200-1000 Hz and the level against Off is what is judged: broadband and K within
+  0.5 dB, 200-1000 Hz within 1 dB);
 - the `audio: ctx N listener gain=... lowpass=...` probe line logged once (the [A] of section 3.1, read, not judged);
 - no click in the loopback at the kill switch (largest sample step against the steady signal's own, as offline).
 A fourth arm with an F2 view switch in the schedule checks inside 0 and the room idle (`wet 0`, no room time).
@@ -944,7 +1023,8 @@ against the rendered ones per source.
 | R9 ripple | 1.9 / 2.7 / 3.3 dB (KU100 1.9 / 2.7 / 3.3) | 2 / 3 / - |
 | R1 early IACC | lateral sources 0.93 → 0.88-0.90; median sources 1.00 → 0.98-0.99, front panel → 0.93 | median ≥ 0.05 lower: **not met** |
 | R1 late IACC (5 ms-end) | 1 kHz 0.21-0.48, 2 kHz 0.33-0.35, 4 kHz 0.22 | <= 0.3: **not met** at 1-2 kHz |
-| C9 / R8 CPU | section 9 (48 voices AVX2 p50 0.145, p99 0.19-0.21 ms) | p99 0.15: **missed** (gated 0.30) |
+| C9 / R8 CPU | section 9 (48 voices AVX2 p50 0.145, p99 0.19-0.21 ms); after the live flight p50 0.097-0.112, p99 0.119-0.145 ms (synthetic and KU100, static and turning) | p99 0.15: met (gated 0.30) |
+| C16 level match (after the live flight) | live-like mix (20 voices on one engine signal, engine layers outside the box above-behind the head, as much power at 200-1000 Hz as below 200, transients), four variants x three levels, Off against matched: broadband within 0.07 dB, K within 0.08 dB, every band from 100 Hz within 0.6 dB (KU100); the 200-1000 Hz gain still within 0.22 dB p-p over 5 s; slew 1.00 dB/s | broadband and K 0.5 dB, bands 1 dB, p-p 0.3 dB |
 | C10 / R6 clicks | 15 transitions (strength, family, canopy at once and over 1 s, wet both ways, early off/on, kill switch, voice end, frame both ways, head 90°/s, source 1 m/s, HRTF change): worst 7.6e-4 (family) | 1e-3 |
 | Block size | 480 vs random 1-2048: 1.6e-6 | 1e-5 |
 | C11 real time | 64 sources x 8192 frames 2.7 ms; 0 allocations; MXCSR restored; bad calls refused | |
@@ -1039,6 +1119,7 @@ direct path) run with `CockpitSpace=0`.
 | Kill-switch halves vs DCS's own | 0.000 dB | 0.05 dB |
 | R6: 13 live changes 0.4 s apart, head turning 90°/s | largest second difference 5.1e-4 (at the kill switch), steady 2.6e-4 | steady + 1e-3 |
 | R7: `CockpitSpace=0` vs the module without a Room | bit-identical | bit-identical |
+| M17 (after the live flight): live-like mix through the module (20 wide stereo voices on one engine signal, a second engine, four outside voices), Subtle / Normal / Strong vs Off | broadband +0.00 / +0.00 / -0.00 dB, K -0.02 / -0.03 / -0.04 dB, 100-200 Hz -0.13 / -0.22 / -0.33, 200-1000 Hz +0.06 / +0.11 / +0.19, 1-4 kHz +0.11 / +0.17 / +0.23, 4-12 kHz -0.14 / -0.21 / -0.30 dB; the step against the kill switch per band within 0.33 dB of Off's own | broadband and K 0.5 dB, bands 1 dB |
 | R8: 48 voices (24 cockpit, 24 through the canopy), head 90°/s, Normal / Strong | module p99 0.57 / 0.61 ms per 10 ms block; room p50 0.209 ms, p99 0.239 / 0.235 ms (with its per-voice sends; 0.115 / 0.121 ms before they were counted); 48 owned and sent, early on, no back-off, 0 allocations | budget 2.5 ms; room 0.5 ms (gate), 0.15 ms (target) |
 
 Notes:

@@ -22,6 +22,8 @@
 //   - Levels: tap gains normalised so their energy for a source 0.6 m ahead is earlyDb; the tail's energy for a unit send
 //     is lateDb; both relative to the direct sound of the set's average direction (its diffuse-field energy), calibrated
 //     for each set in SetHrtf (the late chain at five decay times, the buses against the incoherent model).
+//   - Level match (Render with the direct sound): a slow three-band gain on direct + room, measured, so the space is
+//     level-neutral for any voice set; RoomDirectGain's per-voice model stays the fast part.
 //   - Smoothing: wet (RoomFrame::wet) slews at most 1 per kRoomWetSlewS; early reflections (frameValid && early) fade
 //     in/out over kRoomEarlyFadeMs; canopy follows its target with a 0.3 s time constant; SetParams interpolates every
 //     parameter from the current values to the new ones over kRoomParamsCrossfadeMs (delays crossfade, FDN gains ramp per
@@ -54,6 +56,7 @@ constexpr float kRoomWetSlewS = 0.05f;               // RoomFrame::wet 0 -> 1 ta
 constexpr float kRoomEarlyFadeMs = 50.0f;            // early reflections on/off (frameValid, early)
 constexpr float kRoomCanopyTauS = 0.3f;              // canopy smoothing time constant
 constexpr float kRoomSpeedOfSound = 343.0f;
+constexpr std::uint32_t kRoomBusTaps48 = 64;         // the buses' HRTF filters are cut to this (at 48 kHz; scaled)
 
 namespace room_flags {
 constexpr std::uint32_t kReset = 1u;          // a new voice in this slot (tap lines and filter states cleared)
@@ -76,7 +79,20 @@ struct RoomSource {
     float posAircraft[3];      // aircraft frame, head at origin, metres (module: conj(C) applied to the corrected pos)
     float send;                // linear: the voice's HRTF gain (u.gain without RoomDirectGain) x the distance law
     std::uint32_t flags;       // room_flags
+    float direct;              // the direct gain d its Render call got (RoomDirectGainMix); 0 (not given) counts as 1.
+                               // Weighs the level match (Render with directLR): what Off would have played is the
+                               // direct sound divided by the voices' d.
 };
+
+// The level match (docs/COCKPIT_SPACE.md 6.2): RoomDirectGain's per-voice energy model is the fast part; the measured,
+// slow part keeps direct + room as loud as the direct sound alone would be without d, in three bands, for any voice set
+// (reflections that add in phase with the direct sound below 1 kHz, voices carrying the same signal, a low-heavy mix).
+constexpr float kRoomMatchTauS = 1.5f;             // energy smoothing of the measure (one pole, per block)
+constexpr float kRoomMatchSlewDbPerS = 1.0f;       // the gain moves at most this fast (no pumping)
+constexpr float kRoomMatchMaxDb = 2.0f;            // and stays within +-this
+constexpr float kRoomMatchLowHz = 200.0f;          // band edges: below, between (200-1000 Hz), above
+constexpr float kRoomMatchHighHz = 1000.0f;
+constexpr std::uint32_t kRoomMatchBands = 3;
 
 // What the direct gain d must follow in this block (Room::DirectState): the room's own values at the block's end, so
 // d ramps with the room it makes room for. params: the parameters as crossfaded now (kRoomParamsCrossfadeMs); earlyMix:
@@ -92,6 +108,7 @@ struct RoomStats {
     std::uint64_t blocks, sourcesAdded, earlyOffBlocks, frameInvalidBlocks, nonFinite, rejected, idleBlocks;
     std::uint64_t lastBlockNs, worstBlockNs;
     float lastWet, lastCanopy;
+    float matchDb[kRoomMatchBands];  // the level match's gains (below 200 Hz, 200-1000 Hz, above 1 kHz), at full wet
 };
 
 class Room {
@@ -118,6 +135,12 @@ public:
     void ResetSource(std::uint32_t slot);
     // After every AddSource of the block: renders the buses (the internal Renderer) and the tail, ADDS to outLR.
     void Render(float* outLR, std::uint32_t frames);
+    // The same with the level match. directLR (stereo, frames): this block's direct sound of the voices sent to the
+    // room (their Render outputs with d applied, the kept side of wide voices included), NOT in outLR. Adds
+    // M(direct + room) to outLR: M a three-band gain (kRoomMatch*) measured on direct + room against the direct alone
+    // over the last seconds (at full wet), applied as gain^wet; it holds while the sound is quiet. directLR is added
+    // to outLR even when the room cannot render (not ready, a rejected block). directLR null: Render(outLR, frames).
+    void Render(float* outLR, std::uint32_t frames, const float* directLR);
     void EndBlock();
     bool Idle() const;                           // wet 0, every tap line and the tail silent: the module may skip the room
     RoomDirectState DirectState() const;         // after BeginBlock: the values d must use for this block

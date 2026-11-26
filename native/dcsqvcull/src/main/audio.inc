@@ -142,6 +142,9 @@ audhk::ImportFn g_testImports = nullptr;
 const audhk::SigTable* g_testTable = nullptr;
 bool (*g_testHrtf)(const wchar_t* name, std::vector<uint8_t>* out) = nullptr;
 std::atomic<bool> g_testNoThread{false};  // tests drive ControlTick themselves
+// Tests: the room renders without its level match (the direct sound added as it is), for the e2e scenarios that
+// separate the direct sound from the room by d alone (DRR, IACC).
+std::atomic<bool> g_testRoomNoMatch{false};
 void (*g_testAfterRestore)() = nullptr;   // Stop: right after the sites are restored
 
 inline int64_t Qpc() {
@@ -384,7 +387,12 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
     const int64_t r0 = Qpc();
     {
       audr::MxcsrScope fz;
-      audr::RoomRender(b->room, out, frames);
+      if (blk.dry && g_testRoomNoMatch.load(std::memory_order_relaxed)) {
+        for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += blk.dry[i];
+        audr::RoomRender(b->room, out, frames);
+      } else {
+        audr::RoomRender(b->room, out, frames, blk.dry);
+      }
       audr::RoomEnd(b->room);
     }
     roomTicks += Qpc() - r0;
@@ -763,10 +771,12 @@ void Bind(void* rend, const char* how) {
   // One allocation: the voice's two channels (2 x kMaxFrames), the onset buffer and the delayed side's input
   // (kMaxFrames each), then every slot's side history (kSlots x kSideHist; each slot zeroes its own before its first use).
   b->scratch = static_cast<float*>(
-      _aligned_malloc(sizeof(float) * (4 * audr::kMaxFrames + static_cast<size_t>(audv::kSlots) * audr::kSideHist), 64));
+      _aligned_malloc(sizeof(float) * (6 * audr::kMaxFrames + static_cast<size_t>(audv::kSlots) * audr::kSideHist), 64));
   b->onset = b->scratch ? b->scratch + 2 * audr::kMaxFrames : nullptr;
   b->side = b->scratch ? b->scratch + 3 * audr::kMaxFrames : nullptr;
   b->sideHist = b->scratch ? b->scratch + 4 * audr::kMaxFrames : nullptr;
+  // Cockpit space: the block's direct sound of the owned voices (2 x kMaxFrames), handed to the room's level match.
+  b->dry = b->scratch ? b->scratch + 4 * audr::kMaxFrames + static_cast<size_t>(audv::kSlots) * audr::kSideHist : nullptr;
   b->overrun = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rend) + audv::off::kROverrun);
   if (!b->scratch) {
     audr::CoreDelete(core);
@@ -1225,7 +1235,8 @@ void SpaceCsvTick() {
   if (_wfopen_s(&f, g_spaceCsv.c_str(), L"ab") || !f) return;
   if (!exists)
     fprintf(f, "time,level,family,type,inside,canopy,canopy_src,frame_src,cockpit_ctx,yaw_deg,pitch_deg,roll_deg,"
-               "spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass\r\n");
+               "spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass,match_lo_db,"
+               "match_mid_db,match_hi_db\r\n");
   SYSTEMTIME st;
   GetLocalTime(&st);
   audspace::SpaceData sd{};
@@ -1249,8 +1260,9 @@ void SpaceCsvTick() {
           csrc == 2 ? "arg38" : csrc == 1 ? "mech" : "none", frame ? "sound" : "none", sd.cockpitCtx);
   if (frame) fprintf(f, "%.1f,%.1f,%.1f,", yaw, pitch, roll);
   else fprintf(f, ",,,");
-  fprintf(f, "%.2f,%.3f,%d,%u,%.1f,%.1f,%.2f,%s\r\n", sd.spreadDeg, g_cnt.roomWet.load(), g_cnt.roomEarly.load() ? 1 : 0,
-          g_cnt.roomVoicesNow.load(), p50, p99, g_cnt.dcompMeanDb.load(), lg);
+  fprintf(f, "%.2f,%.3f,%d,%u,%.1f,%.1f,%.2f,%s,%.2f,%.2f,%.2f\r\n", sd.spreadDeg, g_cnt.roomWet.load(),
+          g_cnt.roomEarly.load() ? 1 : 0, g_cnt.roomVoicesNow.load(), p50, p99, g_cnt.dcompMeanDb.load(), lg,
+          g_cnt.roomMatchDb[0].load(), g_cnt.roomMatchDb[1].load(), g_cnt.roomMatchDb[2].load());
   fclose(f);
 }
 
@@ -1432,9 +1444,11 @@ void ControlTick() {
       } else if (g_spaceSt.level > 0) {
         double p50 = 0, p99 = 0;
         RoomTimes(&p50, &p99);
-        snprintf(space, sizeof(space), "%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB",
+        snprintf(space, sizeof(space),
+                 "%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB, match %+.1f/%+.1f/%+.1f dB",
                  SpaceLevelName(g_spaceSt.level), cockpit_space::FamilyKey(g_spaceSt.family), g_spaceSt.insideNow,
-                 g_cnt.roomVoicesNow.load(), g_cnt.roomEarly.load() ? "on" : "off", p99 / 1000.0, g_cnt.dcompMeanDb.load());
+                 g_cnt.roomVoicesNow.load(), g_cnt.roomEarly.load() ? "on" : "off", p99 / 1000.0, g_cnt.dcompMeanDb.load(),
+                 g_cnt.roomMatchDb[0].load(), g_cnt.roomMatchDb[1].load(), g_cnt.roomMatchDb[2].load());
       }
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
           "%u; mono %u, stereo %u; wide %u (near or diffuse); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "

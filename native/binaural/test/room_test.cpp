@@ -3,6 +3,7 @@
 // Exit code 0 = pass. Prints every measured number (the metrics are the design's evidence, not only pass/fail).
 #include <windows.h>
 #include <immintrin.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <atomic>
@@ -527,6 +528,7 @@ static Timing RunRoomLoad(const std::vector<std::uint32_t>& file, std::uint32_t 
     std::vector<Vec> in;
     for (std::uint32_t s = 0; s < voices; ++s) in.push_back(White(frames * 4, 300 + s, 0.1f));
     Vec out(frames * 2);
+    const Vec direct = White(frames * 2, 299, 0.1f);  // the module's direct sound, through the level match
     rig.room.SetParams(Params(fam, 2));
     std::vector<double> ns, addNs, renderNs;
     const double cpn = CyclesPerNs();
@@ -546,18 +548,36 @@ static Timing RunRoomLoad(const std::vector<std::uint32_t>& file, std::uint32_t 
             const float dist = inside ? 0.35f + 0.1f * (s % 5) : 30.0f;
             const float x = static_cast<float>(std::cos(el * kPi / 180) * std::cos(az * kPi / 180)), y = static_cast<float>(std::sin(el * kPi / 180)),
                         z = static_cast<float>(-std::cos(el * kPi / 180) * std::sin(az * kPi / 180));
-            RoomSource rs{{x * dist, y * dist, z * dist}, 1.0f, (inside ? 0u : room_flags::kThroughCanopy) | (b == 0 ? room_flags::kReset : 0u)};
+            RoomSource rs{{x * dist, y * dist, z * dist}, 1.0f, (inside ? 0u : room_flags::kThroughCanopy) | (b == 0 ? room_flags::kReset : 0u), 0.99f};
             MonoInput mi{in[s].data() + (b % 3) * frames, nullptr, 1, 1.0f};
             rig.room.AddSource(s, rs, mi, frames, 1.0f, 1.0f);
         }
         ULONG64 cm;
         QueryThreadCycleTime(GetCurrentThread(), &cm);
-        rig.room.Render(out.data(), frames);
+        rig.room.Render(out.data(), frames, direct.data());
         rig.room.EndBlock();
         QueryThreadCycleTime(GetCurrentThread(), &c1);
         allocs += g_allocs.load() - a0;
         ns.push_back(static_cast<double>(c1 - c0) / cpn);
         addNs.push_back(static_cast<double>(cm - c0) / cpn), renderNs.push_back(static_cast<double>(c1 - cm) / cpn);
+    }
+    {
+        // Where Render's time goes (TSC, mean per block over the whole run).
+        static double tscPerNs = 0.0;
+        if (tscPerNs == 0.0) {
+            LARGE_INTEGER q0, q1, f;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&q0);
+            const unsigned long long t0 = __rdtsc();
+            do QueryPerformanceCounter(&q1);
+            while ((q1.QuadPart - q0.QuadPart) * 10 < f.QuadPart);
+            tscPerNs = double(__rdtsc() - t0) / (double(q1.QuadPart - q0.QuadPart) * 1e9 / double(f.QuadPart));
+        }
+        std::uint64_t pr[6];
+        room_probe::Profile(rig.room, pr);
+        auto us = [&](int k) { return double(pr[k]) / tscPerNs / 1e3 / blocks; };
+        std::printf("        Render sections (mean us per block): drain %.1f, pair filters %.1f, bus HRTF %.1f, early high-pass %.1f, "
+                    "tail %.1f, output and level match %.1f\n", us(0), us(1), us(2), us(3), us(4), us(5));
     }
     std::vector<double> tail(ns.begin() + 50, ns.end());
     std::sort(tail.begin(), tail.end());
@@ -588,6 +608,19 @@ struct LoadProbe {
     }
 };
 static void TestCpu(const std::vector<std::uint32_t>& file) {
+    {
+        RoomRig rig(file);
+        if (rig.ok) {
+            std::printf("C9 buses: the set's %u-tap filters cut to %u for the buses; the smallest energy share kept (any "
+                        "direction, ear) at", rig.set->taps, std::min(rig.set->taps, kRoomBusTaps48));
+            for (std::uint32_t t : {32u, 48u, 64u, 96u, 128u}) {
+                double kept = 1.0;
+                if (HrtfSet* c = CopyHrtfShortened(*rig.set, t, &kept)) ReleaseHrtf(c);
+                std::printf(" %u: %.4f", t, kept);
+            }
+            std::printf(" (in the room: %.4f)\n", room_probe::BusKept(rig.room));
+        }
+    }
     const int oldPriority = GetThreadPriority(GetCurrentThread());
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     double quietest = 1.0;
@@ -1115,6 +1148,181 @@ static void Diag(const std::vector<std::uint32_t>& file) {
         }
 }
 
+// ---- C16: level neutrality with a live-like cockpit mix (the 2026-11-26 F-16 flight, validation-08) ----------------------
+// What the live flight had and the earlier R4 did not: many voices carrying the same engine signal (DCS's engine layers
+// at the same and at different cockpit positions), voices outside the box above and behind the head (their excitation on
+// the canopy: reflections 1-2 ms after the direct sound, adding in phase with it around 250-315 Hz), a mix with as much
+// power at 200-1000 Hz as below 200 Hz, and transients. Off against each level through the level match (the module's
+// way), and the per-voice model alone for reference. Pass: broadband and K-weighted within 0.5 dB, 200-1000 Hz within
+// 1 dB, every band from 100 Hz within 1 dB, at Subtle, Normal and Strong; the match's gains still (no pumping) under
+// transients.
+
+// The engine: harmonics of 88 Hz to 1.1 kHz (amplitude 1/sqrt(h)), low-passed brown noise, a little broadband hiss.
+// peak > 0: harmonic `peak` and its neighbours 4x stronger (an engine tone at the reflections' in-phase region).
+static Vec Engine(std::size_t n, double fs, unsigned seed, double f0 = 88.0, int peak = 0, double peakGain = 4.0) {
+    Vec w = White(n, seed, 1.0f), v(n);
+    double brown = 0, lp = 0, hp = 0;
+    const double aLp = 1 - std::exp(-2 * kPi * 700 / fs), aHp = 1 - std::exp(-2 * kPi * 2000 / fs);
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> ph(0, 2 * kPi);
+    double phase[13];
+    for (double& p : phase) p = ph(rng);
+    for (std::size_t i = 0; i < n; ++i) {
+        brown = 0.995 * brown + 0.05 * w[i];
+        lp += aLp * (brown - lp);
+        hp += aHp * (w[i] - hp);
+        double e = 1.2 * lp + 0.01 * (w[i] - hp);
+        for (int h = 1; h <= 12; ++h)
+            e += (peak && std::abs(h - peak) <= 1 ? 0.12 * peakGain : 0.12) / std::sqrt(double(h)) * std::sin(2 * kPi * f0 * h * double(i) / fs + phase[h]);
+        v[i] = static_cast<float>(0.5 * e);
+    }
+    return v;
+}
+// Transients: 30 ms pink bursts, 12 dB over the engine's level, every 0.7 s.
+static Vec Bursts(std::size_t n, double fs, unsigned seed) {
+    Vec p = Pink(n, seed, 0.5f);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double t = std::fmod(double(i) / fs, 0.7);
+        p[i] = t < 0.03 ? static_cast<float>(p[i] * std::sin(kPi * t / 0.03)) : 0.0f;
+    }
+    return p;
+}
+
+struct BandDb {
+    double all, k, b[5];  // 20-100, 100-200, 200-1000, 1000-4000, 4000-12000
+};
+constexpr double kBands[5][2] = {{20, 100}, {100, 200}, {200, 1000}, {1000, 4000}, {4000, 12000}};
+static BandDb Bands(const Vec& lr, std::size_t from) {
+    BandDb r{};
+    Vec cut(lr.begin() + 2 * std::ptrdiff_t(from), lr.end());
+    r.all = Db(Energy(cut));
+    r.k = Loudness(lr, from);
+    for (int b = 0; b < 5; ++b) {
+        double e = 0;
+        for (int ear = 0; ear < 2; ++ear) e += Energy(BandPass(Channel(cut, ear), 48000, kBands[b][0], kBands[b][1]));
+        r.b[b] = Db(e);
+    }
+    return r;
+}
+
+static void TestLiveMix(const std::vector<std::uint32_t>& file, const char* label0) {
+    RoomRig rig(file);
+    CHECK(rig.ok);
+    if (!rig.ok) return;
+    const std::uint32_t n = 48000 * 10, from = 48000 * 5;  // the match settles within 3 s; measured over the last 5 s
+  for (int variant = 0; variant < 4; ++variant) {
+    // 0: the engine's harmonics from 88 Hz; 1: its 3rd harmonic region (about 300 Hz) 12 dB up, where the canopy's
+    // reflections of the voices above the head add in phase with the direct sound (+2 dB per third octave).
+    char label[64];
+    // 2: the worst case: every engine layer above-behind the head (excited on the canopy) and the engine's 3rd
+    // harmonic region 18 dB up.
+    // 3: the first mix with RoomDirectGain's share 0 (no per-voice compensation): the match alone has to take the whole
+    // room out of the level.
+    std::snprintf(label, sizeof(label), "%s%s", label0,
+                  variant == 3 ? " no per-voice d" : variant == 2 ? " canopy stress" : variant ? " 300 Hz engine" : "");
+    const Vec eng = variant == 3 ? Engine(n, 48000, 21) : variant == 2 ? Engine(n, 48000, 21, 104.0, 3, 8.0) : variant ? Engine(n, 48000, 21, 104.0, 3) : Engine(n, 48000, 21), eng2 = Engine(n, 48000, 22, 61.0), burst = Bursts(n, 48000, 23);
+    std::vector<Vec> own;
+    for (unsigned k = 0; k < 8; ++k) own.push_back(DcsLike(n, 48000, 40 + k));
+    // Aircraft frame (x forward, y up, z right), F-16C bubble box: above-behind outside the box (y 0.42 > 0.25), behind
+    // below outside it, near the head, the consoles, the panel, the canopy rail; then outside voices through the canopy.
+    struct V { float p[3]; const Vec* sig; float gain; std::uint32_t flags; };
+    const float A[3] = {-0.134f, 0.419f, 0.0f}, B[3] = {-0.834f, -0.581f, 0.0f}, Cn[3] = {0.166f, -0.081f, 0.0f};
+    std::vector<V> vs;
+    for (int k = 0; k < 6; ++k) vs.push_back({{A[0], A[1], A[2]}, &eng, 0.9f - 0.1f * k, 0});       // six engine layers
+    for (int k = 0; k < 3; ++k) vs.push_back({{B[0], B[1], B[2]}, &eng, 0.7f, 0});                 // the same, behind
+    vs.push_back({{Cn[0], Cn[1], Cn[2]}, &eng2, 0.3f, 0});
+    const float spots[10][3] = {{0.15f, -0.25f, -0.41f}, {0.15f, -0.25f, 0.41f}, {0.75f, -0.28f, 0.0f}, {0.39f, 0.225f, 0.0f},
+                                {-0.30f, 0.18f, 0.0f},   {0.0f, 0.2f, -0.35f},   {0.0f, 0.2f, 0.35f},   {-0.2f, -0.3f, 0.5f},
+                                {-0.2f, -0.3f, -0.5f},   {0.5f, 0.1f, 0.0f}};
+    for (int k = 0; k < 10; ++k) {  // correlated
+        if (variant == 2) vs.push_back({{A[0], A[1], A[2]}, &eng, 0.25f, 0});
+        else vs.push_back({{spots[k][0], spots[k][1], spots[k][2]}, &eng, 0.25f, 0});
+    }
+    for (int k = 0; k < 8; ++k) {
+        const double a = k * 2 * kPi / 8;
+        vs.push_back({{static_cast<float>(30 * std::cos(a)), 2.0f, static_cast<float>(30 * std::sin(a))}, &own[k], 0.05f,
+                      room_flags::kThroughCanopy});
+    }
+    vs.push_back({{0.3f, -0.2f, 0.3f}, &burst, 0.4f, 0});  // transients
+    auto scene = [&](const RoomParams& p, bool on, bool match, std::vector<float>* matchLog) {
+        SceneState st;
+        st.params = p;
+        st.levelMatch = match;
+        if (!on) st.directGain = false, st.renderRoom = false;
+        std::vector<SceneSource> src(vs.size());
+        for (std::size_t i = 0; i < vs.size(); ++i) {
+            std::memcpy(src[i].pos, vs[i].p, sizeof(vs[i].p));
+            src[i].signal = vs[i].sig->data(), src[i].gain = vs[i].gain, src[i].flags = vs[i].flags;
+        }
+        BlockHook hook;
+        if (matchLog) hook = [&](std::uint32_t b, std::uint32_t, SceneState&, std::vector<SceneSource>&) {
+            if (b * 480 >= from) matchLog->push_back(rig.room.GetStats().matchDb[1]);
+        };
+        return RenderScene(rig, st, src, n, 480, hook).Total();
+    };
+    const BandDb off = Bands(scene(Params(Family::Bubble, 1), false, false, nullptr), from);
+    const char* names[] = {"Subtle", "Normal", "Strong"};
+    bool pass = true, still = true;
+    for (int s = 1; s <= 3; ++s) {
+        RoomParams p = Params(Family::Bubble, s);
+        if (variant == 3) p.neutralShare = 0.0f;
+        const BandDb model = Bands(scene(p, true, false, nullptr), from);
+        std::vector<float> log;
+        const BandDb on = Bands(scene(p, true, true, &log), from);
+        const RoomStats rs = rig.room.GetStats();
+        float lo = 1e9f, hi = -1e9f;
+        for (float v : log) lo = std::min(lo, v), hi = std::max(hi, v);
+        std::printf("C16 live-like mix %s %-6s model only: all %+.2f K %+.2f 200-1k %+.2f | matched: all %+.2f K %+.2f | 20-100 %+.2f 100-200 %+.2f "
+                    "200-1k %+.2f 1-4k %+.2f 4-12k %+.2f dB | match %+.2f/%+.2f/%+.2f dB, 200-1k gain p-p %.2f dB over 5 s\n",
+                    label, names[s - 1], model.all - off.all, model.k - off.k, model.b[2] - off.b[2], on.all - off.all, on.k - off.k,
+                    on.b[0] - off.b[0], on.b[1] - off.b[1], on.b[2] - off.b[2], on.b[3] - off.b[3], on.b[4] - off.b[4], rs.matchDb[0],
+                    rs.matchDb[1], rs.matchDb[2], hi - lo);
+        pass = pass && std::fabs(on.all - off.all) <= 0.5 && std::fabs(on.k - off.k) <= 0.5 && std::fabs(on.b[2] - off.b[2]) <= 1.0;
+        for (int b = 1; b < 5; ++b) pass = pass && std::fabs(on.b[b] - off.b[b]) <= 1.0;
+        still = still && !log.empty() && hi - lo <= 0.3f;
+    }
+    CHECKM(pass, "the live-like mix with the level match: broadband and K within 0.5 dB of Off, every band from 100 Hz within 1 dB");
+    CHECKM(still, "the level match holds still (200-1000 Hz gain within 0.3 dB over 5 s) under steady engine and transients");
+  }
+}
+
+// The match's behaviour over time: a step of the scene (a loud correlated engine starts) moves the gains at most at
+// kRoomMatchSlewDbPerS and within kRoomMatchMaxDb, and never steps the output (largest second difference as steady).
+static void TestMatchDynamics(const std::vector<std::uint32_t>& file) {
+    RoomRig rig(file);
+    CHECK(rig.ok);
+    if (!rig.ok) return;
+    const std::uint32_t n = 48000 * 8;
+    const Vec eng = Engine(n, 48000, 31), quiet = Pink(n, 32, 0.05f);
+    SceneState st;
+    st.params = Params(Family::Bubble, 3);
+    st.levelMatch = true;
+    std::vector<SceneSource> src(9);
+    const float A[3] = {-0.134f, 0.419f, 0.0f};
+    for (int k = 0; k < 8; ++k) {
+        std::memcpy(src[k].pos, A, sizeof(A));
+        src[k].signal = eng.data(), src[k].gain = 0.3f, src[k].active = false;
+    }
+    const float P[3] = {0.5f, -0.2f, -0.3f};
+    std::memcpy(src[8].pos, P, sizeof(P));
+    src[8].signal = quiet.data();
+    float last = 0.0f, worstStep = 0.0f, lo = 1e9f, hi = -1e9f;
+    std::uint32_t lastBlock = 0;
+    const SceneOut out = RenderScene(rig, st, src, n, 480, [&](std::uint32_t b, std::uint32_t o, SceneState&, std::vector<SceneSource>& s) {
+        if (o == 48000 * 3) for (int k = 0; k < 8; ++k) s[k].active = true;  // the engines start at 3 s
+        const float g = rig.room.GetStats().matchDb[1];
+        if (b > 0) worstStep = std::max(worstStep, std::fabs(g - last) / (float(b - lastBlock) * 0.01f));
+        last = g, lastBlock = b;
+        lo = std::min(lo, g), hi = std::max(hi, g);
+    });
+    std::printf("C16 match dynamics (Strong, 8 engines start at 3 s): 200-1k gain %+.2f .. %+.2f dB, fastest %.2f dB/s (limit %.1f)\n",
+                lo, hi, worstStep, kRoomMatchSlewDbPerS);
+    CHECK(worstStep <= kRoomMatchSlewDbPerS * 1.01f && lo >= -kRoomMatchMaxDb - 1e-4f && hi <= kRoomMatchMaxDb + 1e-4f);
+    bool fin = true;
+    for (float v : out.room) fin = fin && std::isfinite(v);
+    CHECK(fin);
+}
+
 // ---- the bundled set -----------------------------------------------------------------------------------------------------------
 static std::vector<std::uint32_t> ReadFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -1140,12 +1348,18 @@ int main(int argc, char** argv) {
         } else {
             TestMetrics(real, "(SADIE II KU100)");
             TestLevel(real);
+            TestLiveMix(real, "(KU100)");
             TestCoherence(real);
         }
     } else if (mode == "--diag") {
         Diag(file);
     } else if (mode == "--cpu") {
         TestCpu(file);
+        const auto real = ReadFile(std::string(BINAURAL_DATA_DIR) + "/sadie2_ku100.dcshrtf");
+        if (!real.empty()) {
+            std::printf("---- the same on the bundled SADIE II KU100 set (the live default)\n");
+            TestCpu(real);
+        }
     } else if (mode == "--long") {
         TestLongRun(file, 10);
     } else {
@@ -1162,6 +1376,8 @@ int main(int argc, char** argv) {
         TestFdn(file);               // C6
         TestCoherence(file);         // C7
         TestLevel(file);             // C8, R4
+        TestLiveMix(file, "(synthetic)");  // C16
+        TestMatchDynamics(file);     // C16
         TestMetrics(file, "(synthetic)");  // R1, R2, R3, R9
         TestCrossfades(file, file2); // C10, R6
         TestBlockInvariance(file);

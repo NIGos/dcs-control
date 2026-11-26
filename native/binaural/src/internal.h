@@ -60,6 +60,11 @@ struct HrtfSet {
 };
 constexpr int kSeedAz = 64, kSeedEl = 32;
 
+// Control thread: a copy of `src` with every filter cut to `taps` (a multiple of 8, at most src.taps) and faded out over
+// its last taps; a new serial. *worstKept (optional): the smallest share of a filter's energy kept. Null without memory.
+// Freed with ReleaseHrtf. The cockpit space's buses use it (room.cpp).
+HrtfSet* CopyHrtfShortened(const HrtfSet& src, std::uint32_t taps, double* worstKept = nullptr);
+
 // Point location: the triangle whose cone contains `d` (unit), its barycentric weights (>= 0, sum 1). `cache` is a
 // triangle to start the walk from (-1: none) and receives the result. Bounded work: a walk of at most 128 steps from
 // the cache or the seed grid, then a full scan.
@@ -108,6 +113,12 @@ bool CpuHasAvx2Fma();
 // The cockpit space's tap mix (room.cpp; its SSE2 version is there): acc[q][i] += (gs[q] + dg[q] i) src[i].
 using RoomMixFn = void (*)(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n);
 void RoomMixAvx2(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n);
+// Its wall filters (room.cpp; SSE2 version there), `count` pairs (a multiple of 8), x = in[p][i]:
+// hs[p] = (1 - hb[p]) hs[p] + hb[p] x, ls[p] = (1 - la[p]) ls[p] + la[p] (x - hs[p]), out[p][i] += ls[p]; hs, ls carried.
+using RoomPairsFn = void (*)(const float* const* in, float* const* out, const float* hb, const float* la, float* hs, float* ls,
+                             int count, std::uint32_t n);
+void RoomPairsAvx2(const float* const* in, float* const* out, const float* hb, const float* la, float* hs, float* ls,
+                   int count, std::uint32_t n);
 }  // namespace kernels
 
 namespace detail {

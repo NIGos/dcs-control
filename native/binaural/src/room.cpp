@@ -8,6 +8,7 @@
 // through the bus Renderer (one far-field HRTF source each, aircraft-fixed directions rotated into the head frame) and
 // runs the late tail (pre-delay, send high-pass, FDN, coherence mixer, diffuse EQ, gain), adding both to the output.
 #include <immintrin.h>
+#include <intrin.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -37,6 +38,44 @@ constexpr float kPreDelayMaxMs = 10.0f;
 constexpr float kSilence = 1e-14f;                     // -140 dB mean power per sample
 constexpr float kRefRt60Low = 0.12f, kRefRt60High = 0.09f;  // the late calibration's reference decay
 constexpr std::uint32_t kDrainMargin = 64;             // frames past the longest tap for the wall filters to settle
+// The level match's floor: under this mean power per frame (both ears, the direct sound) the measure holds (-110 dB).
+constexpr double kMatchFloor = 1e-11;
+// The buses' HRTF filters are cut to this many taps at 48 kHz (scaled with the rate, a multiple of 8): the reflections
+// are 15-25 dB under the direct sound and high-passed at 200 Hz; the minimum-phase filters keep at least 98.3 % of their
+// energy in the first 1.3 ms (KU100, worst direction and ear; the early calibration takes the rest). Half the buses'
+// FIR cost for the KU100's 128 taps (docs/COCKPIT_SPACE.md 9).
+constexpr std::uint32_t kBusTaps48 = kRoomBusTaps48;
+// A voice within this of the position its taps were computed for keeps them (0.5 mm: 1.5 us of path, 0.07 samples).
+constexpr float kTapReuseM = 0.0005f;
+
+// Per-block buffers are packed at this stride (frames rounded up to 16, plus 16): never a multiple of 4 KB, so the
+// accumulators, buses and lines touched together do not share cache sets (a stride of kMaxFramesPerCall, 32 KB, put
+// every accumulator of a frame in the same L1 and L2 sets).
+inline std::uint32_t PackedStride(std::uint32_t frames) { return ((frames + 15u) & ~15u) + 16u; }
+
+// True when any of n floats is not finite: (x * 0) is +-0 for a finite x and NaN otherwise; OR-ing the bit patterns
+// (no dependency chain through a float add) and testing the exponent bits.
+inline bool AnyNonFinite(const float* p, std::size_t n) {
+    const __m128 zero = _mm_setzero_ps();
+    __m128 acc = zero;
+    std::size_t i = 0;
+    for (; i + 4 <= n; i += 4) acc = _mm_or_ps(acc, _mm_mul_ps(_mm_loadu_ps(p + i), zero));
+    float t[4];
+    _mm_storeu_ps(t, acc);
+    std::uint32_t bits = 0;
+    for (float v : t) {
+        std::uint32_t u;
+        std::memcpy(&u, &v, 4);
+        bits |= u;
+    }
+    for (; i < n; ++i) {
+        const float v = p[i] * 0.0f;
+        std::uint32_t u;
+        std::memcpy(&u, &v, 4);
+        bits |= u;
+    }
+    return (bits & 0x7fffffffu) != 0;
+}
 
 // The tap mix, SSE2 (the AVX2/FMA one is kernels::RoomMixAvx2): acc[q][i] += (gs[q] + dg[q] i) src[i], i < n.
 void RoomMixSse2(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n) {
@@ -130,6 +169,26 @@ struct Derived {
     std::int32_t preDelay = 0;
     rf::Biquad sendHp[2];  // fourth-order Butterworth high-pass at sendHpHz (two sections)
     float hNorm = 1.0f;
+    float cap = 0.0f;      // room_model::TapCap
+    float through = 1.0f;  // throughDb as a gain
+};
+
+// The level match (docs/COCKPIT_SPACE.md 6.2): band split, smoothed band energies of the direct sound and of direct +
+// room, the gains (dB) at full wet, and the voices' energy-weighted d^2 over the same window.
+struct LevelMatch {
+    // The measure's band filters, Butterworth: [0] low band (fourth-order low-pass at kRoomMatchLowHz, two sections),
+    // [1] middle band (second-order high-pass at kRoomMatchLowHz, then second-order low-pass at kRoomMatchHighHz),
+    // [2] high band (fourth-order high-pass at kRoomMatchHighHz, two sections). Lanes: direct L, R, room L, R.
+    rf::Biquad band[kRoomMatchBands][2];
+    float z[kRoomMatchBands][2][2][4] = {};  // [band][section][z1, z2][lane]
+    // The correction, on direct + room (lanes L, R): the middle band's gain times a low shelf at kRoomMatchLowHz and a
+    // high shelf at kRoomMatchHighHz (the other two bands relative to it), redesigned per block (the gains move slowly).
+    float eqZ[2][2][4] = {};                 // [shelf][z1, z2][lane]
+    double sD[kRoomMatchBands] = {}, sT[kRoomMatchBands] = {};
+    double sW = 0.0, sWd = 0.0;
+    bool primed = false;
+    float gainDb[kRoomMatchBands] = {};    // at full wet
+    float appliedPrev[kRoomMatchBands] = {1.0f, 1.0f, 1.0f};  // linear, as applied at the end of the last block
 };
 
 struct Slot {
@@ -141,7 +200,13 @@ struct Slot {
     std::int32_t delay[kRoomTaps] = {};
     float bus[kRoomTaps][kRoomBuses] = {};
     float send = 0.0f, late = 0.0f;
-    std::int32_t drain = 0;  // frames of silence still to run after the voice ended (its reflections play out)
+    std::int32_t drain = 0;
+    // The last targets' inputs: a voice that did not move (in a block where nothing else that shapes the taps changed)
+    // keeps its taps without computing them again.
+    bool tapsValid = false;
+    float tapPos[3] = {};
+    std::uint32_t tapFlags = 0;
+    float tapSd = 1.0f;  // frames of silence still to run after the voice ended (its reflections play out)
 };
 
 inline void RotateQ(const float q[4], const float v[3], float out[3]) {
@@ -319,7 +384,7 @@ float CalibrateEarly(const HrtfSet& set, float eDiff) {
     return actual > 0.0 && model > 0.0 ? static_cast<float>(std::sqrt(model / actual)) : 1.0f;
 }
 
-HrtfDerived ComputeHrtfDerived(const HrtfSet& set) {
+HrtfDerived ComputeHrtfDerived(const HrtfSet& set, const HrtfSet& busSet) {
     HrtfDerived d;
     const std::uint32_t taps = set.taps;
     // Front: the interpolated filter straight ahead, as the voices' renderer builds it.
@@ -358,7 +423,7 @@ HrtfDerived ComputeHrtfDerived(const HrtfSet& set) {
         const float t = 0.05f * static_cast<float>(1 << i);
         d.kappaT[i] = MeasureKappa(set.sampleRate, d.eq, 1.33f * t, t);
     }
-    d.hNorm = CalibrateEarly(set, d.eDiff);
+    d.hNorm = CalibrateEarly(busSet, d.eDiff);  // the buses' own (shortened) filters
     d.valid = d.eFront > 0.0f && d.eDiff > 0.0f && std::isfinite(d.kappa) && d.kappa > 0.0f;
     return d;
 }
@@ -375,18 +440,54 @@ struct Room::Impl {
     bool inited = false;
     double qpcToNs = 0.0;
     kernels::RoomMixFn mix = &RoomMixSse2;
+    kernels::RoomPairsFn pairs = nullptr;  // AVX2/FMA pair filters, null: the SSE2 ones here
+
+    // The buses' shortened copies of the voices' sets (control thread; declared before `bus`, freed by ~Room after it).
+    struct BusSet {
+        const HrtfSet* orig;
+        HrtfSet* copy;  // null: the bus renderer got `orig` itself (no memory for a copy)
+    };
+    std::vector<BusSet> busSets;
+    std::vector<const HrtfSet*> retiredOrig;
+    double busKeptWorst = 1.0;
 
     Renderer bus;
-    std::unique_ptr<float[]> lines, busBuf, late, x1, x2, tmp, pre;
+    std::unique_ptr<float[]> lines, busBuf, late, x1, x2, tmp, pre, wetBuf, earlyBuf;
     // Early reflections are mixed per (tap, bus) pair over all voices; each pair runs through its wall's filters once in
-    // Render (the filters are linear and the same for every voice). accDirty: pairs written this block.
+    // Render (the filters are linear and the same for every voice). The pairs written in a block get accumulators packed
+    // in the order of first use (accIx: the pair's index in this block, -1 none; accList: the pairs in that order).
     std::unique_ptr<float[]> accBuf, accZero, accSink, vin;
-    std::uint16_t accDirty[kRoomTaps] = {};
+    std::int16_t accIx[kRoomTaps][kRoomBuses];
+    std::uint16_t accList[kRoomTaps * kRoomBuses] = {};
+    std::uint32_t accUsed = 0;
+    std::uint32_t pstride = 0;  // PackedStride(frames) of this block: accumulators and buses
     float pairHp[kRoomTaps][kRoomBuses] = {}, pairLp[kRoomTaps][kRoomBuses] = {};
     std::vector<Slot> slots;
     rf::Fdn fdn;
     rf::Mixer mixer;
-    rf::BiquadState busHp[kRoomBuses][2], lateHp[2];
+    rf::BiquadState earlyHp[2][2], lateHp[2];  // the send high-pass on the buses' binaural output [ear][section], the tail's
+    LevelMatch match;
+    double wSum = 0.0, wdSum = 0.0;
+    // Harness profile (room_probe::Profile): TSC cycles per Render section, summed: drain, pair filters, bus renders,
+    // early high-pass, tail, output / level match.
+    std::uint64_t prof[6] = {};  // this block's voices: direct energy, and direct energy x d^2 (the match's weights)
+
+    float* AccFor(std::uint32_t k, std::uint32_t j) {
+        std::int16_t& ix = accIx[k][j];
+        if (ix < 0) {
+            ix = static_cast<std::int16_t>(accUsed);
+            accList[accUsed++] = static_cast<std::uint16_t>(k * kRoomBuses + j);
+        }
+        return accBuf.get() + std::size_t(ix) * pstride;
+    }
+    void ClearAccs(std::uint32_t nf) {
+        for (std::uint32_t u = 0; u < accUsed; ++u) {
+            std::memset(accBuf.get() + std::size_t(u) * pstride, 0, sizeof(float) * nf);
+            accIx[accList[u] / kRoomBuses][accList[u] % kRoomBuses] = -1;
+        }
+        accUsed = 0;
+    }
+    void MatchMix(float* outLR, const float* directLR, std::uint32_t nfr);
     rf::Biquad eqCoef[2][2][3];      // [set][ear][stage]
     rf::BiquadState eqState[2][2][3];
     int eqCur = 0;
@@ -400,6 +501,7 @@ struct Room::Impl {
     bool haveParams = false, haveHrtf = false;
     RoomParams from{}, to{}, eff{};
     float xfade = 1.0f;
+    bool xfadeWasDone = false;
     HrtfDerived hd;
     Derived dPrev, dCur;
     float wetPrev = 0.0f, wetCur = 0.0f, wetTarget = 0.0f;
@@ -414,6 +516,7 @@ struct Room::Impl {
     unsigned int csr = 0;
     LARGE_INTEGER t0{};
     bool inputThisBlock = false, busInputThisBlock = false, lateInputThisBlock = false;
+    bool tapsStable = false;  // this block's taps depend on the voice's position only as in the last block
     std::uint64_t framesSinceInput = ~0ull >> 1, framesSinceBus = ~0ull >> 1, framesSinceLate = ~0ull >> 1;
     bool busActive = false, lateActive = false, busReset = true;
     // The set the bus Renderer was last given (control thread) and the one it last opened a block with (audio thread):
@@ -424,11 +527,12 @@ struct Room::Impl {
     std::atomic<std::uint64_t> sBlocks{0}, sAdded{0}, sEarlyOff{0}, sFrameInvalid{0}, sNonFinite{0}, sRejected{0}, sIdle{0};
     std::atomic<std::uint64_t> sLastNs{0}, sWorstNs{0};
     std::atomic<float> sWet{0.0f}, sCanopy{0.0f};
+    std::atomic<float> sMatch[kRoomMatchBands] = {};
 
     bool Ready() const { return inited && haveParams && haveHrtf; }
 
     bool Run(Slot& s, const float* a, const float* b, std::uint32_t stride, float sc, std::uint32_t nf, float w0, float w1,
-             const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT);
+             const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT, double* inEnergy = nullptr);
 
     void ResetSlot(Slot& s) {
         if (s.line) std::memset(s.line, 0, sizeof(float) * lineSize);
@@ -439,6 +543,7 @@ struct Room::Impl {
         s.send = s.late = 0.0f;
         s.drain = 0;
         s.active = false;
+        s.tapsValid = false;
     }
     void ResetLate() {
         fdn.Reset();
@@ -488,12 +593,20 @@ struct Room::Impl {
         d.sendHp[0] = rf::Highpass(p.sendHpHz, 0.54119610, fs);
         d.sendHp[1] = rf::Highpass(p.sendHpHz, 1.30656296, fs);
         d.hNorm = hd.valid ? hd.hNorm : 1.0f;
+        d.cap = rm::TapCap(p);
+        d.through = std::pow(10.0f, p.throughDb / 20.0f);
         return d;
     }
 };
 
 Room::Room() : impl_(new Impl) {}
-Room::~Room() { delete impl_; }
+Room::~Room() {
+    std::vector<Impl::BusSet> sets;
+    sets.swap(impl_->busSets);
+    delete impl_;  // the bus Renderer first: then nothing references the copies
+    for (const Impl::BusSet& b : sets)
+        if (b.copy) ReleaseHrtf(b.copy);
+}
 
 bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error, std::size_t errorCapacity) {
     auto fail = [&](const char* why) {
@@ -523,23 +636,35 @@ bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error,
     m.preMask = m.preSize - 1;
     m.busTail = kMaxDeviceTaps * (sampleRate / 48000 + 1) + static_cast<std::uint32_t>(0.03 * sampleRate);
     m.lines.reset(new (std::nothrow) float[std::size_t(maxSources) * m.lineSize]());
-    m.busBuf.reset(new (std::nothrow) float[std::size_t(kRoomBuses) * kMaxFramesPerCall]());
+    const std::size_t maxStride = PackedStride(kMaxFramesPerCall);
+    m.busBuf.reset(new (std::nothrow) float[std::size_t(kRoomBuses) * maxStride]());
+    m.wetBuf.reset(new (std::nothrow) float[std::size_t(2) * kMaxFramesPerCall]());
+    m.earlyBuf.reset(new (std::nothrow) float[std::size_t(2) * kMaxFramesPerCall]());
     m.late.reset(new (std::nothrow) float[kMaxFramesPerCall]());
     m.x1.reset(new (std::nothrow) float[kMaxFramesPerCall]());
     m.x2.reset(new (std::nothrow) float[kMaxFramesPerCall]());
     m.tmp.reset(new (std::nothrow) float[kChunk]());
     m.pre.reset(new (std::nothrow) float[m.preSize]());
-    m.accBuf.reset(new (std::nothrow) float[std::size_t(kRoomTaps) * kRoomBuses * kMaxFramesPerCall]());
+    m.accBuf.reset(new (std::nothrow) float[std::size_t(kRoomTaps) * kRoomBuses * maxStride]());
+    std::memset(m.accIx, 0xff, sizeof(m.accIx));
     m.accZero.reset(new (std::nothrow) float[kMaxFramesPerCall]());
     m.accSink.reset(new (std::nothrow) float[kMaxFramesPerCall]());
     m.vin.reset(new (std::nothrow) float[kChunk]());
     if (!m.accBuf || !m.accZero || !m.accSink || !m.vin) return fail("out of memory");
-    if (!m.lines || !m.busBuf || !m.late || !m.x1 || !m.x2 || !m.tmp || !m.pre) return fail("out of memory");
+    if (!m.lines || !m.busBuf || !m.late || !m.x1 || !m.x2 || !m.tmp || !m.pre || !m.wetBuf || !m.earlyBuf) return fail("out of memory");
     m.slots.resize(maxSources);
     for (std::uint32_t i = 0; i < maxSources; ++i) m.slots[i].line = m.lines.get() + std::size_t(i) * m.lineSize;
     if (!m.fdn.Init(sampleRate)) return fail("out of memory");
     m.mixer.Init(sampleRate);
-    m.mix = (g_forceRoomKernels.load() != 1 && kernels::CpuHasAvx2Fma()) ? &kernels::RoomMixAvx2 : &RoomMixSse2;
+    const bool avx2 = g_forceRoomKernels.load() != 1 && kernels::CpuHasAvx2Fma();
+    m.mix = avx2 ? &kernels::RoomMixAvx2 : &RoomMixSse2;
+    m.pairs = avx2 ? &kernels::RoomPairsAvx2 : nullptr;
+    m.match.band[0][0] = rf::Lowpass(kRoomMatchLowHz, 0.54119610, sampleRate);
+    m.match.band[0][1] = rf::Lowpass(kRoomMatchLowHz, 1.30656296, sampleRate);
+    m.match.band[1][0] = rf::Highpass(kRoomMatchLowHz, 0.70710678, sampleRate);
+    m.match.band[1][1] = rf::Lowpass(kRoomMatchHighHz, 0.70710678, sampleRate);
+    m.match.band[2][0] = rf::Highpass(kRoomMatchHighHz, 0.54119610, sampleRate);
+    m.match.band[2][1] = rf::Highpass(kRoomMatchHighHz, 1.30656296, sampleRate);
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     m.qpcToNs = 1e9 / static_cast<double>(f.QuadPart);
@@ -551,12 +676,42 @@ bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error,
 void Room::SetHrtf(const HrtfSet* set) {
     Impl& m = *impl_;
     if (!m.inited || !set) return;
-    m.bus.SetHrtf(set);
-    m.busGiven.store(set, std::memory_order_release);
+    if (!m.busSets.empty() && m.busSets.back().orig == set) return;  // already the buses' set
+    // The buses render a copy of the set with shorter filters (kBusTaps48); the room never reads `set` on the audio
+    // thread, so it is retired as soon as the buses let go of its copy.
+    double kept = 1.0;
+    const std::uint32_t taps = static_cast<std::uint32_t>(std::lround(double(kBusTaps48) * set->sampleRate / 48000.0));
+    HrtfSet* copy = taps < set->taps ? CopyHrtfShortened(*set, taps, &kept) : nullptr;
+    const HrtfSet* forBus = copy ? copy : set;
+    m.busSets.push_back({set, copy});
+    if (copy) m.busKeptWorst = kept;
+    m.bus.SetHrtf(forBus);
+    m.busGiven.store(forBus, std::memory_order_release);
     if (set->sampleRate != m.fs) return;
-    m.hrtfBox.Write(ComputeHrtfDerived(*set));
+    m.hrtfBox.Write(ComputeHrtfDerived(*set, *forBus));
 }
-const HrtfSet* Room::TakeRetiredHrtf() { return impl_->inited ? impl_->bus.TakeRetiredHrtf() : nullptr; }
+const HrtfSet* Room::TakeRetiredHrtf() {
+    Impl& m = *impl_;
+    if (!m.inited) return nullptr;
+    while (const HrtfSet* r = m.bus.TakeRetiredHrtf()) {
+        bool found = false;
+        for (std::size_t i = 0; i < m.busSets.size(); ++i) {
+            const Impl::BusSet b = m.busSets[i];
+            if (b.copy == r || (!b.copy && b.orig == r)) {
+                m.retiredOrig.push_back(b.orig);
+                if (b.copy) ReleaseHrtf(b.copy);
+                m.busSets.erase(m.busSets.begin() + static_cast<std::ptrdiff_t>(i));
+                found = true;
+                break;
+            }
+        }
+        if (!found) m.retiredOrig.push_back(r);
+    }
+    if (m.retiredOrig.empty()) return nullptr;
+    const HrtfSet* r = m.retiredOrig.front();
+    m.retiredOrig.erase(m.retiredOrig.begin());
+    return r;
+}
 void Room::SetHeadRadius(float metres) {
     if (impl_->inited) impl_->bus.SetHeadRadius(metres);
 }
@@ -576,7 +731,10 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
     m.inBlock = true;
     QueryPerformanceCounter(&m.t0);
     ++m.blockIndex;
+    if (m.accUsed) m.ClearAccs(m.frames);  // a block that was not rendered left its accumulators (at its own stride)
     m.frames = frames;
+    m.pstride = PackedStride(std::min(frames, kMaxFramesPerCall));
+    m.wSum = m.wdSum = 0.0;
     m.inputThisBlock = m.busInputThisBlock = m.lateInputThisBlock = false;
     m.blockOk = frames > 0 && frames <= kMaxFramesPerCall;
     if (!m.blockOk) {
@@ -666,9 +824,12 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
         m.dCur = m.Derive(m.eff, m.canCur);
         if (freshParams || firstReady) m.dPrev = m.dCur;
     }
+    m.tapsStable = m.Ready() && !freshParams && !firstReady && m.xfade >= 1.0f && m.xfadeWasDone && m.earlyCur == m.earlyPrev &&
+                   m.canCur == m.canPrev && m.dCur.K == m.dPrev.K;
+    m.xfadeWasDone = m.xfade >= 1.0f;
     m.sWet.store(m.wetCur, std::memory_order_relaxed);
     m.sCanopy.store(m.canCur, std::memory_order_relaxed);
-    for (std::uint32_t b = 0; b < kRoomBuses; ++b) std::memset(m.busBuf.get() + std::size_t(b) * kMaxFramesPerCall, 0, sizeof(float) * frames);
+    std::memset(m.busBuf.get(), 0, sizeof(float) * std::size_t(kRoomBuses) * m.pstride);
     std::memset(m.late.get(), 0, sizeof(float) * frames);
 }
 
@@ -677,7 +838,8 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
 // values (s.send, s.late, s.delay, s.bus) to the targets across `frames`; the targets become the slot's values. False
 // when a filter state went non-finite (the caller resets the slot).
 bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stride, float sc, std::uint32_t nf, float w0,
-                     float w1, const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT) {
+                     float w1, const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT,
+                     double* inEnergy) {
     bool early = false;
     for (std::uint32_t k = 0; k < kRoomTaps && !early; ++k)
         for (std::uint32_t j = 0; j < kRoomBuses; ++j)
@@ -694,12 +856,23 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
     float* t = tmp.get();
     const std::uint32_t base = s.w;
     bool any = false;
+    __m128 vEn = _mm_setzero_ps();  // the raw input's energy (the level match's weight)
+    float enTail = 0.0f;
     for (std::uint32_t o = 0; o < nf; o += kChunk) {
         const std::uint32_t n = std::min(kChunk, nf - o);
         {
             // The weighted input: gather (any stride), then the gain ramps four frames at a time (SSE2).
             float* v = vin.get();
-            if (b) {
+            if (b && b == a + 1 && stride == 2) {
+                // The module's stereo pair, interleaved: L + R four frames at a time.
+                const float* p = a + 2 * std::size_t(o);
+                std::uint32_t i = 0;
+                for (; i + 4 <= n; i += 4) {
+                    const __m128 q0 = _mm_loadu_ps(p + 2 * i), q1 = _mm_loadu_ps(p + 2 * i + 4);
+                    _mm_storeu_ps(v + i, _mm_add_ps(_mm_shuffle_ps(q0, q1, 0x88), _mm_shuffle_ps(q0, q1, 0xdd)));
+                }
+                for (; i < n; ++i) v[i] = p[2 * i] + p[2 * i + 1];
+            } else if (b) {
                 for (std::uint32_t i = 0; i < n; ++i) v[i] = a[std::size_t(o + i) * stride] + b[std::size_t(o + i) * stride];
             } else {
                 for (std::uint32_t i = 0; i < n; ++i) v[i] = a[std::size_t(o + i) * stride];
@@ -711,12 +884,26 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
             const __m128 four = _mm_set1_ps(4.0f), zero = _mm_setzero_ps();
             int nz = 0;
             std::uint32_t i = 0;
+            if (ds == 0.0f && dw == 0.0f && dwe == 0.0f && dl == 0.0f) {
+                // Every gain steady (the usual block): one product.
+                const __m128 g = _mm_set1_ps(sc * s0 * w0 * we0);
+                for (; i + 4 <= n; i += 4) {
+                    const __m128 raw = _mm_loadu_ps(v + i);
+                    vEn = _mm_add_ps(vEn, _mm_mul_ps(raw, raw));
+                    const __m128 x = _mm_mul_ps(raw, g);
+                    _mm_storeu_ps(v + i, x);
+                    _mm_storeu_ps(lateIn + o + i, _mm_add_ps(_mm_loadu_ps(lateIn + o + i), _mm_mul_ps(x, vL0)));
+                    nz |= _mm_movemask_ps(_mm_cmpneq_ps(x, zero));
+                }
+            }
             for (; i + 4 <= n; i += 4) {
                 const __m128 tg = _mm_mul_ps(idx, vInv), tw = _mm_mul_ps(_mm_sub_ps(idx, vOne), vInv);
                 __m128 g = _mm_mul_ps(vSc, _mm_add_ps(vS0, _mm_mul_ps(vDs, tg)));
                 g = _mm_mul_ps(g, _mm_add_ps(vW0, _mm_mul_ps(vDw, tw)));
                 g = _mm_mul_ps(g, _mm_add_ps(vE0, _mm_mul_ps(vDe, tg)));
-                const __m128 x = _mm_mul_ps(_mm_loadu_ps(v + i), g);
+                const __m128 raw = _mm_loadu_ps(v + i);
+                vEn = _mm_add_ps(vEn, _mm_mul_ps(raw, raw));
+                const __m128 x = _mm_mul_ps(raw, g);
                 _mm_storeu_ps(v + i, x);
                 const __m128 lg = _mm_add_ps(vL0, _mm_mul_ps(vDl, tg));
                 _mm_storeu_ps(lateIn + o + i, _mm_add_ps(_mm_loadu_ps(lateIn + o + i), _mm_mul_ps(x, lg)));
@@ -727,6 +914,7 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
                 const std::uint32_t j = o + i;
                 const float tg = static_cast<float>(j + 1) * invF, tw = static_cast<float>(j) * invF;
                 const float x = v[i] * sc * (s0 + ds * tg) * (w0 + dw * tw) * (we0 + dwe * tg);
+                enTail += v[i] * v[i];
                 v[i] = x;
                 lateIn[j] += x * (l0 + dl * tg);
                 nz |= x != 0.0f ? 1 : 0;
@@ -770,12 +958,16 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
             for (int q = 0; q < nu; ++q) {
                 const std::uint32_t j = used[q];
                 const float g0 = s.bus[k][j], g1 = busT[k][j];
-                acc[q] = accBuf.get() + (std::size_t(k) * kRoomBuses + j) * kMaxFramesPerCall + o;
+                acc[q] = AccFor(k, j) + o;
                 dg[q] = (g1 - g0) * invF, gs[q] = g0 + dg[q] * static_cast<float>(o + 1);
-                accDirty[k] = static_cast<std::uint16_t>(accDirty[k] | (1u << j));
             }
             mix(src, acc, gs, dg, nu, n);
         }
+    }
+    if (inEnergy) {
+        float t4[4];
+        _mm_storeu_ps(t4, vEn);
+        *inEnergy = double(t4[0]) + t4[1] + t4[2] + t4[3] + enTail;
     }
     s.w = (base + nf) & mask;
     if (delayT != s.delay) std::memcpy(s.delay, delayT, sizeof(s.delay));
@@ -813,14 +1005,27 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& src, const MonoInput&
         m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // A non-finite input sample resets the slot and adds nothing.
+    // A non-finite input sample resets the slot and adds nothing. The module's stereo input (a, a + 1, stride 2) is
+    // checked as one contiguous run.
     {
-        float z = 0.0f;
         const std::uint32_t st = in.stride;
-        for (std::uint32_t i = 0; i < frames; ++i) z += in.a[std::size_t(i) * st] * 0.0f;
-        if (in.b)
-            for (std::uint32_t i = 0; i < frames; ++i) z += in.b[std::size_t(i) * st] * 0.0f;
-        if (z != 0.0f || !std::isfinite(z)) {
+        bool bad;
+        if (in.b == in.a + 1 && st == 2) {
+            bad = AnyNonFinite(in.a, std::size_t(frames) * 2);
+        } else if (st == 1) {
+            bad = AnyNonFinite(in.a, frames) || (in.b && AnyNonFinite(in.b, frames));
+        } else {
+            std::uint32_t bits = 0;
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                float v = in.a[std::size_t(i) * st] * 0.0f;
+                if (in.b) v += in.b[std::size_t(i) * st] * 0.0f;
+                std::uint32_t u;
+                std::memcpy(&u, &v, 4);
+                bits |= u;
+            }
+            bad = (bits & 0x7fffffffu) != 0;
+        }
+        if (bad) {
             m.ResetSlot(s);
             m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
             return false;
@@ -834,41 +1039,68 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& src, const MonoInput&
     const RoomParams& p = m.eff;
     const Derived& d = m.dCur;
     rm::Tap taps[kRoomTaps];
+    const std::uint32_t tapFlags = src.flags & (room_flags::kThroughCanopy | room_flags::kLateOnly);
+    // "Did not move": within kTapReuseM on each axis of the position its taps were computed for (an aircraft-fixed
+    // voice seen from a turning head comes back through two rotations with float noise of a few micrometres).
+    const bool reuse = !fresh && m.tapsStable && s.tapsValid && s.tapFlags == tapFlags &&
+                       std::fabs(s.tapPos[0] - pos[0]) <= kTapReuseM && std::fabs(s.tapPos[1] - pos[1]) <= kTapReuseM &&
+                       std::fabs(s.tapPos[2] - pos[2]) <= kTapReuseM;
     // Early reflections off (and faded out in the previous block too): no taps to compute, the late send only.
     const bool earlyNow = m.earlyCur > 0.0f || m.earlyPrev > 0.0f;
-    if (earlyNow) {
+    if (reuse) {
+    } else if (earlyNow) {
         rm::ComputeTaps(p, m.canCur, pos, src.flags, taps);
     } else {
         for (std::uint32_t k = 0; k < kRoomTaps; ++k) taps[k] = rm::Tap{static_cast<float>(s.delay[k]) / static_cast<float>(m.fs), 0.0f, {1, 0, 0}, 0, 0};
     }
-    const float sendT = std::max(src.send, 0.0f) * rm::ThroughGain(p, src.flags);
+    const float sendT = std::max(src.send, 0.0f) * ((src.flags & room_flags::kThroughCanopy) ? d.through : 1.0f);
     const float lateT = (src.flags & room_flags::kLateOnly) ? rm::kLateOnlyGain : 1.0f;
-    std::int32_t delayT[kRoomTaps];
-    float busT[kRoomTaps][kRoomBuses] = {};
+    std::int32_t delayBuf[kRoomTaps];
+    float busBufT[kRoomTaps][kRoomBuses];
+    const std::int32_t* delayT = s.delay;
+    const float(*busT)[kRoomBuses] = s.bus;
     const float fsF = static_cast<float>(m.fs);
-    const float sd = rm::SendDistanceGain(p, pos, src.flags), cap = rm::TapCap(p);
-    for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
-        delayT[k] = std::clamp(static_cast<std::int32_t>(std::lround(taps[k].delayS * fsF)), 0, m.maxTapDelay);
-        const float g = rm::CappedTapGain(taps[k].gain * d.K, sd, cap) * m.earlyCur;
-        if (g > 0.0f) {
-            std::uint32_t idx[3];
-            float pg[3];
-            rm::Pan(taps[k].u, idx, pg);
-            for (int j = 0; j < 3; ++j) busT[k][idx[j]] += pg[j] * g;
+    const float sd = reuse ? s.tapSd : rm::SendDistanceGain(p, pos, src.flags), cap = d.cap;
+    if (!reuse) {
+        std::memset(busBufT, 0, sizeof(busBufT));
+        delayT = delayBuf, busT = busBufT;
+        for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+            delayBuf[k] = std::clamp(static_cast<std::int32_t>(std::lround(taps[k].delayS * fsF)), 0, m.maxTapDelay);
+            const float g = rm::CappedTapGain(taps[k].gain * d.K, sd, cap) * m.earlyCur;
+            if (g > 0.0f) {
+                std::uint32_t idx[3];
+                float pg[3];
+                rm::Pan(taps[k].u, idx, pg);
+                for (int j = 0; j < 3; ++j) busBufT[k][idx[j]] += pg[j] * g;
+            }
         }
     }
     if (fresh) {
-        std::memcpy(s.delay, delayT, sizeof(delayT));
-        std::memcpy(s.bus, busT, sizeof(busT));
+        std::memcpy(s.delay, delayT, sizeof(s.delay));
+        std::memcpy(s.bus, busT, sizeof(s.bus));
         s.send = sendT;
         s.late = lateT;
     }
-    if (!m.Run(s, in.a, in.b, in.stride, in.scale, frames, w0, w1, delayT, busT, sendT, lateT)) {
+    double inEnergy = 0.0;
+    if (!m.Run(s, in.a, in.b, in.stride, in.scale, frames, w0, w1, delayT, busT, sendT, lateT, &inEnergy)) {
         m.ResetSlot(s);
         m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    // The level match's weight: this voice's direct energy (input x its HRTF gain, the send without the distance law, x
+    // its weight), and d^2 x that.
+    {
+        const float hrtfGain = sd > 1e-6f ? std::max(src.send, 0.0f) / sd : 0.0f;
+        const double w = 0.5 * (double(w0) + w1), e = inEnergy * double(in.scale) * in.scale * hrtfGain * hrtfGain * w * w;
+        const float dd = (src.direct > 0.0f && std::isfinite(src.direct)) ? std::min(src.direct, 4.0f) : 1.0f;
+        if (std::isfinite(e)) m.wSum += e, m.wdSum += e * dd * dd;
+    }
     s.drain = 0;
+    if (!reuse) {  // kept from the computation, so a slow drift still recomputes once it passes kTapReuseM
+        std::memcpy(s.tapPos, pos, sizeof(s.tapPos));
+        s.tapSd = sd;
+    }
+    s.tapFlags = tapFlags, s.tapsValid = true;
     m.sAdded.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -883,15 +1115,81 @@ void Room::ResetSource(std::uint32_t slot) {
     else m.ResetSlot(s);
 }
 
-void Room::Render(float* outLR, std::uint32_t frames) {
+// The wall filters of (tap, bus) pairs, SSE2: two groups of four lanes side by side (two independent recursions per
+// frame), four frames at a time through a 4x4 transpose. Per pair, x = in[p][i]: hs = ch hs + hb x (the high-pass's
+// low-pass state), ls = cl ls + la (x - hs) (the low-pass of the high-passed signal), out[p][i] += ls. count: a multiple
+// of 4 (idle lanes read zeros into a sink).
+static void RoomPairsSse2(const float* const* in, float* const* out, const float* hb, const float* la, float* hs, float* ls,
+                          int count, std::uint32_t n) {
+    for (int g0 = 0; g0 < count; g0 += 8) {
+        const int ng = count - g0 > 4 ? 2 : 1;
+        __m128 vhb[2], vla[2], vch[2], vcl[2], vhs[2], vls[2];
+        for (int g = 0; g < ng; ++g) {
+            const int b = g0 + 4 * g;
+            vhb[g] = _mm_loadu_ps(hb + b), vla[g] = _mm_loadu_ps(la + b);
+            vch[g] = _mm_sub_ps(_mm_set1_ps(1.0f), vhb[g]), vcl[g] = _mm_sub_ps(_mm_set1_ps(1.0f), vla[g]);
+            vhs[g] = _mm_loadu_ps(hs + b), vls[g] = _mm_loadu_ps(ls + b);
+        }
+        std::uint32_t i = 0;
+        for (; i + 4 <= n; i += 4) {
+            __m128 r[2][4];
+            for (int g = 0; g < ng; ++g) {
+                const int b = g0 + 4 * g;
+                r[g][0] = _mm_loadu_ps(in[b] + i), r[g][1] = _mm_loadu_ps(in[b + 1] + i);
+                r[g][2] = _mm_loadu_ps(in[b + 2] + i), r[g][3] = _mm_loadu_ps(in[b + 3] + i);
+                _MM_TRANSPOSE4_PS(r[g][0], r[g][1], r[g][2], r[g][3]);
+            }
+            for (int f = 0; f < 4; ++f)
+                for (int g = 0; g < ng; ++g) {
+                    const __m128 x = r[g][f];
+                    vhs[g] = _mm_add_ps(_mm_mul_ps(vch[g], vhs[g]), _mm_mul_ps(vhb[g], x));
+                    vls[g] = _mm_add_ps(_mm_mul_ps(vcl[g], vls[g]), _mm_mul_ps(vla[g], _mm_sub_ps(x, vhs[g])));
+                    r[g][f] = vls[g];
+                }
+            for (int g = 0; g < ng; ++g) {
+                const int b = g0 + 4 * g;
+                _MM_TRANSPOSE4_PS(r[g][0], r[g][1], r[g][2], r[g][3]);
+                for (int l = 0; l < 4; ++l) _mm_storeu_ps(out[b + l] + i, _mm_add_ps(_mm_loadu_ps(out[b + l] + i), r[g][l]));
+            }
+        }
+        for (int g = 0; g < ng; ++g) {
+            const int b = g0 + 4 * g;
+            float h4[4], l4[4];
+            _mm_storeu_ps(h4, vhs[g]), _mm_storeu_ps(l4, vls[g]);
+            for (std::uint32_t k = i; k < n; ++k)
+                for (int l = 0; l < 4; ++l) {
+                    const float x = in[b + l][k];
+                    h4[l] = (1.0f - hb[b + l]) * h4[l] + hb[b + l] * x;
+                    l4[l] = (1.0f - la[b + l]) * l4[l] + la[b + l] * (x - h4[l]);
+                    out[b + l][k] += l4[l];
+                }
+            for (int l = 0; l < 4; ++l) hs[b + l] = h4[l], ls[b + l] = l4[l];
+        }
+    }
+}
+
+void Room::Render(float* outLR, std::uint32_t frames) { Render(outLR, frames, nullptr); }
+
+void Room::Render(float* outLR, std::uint32_t frames, const float* directLR) {
     Impl& m = *impl_;
     if (!m.inited || !m.inBlock || !m.blockOk || !m.Ready() || !outLR || frames != m.frames) {
         if (m.inited && m.inBlock) m.sRejected.fetch_add(1, std::memory_order_relaxed);
+        // The direct sound is the caller's: it plays whatever the room can do.
+        if (outLR && directLR && frames <= kMaxFramesPerCall)
+            for (std::uint32_t i = 0; i < 2 * frames; ++i) outLR[i] += directLR[i];
         return;
     }
     const float invF = 1.0f / static_cast<float>(frames);
     const Derived& d0 = m.dPrev;
     const Derived& d1 = m.dCur;
+    float* wet = m.wetBuf.get();
+    std::memset(wet, 0, sizeof(float) * 2 * frames);
+    std::uint64_t tsc = __rdtsc();
+    auto lap = [&](int k) {
+        const std::uint64_t t = __rdtsc();
+        m.prof[k] += t - tsc;
+        tsc = t;
+    };
 
     // ---- voices that ended (ResetSource) or were not added this block: their reflections play out with silence ----
     for (Slot& s : m.slots) {
@@ -910,158 +1208,114 @@ void Room::Render(float* outLR, std::uint32_t frames) {
         if (s.drain <= 0) m.ResetSlot(s);
     }
 
+    lap(0);
     // ---- early reflections: the buses ----
     if (m.busInputThisBlock) m.framesSinceBus = 0;
     const bool busNow = m.busInputThisBlock || m.framesSinceBus < m.busTail;
-    if (!busNow) {
-        for (std::uint32_t k = 0; k < kRoomTaps; ++k)
-            for (std::uint32_t j = 0; j < kRoomBuses; ++j)
-                if ((m.accDirty[k] >> j) & 1u)
-                    std::memset(m.accBuf.get() + (std::size_t(k) * kRoomBuses + j) * kMaxFramesPerCall, 0, sizeof(float) * frames);
-        std::memset(m.accDirty, 0, sizeof(m.accDirty));
-    }
+    if (!busNow) m.ClearAccs(frames);
     if (busNow) {
-        // Each live (tap, bus) pair through its wall's high-pass (folded with the send high-pass) and low-pass, four
-        // pairs per pass (independent recursions side by side), into its bus; the accumulators are left zeroed.
-        std::uint32_t live[kRoomTaps * kRoomBuses];
+        // Each live (tap, bus) pair (written this block, or its filters still ringing) through its wall's high-pass and
+        // low-pass into its bus (the send high-pass follows on the buses' binaural output); the accumulators are left
+        // zeroed.
+        constexpr std::uint32_t kPairs = kRoomTaps * kRoomBuses;
+        const float* in[kPairs + 8];
+        float* out[kPairs + 8];
+        float hb[kPairs + 8], la[kPairs + 8], hs[kPairs + 8], ls[kPairs + 8];
+        std::uint16_t pr[kPairs + 8];
         std::uint32_t nLive = 0;
+        auto addPair = [&](std::uint32_t p, const float* src) {
+            const std::uint32_t k = p / kRoomBuses, j = p % kRoomBuses;
+            pr[nLive] = static_cast<std::uint16_t>(p);
+            in[nLive] = src;
+            out[nLive] = m.busBuf.get() + std::size_t(j) * m.pstride;
+            hb[nLive] = d1.hpB[k], la[nLive] = d1.lpA[k], hs[nLive] = m.pairHp[k][j], ls[nLive] = m.pairLp[k][j];
+            ++nLive;
+        };
+        for (std::uint32_t u = 0; u < m.accUsed; ++u) addPair(m.accList[u], m.accBuf.get() + std::size_t(u) * m.pstride);
         for (std::uint32_t k = 0; k < kRoomTaps; ++k)
             for (std::uint32_t j = 0; j < kRoomBuses; ++j)
-                if ((m.accDirty[k] >> j) & 1u || std::fabs(m.pairHp[k][j]) + std::fabs(m.pairLp[k][j]) > 1e-12f)
-                    live[nLive++] = k * kRoomBuses + j;
-        for (std::uint32_t g = 0; g < nLive; g += 4) {
-            float* in[4];
-            float* out[4];
-            float hb[4], la[4], hs[4], ls[4];
-            for (std::uint32_t l = 0; l < 4; ++l) {
-                if (g + l < nLive) {
-                    const std::uint32_t pr = live[g + l], k = pr / kRoomBuses, j = pr % kRoomBuses;
-                    in[l] = m.accBuf.get() + std::size_t(pr) * kMaxFramesPerCall;
-                    out[l] = m.busBuf.get() + std::size_t(j) * kMaxFramesPerCall;
-                    hb[l] = d1.hpB[k], la[l] = d1.lpA[k], hs[l] = m.pairHp[k][j], ls[l] = m.pairLp[k][j];
-                } else {
-                    in[l] = m.accZero.get(), out[l] = m.accSink.get();
-                    hb[l] = 0.0f, la[l] = 1.0f, hs[l] = 0.0f, ls[l] = 0.0f;
-                }
-            }
-            {
-                // Four pairs in the four lanes of an SSE vector, four frames at a time (a 4x4 transpose in and out).
-                __m128 vhb = _mm_loadu_ps(hb), vla = _mm_loadu_ps(la), vhs = _mm_loadu_ps(hs), vls = _mm_loadu_ps(ls);
-                std::uint32_t i = 0;
-                for (; i + 4 <= frames; i += 4) {
-                    __m128 r0 = _mm_loadu_ps(in[0] + i), r1 = _mm_loadu_ps(in[1] + i), r2 = _mm_loadu_ps(in[2] + i), r3 = _mm_loadu_ps(in[3] + i);
-                    _MM_TRANSPOSE4_PS(r0, r1, r2, r3);  // r0 = frame i of the four lanes, ...
-                    __m128* rs[4] = {&r0, &r1, &r2, &r3};
-                    for (int f = 0; f < 4; ++f) {
-                        const __m128 x = *rs[f];
-                        vhs = _mm_add_ps(vhs, _mm_mul_ps(vhb, _mm_sub_ps(x, vhs)));
-                        vls = _mm_add_ps(vls, _mm_mul_ps(vla, _mm_sub_ps(_mm_sub_ps(x, vhs), vls)));
-                        *rs[f] = vls;
-                    }
-                    _MM_TRANSPOSE4_PS(r0, r1, r2, r3);  // back: r0 = lane 0's four frames, ...
-                    _mm_storeu_ps(out[0] + i, _mm_add_ps(_mm_loadu_ps(out[0] + i), r0));
-                    _mm_storeu_ps(out[1] + i, _mm_add_ps(_mm_loadu_ps(out[1] + i), r1));
-                    _mm_storeu_ps(out[2] + i, _mm_add_ps(_mm_loadu_ps(out[2] + i), r2));
-                    _mm_storeu_ps(out[3] + i, _mm_add_ps(_mm_loadu_ps(out[3] + i), r3));
-                }
-                _mm_storeu_ps(hs, vhs), _mm_storeu_ps(ls, vls);
-                for (; i < frames; ++i) {
-                    for (std::uint32_t q = 0; q < 4; ++q) {
-                        const float x = in[q][i];
-                        hs[q] += hb[q] * (x - hs[q]);
-                        ls[q] += la[q] * ((x - hs[q]) - ls[q]);
-                    }
-                    for (std::uint32_t q = 0; q < 4; ++q) out[q][i] += ls[q];
-                }
-            }
-            for (std::uint32_t l = 0; l < 4 && g + l < nLive; ++l) {
-                const std::uint32_t pr = live[g + l], k = pr / kRoomBuses, j = pr % kRoomBuses;
-                const bool ok = std::isfinite(hs[l]) && std::isfinite(ls[l]);
-                if (!ok) m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
-                m.pairHp[k][j] = ok ? hs[l] : 0.0f, m.pairLp[k][j] = ok ? ls[l] : 0.0f;
-                std::memset(in[l], 0, sizeof(float) * frames);
-            }
+                if (m.accIx[k][j] < 0 && std::fabs(m.pairHp[k][j]) + std::fabs(m.pairLp[k][j]) > 1e-12f)
+                    addPair(k * kRoomBuses + j, m.accZero.get());
+        const std::uint32_t nPad = (nLive + 7u) & ~7u;
+        for (std::uint32_t l = nLive; l < nPad; ++l) {
+            in[l] = m.accZero.get(), out[l] = m.accSink.get();
+            hb[l] = 0.0f, la[l] = 1.0f, hs[l] = 0.0f, ls[l] = 0.0f;
         }
-        std::memset(m.accDirty, 0, sizeof(m.accDirty));
-        // The send high-pass (fourth order) on each bus, and the bus gain.
-        const float h0 = d0.hNorm, dh = d1.hNorm - d0.hNorm;
-        // Four buses in the four lanes of an SSE vector (the 14 buses and two idle lanes), four frames at a time.
-        static_assert(kRoomBuses <= 16, "four groups of four lanes");
-        const rf::Biquad q0 = d1.sendHp[0], q1 = d1.sendHp[1];
-        const __m128 b00 = _mm_set1_ps(q0.b0), b01 = _mm_set1_ps(q0.b1), b02 = _mm_set1_ps(q0.b2), a01 = _mm_set1_ps(q0.a1), a02 = _mm_set1_ps(q0.a2);
-        const __m128 b10 = _mm_set1_ps(q1.b0), b11 = _mm_set1_ps(q1.b1), b12 = _mm_set1_ps(q1.b2), a11 = _mm_set1_ps(q1.a1), a12 = _mm_set1_ps(q1.a2);
-        for (std::uint32_t b = 0; b < kRoomBuses; b += 4) {
-            float* bb[4];
-            float z[4][4];  // [lane][section 0 z1, z2, section 1 z1, z2]
-            for (std::uint32_t q = 0; q < 4; ++q) {
-                const bool real = b + q < kRoomBuses;
-                bb[q] = real ? m.busBuf.get() + std::size_t(b + q) * kMaxFramesPerCall : m.accSink.get();
-                if (!real) std::memset(bb[q], 0, sizeof(float) * frames);
-                z[q][0] = real ? m.busHp[b + q][0].z1 : 0.0f, z[q][1] = real ? m.busHp[b + q][0].z2 : 0.0f;
-                z[q][2] = real ? m.busHp[b + q][1].z1 : 0.0f, z[q][3] = real ? m.busHp[b + q][1].z2 : 0.0f;
-            }
-            __m128 s01 = _mm_setr_ps(z[0][0], z[1][0], z[2][0], z[3][0]), s02 = _mm_setr_ps(z[0][1], z[1][1], z[2][1], z[3][1]);
-            __m128 s11 = _mm_setr_ps(z[0][2], z[1][2], z[2][2], z[3][2]), s12 = _mm_setr_ps(z[0][3], z[1][3], z[2][3], z[3][3]);
-            auto step = [&](__m128 x) {
-                const __m128 y0 = _mm_add_ps(_mm_mul_ps(b00, x), s01);
-                s01 = _mm_add_ps(_mm_sub_ps(_mm_mul_ps(b01, x), _mm_mul_ps(a01, y0)), s02);
-                s02 = _mm_sub_ps(_mm_mul_ps(b02, x), _mm_mul_ps(a02, y0));
-                const __m128 y1 = _mm_add_ps(_mm_mul_ps(b10, y0), s11);
-                s11 = _mm_add_ps(_mm_sub_ps(_mm_mul_ps(b11, y0), _mm_mul_ps(a11, y1)), s12);
-                s12 = _mm_sub_ps(_mm_mul_ps(b12, y0), _mm_mul_ps(a12, y1));
-                return y1;
-            };
-            std::uint32_t i = 0;
-            for (; i + 4 <= frames; i += 4) {
-                __m128 r0 = _mm_loadu_ps(bb[0] + i), r1 = _mm_loadu_ps(bb[1] + i), r2 = _mm_loadu_ps(bb[2] + i), r3 = _mm_loadu_ps(bb[3] + i);
-                _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
-                r0 = step(r0), r1 = step(r1), r2 = step(r2), r3 = step(r3);
-                _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
-                const __m128 g = _mm_add_ps(_mm_set1_ps(h0), _mm_mul_ps(_mm_set1_ps(dh * invF),
-                                                                        _mm_setr_ps(float(i + 1), float(i + 2), float(i + 3), float(i + 4))));
-                _mm_storeu_ps(bb[0] + i, _mm_mul_ps(r0, g)), _mm_storeu_ps(bb[1] + i, _mm_mul_ps(r1, g));
-                _mm_storeu_ps(bb[2] + i, _mm_mul_ps(r2, g)), _mm_storeu_ps(bb[3] + i, _mm_mul_ps(r3, g));
-            }
-            for (; i < frames; ++i) {
-                const __m128 y = step(_mm_setr_ps(bb[0][i], bb[1][i], bb[2][i], bb[3][i]));
-                float yl[4];
-                _mm_storeu_ps(yl, y);
-                const float g = h0 + dh * static_cast<float>(i + 1) * invF;
-                for (std::uint32_t q = 0; q < 4; ++q) bb[q][i] = yl[q] * g;
-            }
-            _mm_storeu_ps(z[0], s01), _mm_storeu_ps(z[1], s02), _mm_storeu_ps(z[2], s11), _mm_storeu_ps(z[3], s12);
-            for (std::uint32_t q = 0; q < 4 && b + q < kRoomBuses; ++q) {
-                rf::BiquadState& e0 = m.busHp[b + q][0];
-                rf::BiquadState& e1 = m.busHp[b + q][1];
-                e0.z1 = z[0][q], e0.z2 = z[1][q], e1.z1 = z[2][q], e1.z2 = z[3][q];
-                if (!std::isfinite(e0.z1) || !std::isfinite(e0.z2) || !std::isfinite(e1.z1) || !std::isfinite(e1.z2)) {
-                    std::memset(bb[q], 0, sizeof(float) * frames);
-                    e0 = e1 = rf::BiquadState{};
-                }
-            }
+        if (nPad) {
+            if (m.pairs) m.pairs(in, out, hb, la, hs, ls, static_cast<int>(nPad), frames);
+            else RoomPairsSse2(in, out, hb, la, hs, ls, static_cast<int>(nPad), frames);
         }
+        for (std::uint32_t l = 0; l < nLive; ++l) {
+            const std::uint32_t k = pr[l] / kRoomBuses, j = pr[l] % kRoomBuses;
+            const bool ok = std::isfinite(hs[l]) && std::isfinite(ls[l]);
+            if (!ok) m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
+            m.pairHp[k][j] = ok ? hs[l] : 0.0f, m.pairLp[k][j] = ok ? ls[l] : 0.0f;
+        }
+        m.ClearAccs(frames);
+        lap(1);
+        // The buses through the bus Renderer (one far-field HRTF source each, the shortened filters) into the early
+        // output, then the send high-pass (fourth order) and the bus gain on that binaural pair: both are linear and the
+        // same for every bus, so they run on two channels instead of 14.
+        float* early = m.earlyBuf.get();
+        std::memset(early, 0, sizeof(float) * 2 * frames);
         m.bus.BeginBlock(frames);
         for (std::uint32_t b = 0; b < kRoomBuses; ++b) {
             SourceUpdate u{{m.busHead[b][0] * kRoomBusDistanceM, m.busHead[b][1] * kRoomBusDistanceM,
                             m.busHead[b][2] * kRoomBusDistanceM},
                            1.0f,
                            source_flags::kNoNearField | (m.busReset ? source_flags::kReset : 0u)};
-            MonoInput mi{m.busBuf.get() + std::size_t(b) * kMaxFramesPerCall, nullptr, 1, 1.0f};
-            m.bus.Render(b, u, mi, frames, 1.0f, 1.0f, outLR);
+            MonoInput mi{m.busBuf.get() + std::size_t(b) * m.pstride, nullptr, 1, 1.0f};
+            m.bus.Render(b, u, mi, frames, 1.0f, 1.0f, early);
         }
         m.bus.EndBlock();
         m.busReset = false;
+        lap(2);
+        {
+            const float h0 = d0.hNorm, dh = d1.hNorm - d0.hNorm;
+            const rf::Biquad q0 = d1.sendHp[0], q1 = d1.sendHp[1];
+            // Lanes: left, right (two idle lanes); the two sections in cascade.
+            const __m128 b00 = _mm_set1_ps(q0.b0), b01 = _mm_set1_ps(q0.b1), b02 = _mm_set1_ps(q0.b2), a01 = _mm_set1_ps(q0.a1), a02 = _mm_set1_ps(q0.a2);
+            const __m128 b10 = _mm_set1_ps(q1.b0), b11 = _mm_set1_ps(q1.b1), b12 = _mm_set1_ps(q1.b2), a11 = _mm_set1_ps(q1.a1), a12 = _mm_set1_ps(q1.a2);
+            __m128 s01 = _mm_setr_ps(m.earlyHp[0][0].z1, m.earlyHp[1][0].z1, 0, 0), s02 = _mm_setr_ps(m.earlyHp[0][0].z2, m.earlyHp[1][0].z2, 0, 0);
+            __m128 s11 = _mm_setr_ps(m.earlyHp[0][1].z1, m.earlyHp[1][1].z1, 0, 0), s12 = _mm_setr_ps(m.earlyHp[0][1].z2, m.earlyHp[1][1].z2, 0, 0);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                const __m128 x = _mm_castpd_ps(_mm_load_sd(reinterpret_cast<const double*>(early + 2 * i)));
+                const __m128 y0 = _mm_add_ps(_mm_mul_ps(b00, x), s01);
+                s01 = _mm_add_ps(_mm_sub_ps(_mm_mul_ps(b01, x), _mm_mul_ps(a01, y0)), s02);
+                s02 = _mm_sub_ps(_mm_mul_ps(b02, x), _mm_mul_ps(a02, y0));
+                const __m128 y1 = _mm_add_ps(_mm_mul_ps(b10, y0), s11);
+                s11 = _mm_add_ps(_mm_sub_ps(_mm_mul_ps(b11, y0), _mm_mul_ps(a11, y1)), s12);
+                s12 = _mm_sub_ps(_mm_mul_ps(b12, y0), _mm_mul_ps(a12, y1));
+                const __m128 g = _mm_set1_ps(h0 + dh * static_cast<float>(i + 1) * invF);
+                const __m128 w = _mm_castpd_ps(_mm_load_sd(reinterpret_cast<const double*>(wet + 2 * i)));
+                _mm_store_sd(reinterpret_cast<double*>(wet + 2 * i), _mm_castps_pd(_mm_add_ps(w, _mm_mul_ps(g, y1))));
+            }
+            float z[4][4];
+            _mm_storeu_ps(z[0], s01), _mm_storeu_ps(z[1], s02), _mm_storeu_ps(z[2], s11), _mm_storeu_ps(z[3], s12);
+            bool fin = true;
+            for (int ear = 0; ear < 2; ++ear) {
+                m.earlyHp[ear][0].z1 = z[0][ear], m.earlyHp[ear][0].z2 = z[1][ear];
+                m.earlyHp[ear][1].z1 = z[2][ear], m.earlyHp[ear][1].z2 = z[3][ear];
+                for (int q = 0; q < 4; ++q) fin = fin && std::isfinite(z[q][ear]);
+            }
+            if (!fin) {
+                std::memset(m.earlyHp, 0, sizeof(m.earlyHp));
+                std::memset(wet, 0, sizeof(float) * 2 * frames);
+                m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         if (!m.busInputThisBlock) m.framesSinceBus += frames;
         m.busActive = true;
     } else if (m.busActive) {
         // The buses' tails are done: stop rendering them (no cost while the early reflections are off).
         std::memset(m.pairHp, 0, sizeof(m.pairHp));
         std::memset(m.pairLp, 0, sizeof(m.pairLp));
-        std::memset(m.busHp, 0, sizeof(m.busHp));
+        std::memset(m.earlyHp, 0, sizeof(m.earlyHp));
         m.busActive = false;
         m.busReset = true;
     }
 
+    lap(3);
     // ---- late tail ----
     if (m.lateInputThisBlock) m.framesSinceLate = 0, m.lateActive = true;
     if (m.lateActive) {
@@ -1082,12 +1336,30 @@ void Room::Render(float* outLR, std::uint32_t frames) {
         const float g0 = d0.lateGain, dg = d1.lateGain - d0.lateGain;
         const int cur = m.eqCur, nxt = 1 - m.eqCur;
         double energy = 0.0;
+        // The diffuse EQ of both ears side by side (lanes left, right): three biquads in cascade.
+        __m128 qb0[3], qb1[3], qb2[3], qa1[3], qa2[3], qz1[3], qz2[3];
+        for (int k = 0; k < 3; ++k) {
+            const rf::Biquad& cl = m.eqCoef[cur][0][k];
+            const rf::Biquad& cr = m.eqCoef[cur][1][k];
+            qb0[k] = _mm_setr_ps(cl.b0, cr.b0, 0, 0), qb1[k] = _mm_setr_ps(cl.b1, cr.b1, 0, 0), qb2[k] = _mm_setr_ps(cl.b2, cr.b2, 0, 0);
+            qa1[k] = _mm_setr_ps(cl.a1, cr.a1, 0, 0), qa2[k] = _mm_setr_ps(cl.a2, cr.a2, 0, 0);
+            qz1[k] = _mm_setr_ps(m.eqState[cur][0][k].z1, m.eqState[cur][1][k].z1, 0, 0);
+            qz2[k] = _mm_setr_ps(m.eqState[cur][0][k].z2, m.eqState[cur][1][k].z2, 0, 0);
+        }
         for (std::uint32_t i = 0; i < frames; ++i) {
             float l, r;
             m.mixer.TickPair(m.x1[i], m.x2[i], &l, &r);
-            float el = l, er = r;
-            for (int k = 0; k < 3; ++k)
-                el = rf::Tick(m.eqCoef[cur][0][k], m.eqState[cur][0][k], el), er = rf::Tick(m.eqCoef[cur][1][k], m.eqState[cur][1][k], er);
+            float el, er;
+            {
+                __m128 v = _mm_setr_ps(l, r, 0, 0);
+                for (int k = 0; k < 3; ++k) {
+                    const __m128 y = _mm_add_ps(_mm_mul_ps(qb0[k], v), qz1[k]);
+                    qz1[k] = _mm_add_ps(_mm_sub_ps(_mm_mul_ps(qb1[k], v), _mm_mul_ps(qa1[k], y)), qz2[k]);
+                    qz2[k] = _mm_sub_ps(_mm_mul_ps(qb2[k], v), _mm_mul_ps(qa2[k], y));
+                    v = y;
+                }
+                el = _mm_cvtss_f32(v), er = _mm_cvtss_f32(_mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1)));
+            }
             const float t = static_cast<float>(i + 1) * invF;
             if (m.eqFade) {
                 float nl = l, nr = r;
@@ -1096,9 +1368,15 @@ void Room::Render(float* outLR, std::uint32_t frames) {
                 el += (nl - el) * t, er += (nr - er) * t;
             }
             const float g = g0 + dg * t;
-            outLR[2 * i] += g * el;
-            outLR[2 * i + 1] += g * er;
+            wet[2 * i] += g * el;
+            wet[2 * i + 1] += g * er;
             energy += double(l) * l + double(r) * r;
+        }
+        for (int k = 0; k < 3; ++k) {
+            float z1[4], z2[4];
+            _mm_storeu_ps(z1, qz1[k]), _mm_storeu_ps(z2, qz2[k]);
+            m.eqState[cur][0][k].z1 = z1[0], m.eqState[cur][1][k].z1 = z1[1];
+            m.eqState[cur][0][k].z2 = z2[0], m.eqState[cur][1][k].z2 = z2[1];
         }
         if (m.eqFade) m.eqCur = nxt, m.eqFade = false;
         if (!m.lateInputThisBlock) m.framesSinceLate += frames;
@@ -1106,6 +1384,7 @@ void Room::Render(float* outLR, std::uint32_t frames) {
             m.ResetLate();
             m.sNonFinite.fetch_add(1, std::memory_order_relaxed);
             m.lateActive = false;
+            std::memset(wet, 0, sizeof(float) * 2 * frames);
         } else {
             const float rtMax = std::max(m.eff.rt60LowS, m.eff.rt60HighS);
             const std::uint64_t hold = static_cast<std::uint64_t>(3.0f * rtMax * static_cast<float>(m.fs)) + m.preSize;
@@ -1118,6 +1397,123 @@ void Room::Render(float* outLR, std::uint32_t frames) {
         m.eqCur = 1 - m.eqCur, m.eqFade = false;
     }
     if (!busNow && !m.lateActive) m.sIdle.fetch_add(1, std::memory_order_relaxed);
+
+    lap(4);
+    // ---- the output: the room alone, or direct + room through the level match ----
+    if (directLR) {
+        m.MatchMix(outLR, directLR, frames);
+    } else {
+        for (std::uint32_t i = 0; i < 2 * frames; i += 4) {
+            if (i + 4 <= 2 * frames) {
+                _mm_storeu_ps(outLR + i, _mm_add_ps(_mm_loadu_ps(outLR + i), _mm_loadu_ps(wet + i)));
+            } else {
+                for (std::uint32_t k = i; k < 2 * frames; ++k) outLR[k] += wet[k];
+            }
+        }
+    }
+    lap(5);
+}
+
+// The level match (docs/COCKPIT_SPACE.md 6.2). Measured per band (LevelMatch::band, lanes direct L, R, room L, R): the
+// direct sound's energy and direct + room's. Output: direct + room through the correction (the middle band's gain, ramped
+// across the block, times a low and a high shelf for the other two bands). Then, at full wet, the smoothed energies give
+// each band's target, 10 log10(E_direct / (mean d^2 x E_total)): what Off would have played over what plays; the gain
+// moves to it at most kRoomMatchSlewDbPerS, within +-kRoomMatchMaxDb.
+void Room::Impl::MatchMix(float* outLR, const float* directLR, std::uint32_t nfr) {
+    LevelMatch& lm = match;
+    const float* w = wetBuf.get();
+    float g1[kRoomMatchBands];
+    for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) g1[b] = std::pow(10.0f, lm.gainDb[b] * wetCur / 20.0f);
+    const float invF = 1.0f / static_cast<float>(nfr);
+    // The shelves at this block's end gains (relative to the middle band), as SSE coefficient vectors.
+    const double fsd = static_cast<double>(fs);
+    const rf::Biquad sh[2] = {rf::LowShelf(kRoomMatchLowHz, 20.0 * std::log10(double(g1[0]) / g1[1]), fsd),
+                              rf::HighShelf(kRoomMatchHighHz, 20.0 * std::log10(double(g1[2]) / g1[1]), fsd)};
+    __m128 eb0[2], eb1[2], eb2[2], ea1[2], ea2[2], ez1[2], ez2[2];
+    for (int k = 0; k < 2; ++k) {
+        eb0[k] = _mm_set1_ps(sh[k].b0), eb1[k] = _mm_set1_ps(sh[k].b1), eb2[k] = _mm_set1_ps(sh[k].b2);
+        ea1[k] = _mm_set1_ps(sh[k].a1), ea2[k] = _mm_set1_ps(sh[k].a2);
+        ez1[k] = _mm_loadu_ps(lm.eqZ[k][0]), ez2[k] = _mm_loadu_ps(lm.eqZ[k][1]);
+    }
+    __m128 bb0[3][2], bb1[3][2], bb2[3][2], ba1[3][2], ba2[3][2], bz1[3][2], bz2[3][2];
+    for (int b = 0; b < 3; ++b)
+        for (int k = 0; k < 2; ++k) {
+            const rf::Biquad& q = lm.band[b][k];
+            bb0[b][k] = _mm_set1_ps(q.b0), bb1[b][k] = _mm_set1_ps(q.b1), bb2[b][k] = _mm_set1_ps(q.b2);
+            ba1[b][k] = _mm_set1_ps(q.a1), ba2[b][k] = _mm_set1_ps(q.a2);
+            bz1[b][k] = _mm_loadu_ps(lm.z[b][k][0]), bz2[b][k] = _mm_loadu_ps(lm.z[b][k][1]);
+        }
+    auto tick = [](__m128 x, const __m128& b0, const __m128& b1, const __m128& b2, const __m128& a1, const __m128& a2,
+                   __m128& z1, __m128& z2) {
+        const __m128 y = _mm_add_ps(_mm_mul_ps(b0, x), z1);
+        z1 = _mm_add_ps(_mm_sub_ps(_mm_mul_ps(b1, x), _mm_mul_ps(a1, y)), z2);
+        z2 = _mm_sub_ps(_mm_mul_ps(b2, x), _mm_mul_ps(a2, y));
+        return y;
+    };
+    __m128 eD[3] = {_mm_setzero_ps(), _mm_setzero_ps(), _mm_setzero_ps()}, eT[3] = {_mm_setzero_ps(), _mm_setzero_ps(), _mm_setzero_ps()};
+    const float m0 = lm.appliedPrev[1], dm = g1[1] - lm.appliedPrev[1];
+    for (std::uint32_t i = 0; i < nfr; ++i) {
+        const __m128 x = _mm_setr_ps(directLR[2 * i], directLR[2 * i + 1], w[2 * i], w[2 * i + 1]);
+        for (int b = 0; b < 3; ++b) {
+            const __m128 y0 = tick(x, bb0[b][0], bb1[b][0], bb2[b][0], ba1[b][0], ba2[b][0], bz1[b][0], bz2[b][0]);
+            const __m128 y = tick(y0, bb0[b][1], bb1[b][1], bb2[b][1], ba1[b][1], ba2[b][1], bz1[b][1], bz2[b][1]);
+            const __m128 t = _mm_add_ps(y, _mm_movehl_ps(y, y));  // lanes 0, 1: direct + room
+            eD[b] = _mm_add_ps(eD[b], _mm_mul_ps(y, y));
+            eT[b] = _mm_add_ps(eT[b], _mm_mul_ps(t, t));
+        }
+        // Direct + room, lanes 0, 1, through the two shelves and the middle band's gain.
+        __m128 v = _mm_add_ps(x, _mm_movehl_ps(x, x));
+        v = tick(v, eb0[0], eb1[0], eb2[0], ea1[0], ea2[0], ez1[0], ez2[0]);
+        v = tick(v, eb0[1], eb1[1], eb2[1], ea1[1], ea2[1], ez1[1], ez2[1]);
+        const __m128 g = _mm_set1_ps(m0 + dm * static_cast<float>(i + 1) * invF);
+        const __m128 o = _mm_castpd_ps(_mm_load_sd(reinterpret_cast<const double*>(outLR + 2 * i)));
+        _mm_store_sd(reinterpret_cast<double*>(outLR + 2 * i), _mm_castps_pd(_mm_add_ps(o, _mm_mul_ps(g, v))));
+    }
+    for (int b = 0; b < 3; ++b)
+        for (int k = 0; k < 2; ++k) _mm_storeu_ps(lm.z[b][k][0], bz1[b][k]), _mm_storeu_ps(lm.z[b][k][1], bz2[b][k]);
+    for (int k = 0; k < 2; ++k) _mm_storeu_ps(lm.eqZ[k][0], ez1[k]), _mm_storeu_ps(lm.eqZ[k][1], ez2[k]);
+    bool fin = true;
+    for (int b = 0; b < 3; ++b)
+        for (int k = 0; k < 2; ++k)
+            for (int q = 0; q < 4; ++q) fin = fin && std::isfinite(lm.z[b][k][0][q]) && std::isfinite(lm.z[b][k][1][q]);
+    for (int k = 0; k < 2; ++k)
+        for (int q = 0; q < 4; ++q) fin = fin && std::isfinite(lm.eqZ[k][0][q]) && std::isfinite(lm.eqZ[k][1][q]);
+    if (!fin) {
+        std::memset(lm.z, 0, sizeof(lm.z)), std::memset(lm.eqZ, 0, sizeof(lm.eqZ));
+        sNonFinite.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) lm.appliedPrev[b] = g1[b];
+    double ed[kRoomMatchBands], et[kRoomMatchBands], edSum = 0.0;
+    for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) {
+        float a[4], c[4];
+        _mm_storeu_ps(a, eD[b]), _mm_storeu_ps(c, eT[b]);
+        ed[b] = double(a[0]) + a[1], et[b] = double(c[0]) + c[1];
+        edSum += ed[b];
+    }
+    // Measured only at full wet (the gain is applied as gain^wet while the wet weight moves), with voices sent, above
+    // the floor; otherwise it holds.
+    const bool steady = wetPrev >= 0.999f && wetCur >= 0.999f;
+    if (!steady || !(wSum > 0.0) || !(edSum / nfr > kMatchFloor) || !std::isfinite(edSum)) return;
+    const double a = std::exp(-double(nfr) / (double(kRoomMatchTauS) * fs));
+    if (!lm.primed) {
+        for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) lm.sD[b] = ed[b], lm.sT[b] = et[b];
+        lm.sW = wSum, lm.sWd = wdSum, lm.primed = true;
+    } else {
+        for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) lm.sD[b] = a * lm.sD[b] + (1 - a) * ed[b], lm.sT[b] = a * lm.sT[b] + (1 - a) * et[b];
+        lm.sW = a * lm.sW + (1 - a) * wSum, lm.sWd = a * lm.sWd + (1 - a) * wdSum;
+    }
+    const double m2 = lm.sW > 0.0 ? std::clamp(lm.sWd / lm.sW, 0.25, 1.0) : 1.0;
+    double sDsum = 0.0;
+    for (double v : lm.sD) sDsum += v;
+    const float step = kRoomMatchSlewDbPerS * static_cast<float>(nfr) / static_cast<float>(fs);
+    for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) {
+        // A band with almost nothing in it (under -50 dB of the total) holds its gain.
+        if (!(lm.sD[b] > 1e-5 * sDsum) || !(lm.sT[b] > 0.0)) continue;
+        const float target = std::clamp(static_cast<float>(10.0 * std::log10(lm.sD[b] / (m2 * lm.sT[b]))), -kRoomMatchMaxDb, kRoomMatchMaxDb);
+        lm.gainDb[b] += std::clamp(target - lm.gainDb[b], -step, step);
+    }
+    for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) sMatch[b].store(lm.gainDb[b], std::memory_order_relaxed);
 }
 
 void Room::EndBlock() {
@@ -1163,6 +1559,7 @@ RoomStats Room::GetStats() const {
     s.worstBlockNs = m.sWorstNs.load(std::memory_order_relaxed);
     s.lastWet = m.sWet.load(std::memory_order_relaxed);
     s.lastCanopy = m.sCanopy.load(std::memory_order_relaxed);
+    for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) s.matchDb[b] = m.sMatch[b].load(std::memory_order_relaxed);
     return s;
 }
 void Room::ResetStats() {
@@ -1172,6 +1569,18 @@ void Room::ResetStats() {
 }
 
 // ---- pure ------------------------------------------------------------------------------------------------------------
+namespace {
+bool SameParams(const RoomParams& a, const RoomParams& b) {
+    if (a.family != b.family || a.strength != b.strength) return false;
+    for (int k = 0; k < cockpit_space::kSurfaces; ++k)
+        if (a.surface[k].distanceM != b.surface[k].distanceM || a.surface[k].reflection != b.surface[k].reflection ||
+            a.surface[k].lowpassHz != b.surface[k].lowpassHz || a.surface[k].highpassHz != b.surface[k].highpassHz)
+            return false;
+    return a.earlyDb == b.earlyDb && a.lateDb == b.lateDb && a.rt60LowS == b.rt60LowS && a.rt60HighS == b.rt60HighS &&
+           a.crossoverHz == b.crossoverHz && a.preDelayMs == b.preDelayMs && a.sendHpHz == b.sendHpHz &&
+           a.throughDb == b.throughDb && a.neutralShare == b.neutralShare;
+}
+}  // namespace
 float RoomDirectGain(const RoomParams& p, float wet, float canopyOpen, bool early, const float posAircraft[3], std::uint32_t flags) {
     return RoomDirectGainMix(p, wet, canopyOpen, early ? 1.0f : 0.0f, posAircraft, flags);
 }
@@ -1180,7 +1589,20 @@ float RoomDirectGainMix(const RoomParams& p, float wet, float canopyOpen, float 
     if (!(wet > 0.0f) || !posAircraft) return 1.0f;
     const float w = std::min(wet, 1.0f);
     const float em = std::isfinite(earlyMix) ? std::clamp(earlyMix, 0.0f, 1.0f) : 0.0f;
-    rm::WetEnergy e = rm::VoiceWetEnergy(p, canopyOpen, em > 0.0f, posAircraft, flags);
+    // The voice-independent part, kept per thread while the parameters and the canopy stay the same (the module calls
+    // this for every voice of a block with the same ones).
+    struct Cache {
+        bool valid = false;
+        RoomParams p{};
+        float canopy = 0.0f;
+        rm::WetConsts c;
+    };
+    thread_local Cache cache;
+    if (!cache.valid || cache.canopy != canopyOpen || !SameParams(cache.p, p)) {
+        cache.c = rm::ComputeWetConsts(p, canopyOpen);
+        cache.p = p, cache.canopy = canopyOpen, cache.valid = true;
+    }
+    rm::WetEnergy e = rm::VoiceWetEnergy(p, cache.c, canopyOpen, em > 0.0f, posAircraft, flags);
     e.early *= em * em;  // the taps' gain is scaled by the mix (Run: CappedTapGain x earlyCur)
     const float share = std::clamp(std::isfinite(p.neutralShare) ? p.neutralShare : cockpit_space::kNeutralShare, 0.0f, 1.0f);
     const float total = share * w * w * (e.early + e.late);
@@ -1203,6 +1625,11 @@ struct RoomAccess {
     static bool BusActive(const Room& r) { return r.impl_->busActive; }
     static bool LateActive(const Room& r) { return r.impl_->lateActive; }
     static std::uint32_t FdnLength(const Room& r, std::uint32_t l) { return r.impl_->fdn.Length(l); }
+    static double BusKept(const Room& r) { return r.impl_->busKeptWorst; }
+    static void Profile(Room& r, std::uint64_t out[6]) {
+        std::memcpy(out, r.impl_->prof, sizeof(r.impl_->prof));
+        std::memset(r.impl_->prof, 0, sizeof(r.impl_->prof));
+    }
 };
 namespace room_probe {
 const Renderer& Bus(const Room& r) { return RoomAccess::Bus(r); }
@@ -1217,6 +1644,8 @@ float EarlyMix(const Room& r) { return RoomAccess::EarlyMix(r); }
 bool BusActive(const Room& r) { return RoomAccess::BusActive(r); }
 bool LateActive(const Room& r) { return RoomAccess::LateActive(r); }
 std::uint32_t FdnLength(const Room& r, std::uint32_t l) { return RoomAccess::FdnLength(r, l); }
+void Profile(Room& r, std::uint64_t out[6]) { RoomAccess::Profile(r, out); }
+double BusKept(const Room& r) { return RoomAccess::BusKept(r); }
 }  // namespace room_probe
 
 }  // namespace binaural

@@ -153,9 +153,15 @@ inline bool RoomAdd(binaural::Room* r, uint32_t slot, const binaural::RoomSource
   return r->AddSource(slot, s, in, frames, w0, w1);
 }
 inline void RoomReset(binaural::Room* r, uint32_t slot) { r->ResetSource(slot); }
-inline void RoomRender(binaural::Room* r, float* out, uint32_t frames) { r->Render(out, frames); }
+inline void RoomRender(binaural::Room* r, float* out, uint32_t frames, const float* dry = nullptr) {
+  r->Render(out, frames, dry);
+}
 inline void RoomEnd(binaural::Room* r) { r->EndBlock(); }
 inline bool RoomIdle(const binaural::Room* r) { return r->Idle(); }
+inline void RoomMatchDb(const binaural::Room* r, float out[3]) {
+  const binaural::RoomStats s = r->GetStats();
+  for (int b = 0; b < 3; ++b) out[b] = s.matchDb[b];
+}
 inline binaural::RoomDirectState RoomDirectStateOf(const binaural::Room* r) { return r->DirectState(); }
 inline float RoomDirect(const binaural::RoomParams& p, float wet, float canopy, float earlyMix, const float pos[3], uint32_t f) {
   return binaural::RoomDirectGainMix(p, wet, canopy, earlyMix, pos, f);
@@ -179,9 +185,13 @@ inline bool RoomAdd(binaural::Room*, uint32_t, const binaural::RoomSource&, cons
   return false;
 }
 inline void RoomReset(binaural::Room*, uint32_t) {}
-inline void RoomRender(binaural::Room*, float*, uint32_t) {}
+inline void RoomRender(binaural::Room*, float* out, uint32_t frames, const float* dry = nullptr) {
+  if (dry)
+    for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += dry[i];
+}
 inline void RoomEnd(binaural::Room*) {}
 inline bool RoomIdle(const binaural::Room*) { return true; }
+inline void RoomMatchDb(const binaural::Room*, float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
 inline binaural::RoomDirectState RoomDirectStateOf(const binaural::Room*) { return binaural::RoomDirectState{}; }
 inline float RoomDirect(const binaural::RoomParams&, float, float, float, const float*, uint32_t) { return 1.0f; }
 inline float RoomSendGain(const binaural::RoomParams&, const float*, uint32_t) { return 1.0f; }
@@ -340,6 +350,7 @@ struct Counters {
   std::atomic<uint32_t> roomVoicesNow{0};
   std::atomic<float> dcompMeanDb{0.0f};
   std::atomic<float> roomWet{0.0f}, roomCanopy{0.0f};
+  std::atomic<float> roomMatchDb[3] = {};  // the room's level match per band (below 200 Hz, 200-1000 Hz, above 1 kHz)
   std::atomic<uint32_t> roomFrameValid{0}, roomEarly{1};
   std::atomic<float> roomC[4] = {};  // C_now of the last room block (aircraft -> head)
   std::atomic<uint64_t> roomBlocks{0}, roomSends{0}, roomRefused{0};
@@ -675,6 +686,7 @@ struct Binding {
   float* onset = nullptr;    // kMaxFrames: a source's first HRTF block from silence, faded in at the input
   float* side = nullptr;     // kMaxFrames: SideDelayed's u (same allocation)
   float* sideHist = nullptr; // kSlots x kSideHist: each slot's delayed side history (same allocation; null: undelayed)
+  float* dry = nullptr;      // 2 x kMaxFrames: cockpit space, the owned voices' direct sound of a block (same allocation)
   uint32_t* overrun = nullptr;  // ED's overrun counter of this WASAPI renderer
   uint32_t lastOverrun = 0;
   bool haveOverrun = false;
@@ -725,6 +737,9 @@ struct Block {
   uint32_t roomVoices = 0;
   double dcompSumDb = 0;
   int64_t roomTicks = 0;    // QPC ticks of the per-voice room work in ProcessVoice (already in dspTicks)
+  // Cockpit space: while the room runs, the owned voices' direct sound (their HRTF renders and kept sides, the paths d
+  // scales) goes here instead of `out`; the room's Render adds it, level-matched with the room, to `out`. Null: `out`.
+  float* dry = nullptr;
 };
 
 // QPC ticks (the module's clock, as Qpc() in main/audio.inc): the room's per-voice share of a block's time.
@@ -918,7 +933,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
       audr::CoreBegin(b.core, frames);
       blk.coreBegun = true;
     }
-    if (audr::CoreRender(b.core, static_cast<uint32_t>(slot), u, in, frames, cw0, cw1, out)) {
+    if (audr::CoreRender(b.core, static_cast<uint32_t>(slot), u, in, frames, cw0, cw1, blk.dry ? blk.dry : out)) {
       rs.live = true;
       hrtfDone = true;
       cnt.hrtfCalls.fetch_add(1, std::memory_order_relaxed);
@@ -931,6 +946,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
         memcpy(src.posAircraft, posA, sizeof(posA));
         src.send = send;
         src.flags = rflags | (rs.roomLive ? 0u : binaural::room_flags::kReset);
+        src.direct = dcomp;
         const int64_t r0 = Ticks();
         const bool added = audr::RoomAdd(b.room, static_cast<uint32_t>(slot), src, in, frames, cw0, cw1);
         blk.roomTicks += Ticks() - r0;
@@ -1023,11 +1039,12 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
         const int dmax = std::max(std::max(d0[0], d0[1]), std::max(d1[0], d1[1]));
         rampEnd = frames > static_cast<uint32_t>(dmax) ? frames - static_cast<uint32_t>(dmax) : 0u;
       }
-      bad += SideDelayed(a, bb, frames, v0, v1, d0, d1, rs.rL, rL1, rs.rR, rR1, b.side, hist, &rs.sideZero, out, rampEnd);
+      bad += SideDelayed(a, bb, frames, v0, v1, d0, d1, rs.rL, rL1, rs.rR, rR1, b.side, hist, &rs.sideZero,
+                         blk.dry ? blk.dry : out, rampEnd);
       rs.sideD[0] = d1[0], rs.sideD[1] = d1[1];
       rs.haveD = rs.haveD || hrtfDone;
     } else {
-      bad += SidePan(a, bb, frames, v0, v1, rs.rL, rL1, rs.rR, rR1, out);
+      bad += SidePan(a, bb, frames, v0, v1, rs.rL, rL1, rs.rR, rR1, blk.dry ? blk.dry : out);
     }
     if (bad) cnt.nonFinite.fetch_add(bad, std::memory_order_relaxed);
     rs.sideRp = rp1;
@@ -1128,6 +1145,10 @@ inline void RoomBlockBegin(Block& blk, const audspace::SpaceData* sd, const Spac
   audr::RoomBegin(b.room, blk.frames, f);
   b.roomSetSeen = b.roomSetGen.load(std::memory_order_acquire);  // a running room adopts a new set by itself
   blk.roomOn = true;
+  if (b.dry) {
+    blk.dry = b.dry;
+    memset(blk.dry, 0, sizeof(float) * 2 * blk.frames);
+  }
   blk.roomFrameValid = valid;
   memcpy(blk.roomC, f.aircraftToHead, sizeof(blk.roomC));
   blk.roomEarly = f.early;
@@ -1151,6 +1172,11 @@ inline void RoomBlockEnd(Block& blk, Counters& cnt, int64_t roomTicks, int64_t f
   if (!blk.roomOn) return;
   cnt.roomBlocks.fetch_add(1, std::memory_order_relaxed);
   cnt.roomFrameValid.store(blk.roomFrameValid ? 1u : 0u, std::memory_order_relaxed);
+  {
+    float m[3];
+    audr::RoomMatchDb(b.room, m);
+    for (int k = 0; k < 3; ++k) cnt.roomMatchDb[k].store(m[k], std::memory_order_relaxed);
+  }
   cnt.roomEarly.store(blk.roomEarly ? 1u : 0u, std::memory_order_relaxed);
   for (int k = 0; k < 4; ++k) cnt.roomC[k].store(blk.roomC[k], std::memory_order_relaxed);
   if (blk.roomVoices) cnt.dcompMeanDb.store(static_cast<float>(blk.dcompSumDb / blk.roomVoices), std::memory_order_relaxed);

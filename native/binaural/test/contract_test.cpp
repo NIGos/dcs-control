@@ -241,8 +241,9 @@ static void TestCockpitSpace() {
     static_assert(sizeof(binaural::RoomFrame) == 32 && offsetof(binaural::RoomFrame, frameValid) == 16 &&
                   offsetof(binaural::RoomFrame, wet) == 20 && offsetof(binaural::RoomFrame, canopyOpen) == 24 &&
                   offsetof(binaural::RoomFrame, early) == 28, "RoomFrame layout");
-    static_assert(sizeof(binaural::RoomSource) == 20 && offsetof(binaural::RoomSource, send) == 12 &&
-                  offsetof(binaural::RoomSource, flags) == 16, "RoomSource layout");
+    static_assert(sizeof(binaural::RoomSource) == 24 && offsetof(binaural::RoomSource, send) == 12 &&
+                  offsetof(binaural::RoomSource, flags) == 16 && offsetof(binaural::RoomSource, direct) == 20,
+                  "RoomSource layout");
     CHECK(binaural::kRoomBuses == 14 && binaural::kRoomTaps == 8 && binaural::kRoomFdnLines == 8);
     CHECK(binaural::room_flags::kReset == 1u && binaural::room_flags::kThroughCanopy == 2u && binaural::room_flags::kLateOnly == 4u);
 

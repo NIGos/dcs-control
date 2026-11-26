@@ -465,7 +465,8 @@ void LogAndCsv() {
                            "\"audio: cockpit space: early reflections off (CPU budget)\"",
                            "\"audio: cockpit space: early reflections on again\"",
                            "\"audio: ctx %d listener gain=%.4g pitch=%.4g lowpass=%.4g\"",
-                           "\"%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB\"",
+                           "\"%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB, match "
+                           "%+.1f/%+.1f/%+.1f dB\"",
                            "\"%llu), overruns %llu; space %s; head pose %s\""};
   int missing = 0;
   for (const char* p : phrases)
@@ -499,7 +500,8 @@ void LogAndCsv() {
   };
   const std::string space = firstLine(r.dir + L"audio_space.csv"), voices = firstLine(r.dir + L"audio_voices.csv");
   Check(space == "time,level,family,type,inside,canopy,canopy_src,frame_src,cockpit_ctx,yaw_deg,pitch_deg,roll_deg,"
-                 "spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass\r\n",
+                 "spread_deg,wet,early,wet_voices,room_p50_us,room_p99_us,dcomp_mean_db,lg_gain,lg_lowpass,match_lo_db,"
+                 "match_mid_db,match_hi_db\r\n",
         "cockpit space CSV: audio_space.csv with the design's columns (LogVoices)");
   Check(voices.find(",power,room,send_db,through,cgain,ax,ay,az,dcomp_db\r\n") != std::string::npos,
         "cockpit space CSV: audio_voices.csv gains the room columns after power");

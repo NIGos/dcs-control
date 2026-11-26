@@ -331,6 +331,12 @@ void Room::Render(float* outLR, std::uint32_t frames) {
     outLR[2 * i + 1] += y;
   }
 }
+// The fake has no level match: the direct sound goes to the output as it is, then the fake room.
+void Room::Render(float* outLR, std::uint32_t frames, const float* directLR) {
+  if (directLR && outLR && frames <= kMaxFramesPerCall)
+    for (uint32_t i = 0; i < 2 * frames; ++i) outLR[i] += directLR[i];
+  Render(outLR, frames);
+}
 void Room::EndBlock() {
   audiofake::g_roomEnds.fetch_add(1, std::memory_order_relaxed);
   impl_->inBlock = false;

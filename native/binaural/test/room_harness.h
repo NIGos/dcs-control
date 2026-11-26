@@ -194,6 +194,9 @@ struct SceneState {
     bool directGain = true;   // multiply the direct path by RoomDirectGain (false: the Off render)
     bool renderDirect = true, renderRoom = true;
     float roomGainShare = -1.0f;  // >= 0: overrides params.neutralShare for the direct gain only
+    // The module's way (Room::Render with the direct sound): the direct path goes to the room, which adds the
+    // level-matched direct + room; SceneOut::room then holds the whole output, SceneOut::direct stays zero.
+    bool levelMatch = false;
 };
 struct SceneOut {
     Vec direct, room;
@@ -213,6 +216,7 @@ inline SceneOut RenderScene(RoomRig& rig, SceneState st, std::vector<SceneSource
     out.room.assign(std::size_t(frames) * 2, 0.0f);
     rig.room.SetParams(st.params);
     std::vector<bool> started(src.size(), false);
+    std::vector<float> blockDirect;
     std::uint32_t o = 0, b = 0;
     while (o < frames) {
         std::uint32_t n = sizes ? (*sizes)[b % sizes->size()] : block;
@@ -223,6 +227,10 @@ inline SceneOut RenderScene(RoomRig& rig, SceneState st, std::vector<SceneSource
         f.frameValid = st.frameValid, f.wet = st.wet, f.canopyOpen = st.canopy, f.early = st.early;
         if (st.renderRoom) rig.room.BeginBlock(n, f);
         rig.direct.BeginBlock(n);
+        const bool match = st.levelMatch && st.renderRoom && st.renderDirect;
+        if (match) blockDirect.assign(std::size_t(n) * 2, 0.0f);
+        float* dOut = match ? blockDirect.data() : out.direct.data() + 2 * std::size_t(o);
+        float dLast = 1.0f;
         for (std::size_t i = 0; i < src.size(); ++i) {
             SceneSource& s = src[i];
             if (!s.active) {
@@ -238,12 +246,13 @@ inline SceneOut RenderScene(RoomRig& rig, SceneState st, std::vector<SceneSource
                 RoomParams pd = st.params;
                 if (st.roomGainShare >= 0.0f) pd.neutralShare = st.roomGainShare;
                 const float d = st.directGain ? RoomDirectGain(pd, st.wet, st.canopy, st.early && st.frameValid, s.pos, s.flags) : 1.0f;
+                dLast = d;
                 SourceUpdate u{{hp[0], hp[1], hp[2]}, s.gain * d, reset ? source_flags::kReset : 0u};
-                rig.direct.Render(static_cast<std::uint32_t>(i), u, mi, n, s.w0, s.w1, out.direct.data() + 2 * std::size_t(o));
+                rig.direct.Render(static_cast<std::uint32_t>(i), u, mi, n, s.w0, s.w1, dOut);
             }
             if (st.renderRoom) {
                 RoomSource rs{{s.pos[0], s.pos[1], s.pos[2]}, s.gain * RoomSendDistanceGain(st.params, s.pos, s.flags),
-                              s.flags | (reset ? room_flags::kReset : 0u)};
+                              s.flags | (reset ? room_flags::kReset : 0u), dLast};
                 rig.room.AddSource(static_cast<std::uint32_t>(i), rs, mi, n, s.w0, s.w1);
             }
             started[i] = true;
@@ -251,7 +260,8 @@ inline SceneOut RenderScene(RoomRig& rig, SceneState st, std::vector<SceneSource
         }
         rig.direct.EndBlock();
         if (st.renderRoom) {
-            rig.room.Render(out.room.data() + 2 * std::size_t(o), n);
+            if (match) rig.room.Render(out.room.data() + 2 * std::size_t(o), n, blockDirect.data());
+            else rig.room.Render(out.room.data() + 2 * std::size_t(o), n);
             rig.room.EndBlock();
         }
         o += n, ++b;

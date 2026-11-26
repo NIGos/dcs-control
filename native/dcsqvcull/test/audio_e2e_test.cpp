@@ -725,6 +725,9 @@ double Iacc(const std::vector<double>& l, const std::vector<double>& r, size_t f
 // it equals d unless a reflection arrives within the direct sound's own correlation time (a source close to the
 // canopy), which the fit then counts as direct.
 void Externalisation() {
+  // The room's design figures: the direct sound is Off's times d exactly only without the level match (its slow
+  // three-band gain is on direct + room together; M17 and Level check the level with it).
+  audio::g_testRoomNoMatch = true;
   struct Src {
     const char* name;
     float pos[3];
@@ -786,6 +789,7 @@ void Externalisation() {
         "cockpit space e2e R1: the space never raises the ears' coherence, Strong lowers it in 1-4 kHz for every "
         "source, and the room part itself is less coherent than the direct sound");
   Check(finite, "cockpit space e2e: every output sample finite");
+  audio::g_testRoomNoMatch = false;
 }
 
 // R4 / M8 and the kill switch: a DCS-like cockpit mix (a low engine tone behind, console noise, a panel tone, a stereo
@@ -971,10 +975,94 @@ void Cpu() {
   }
 }
 
+// M17, the live failure of 2026-11-26 (validation-08, F-16C): a cockpit mix like the flight's. 20 wide stereo voices near
+// the head carrying the same engine signal (DCS's engine layers: six above-behind outside the box, three behind-below,
+// ten at the consoles, panel and rails), a second engine near the head, four outside voices through the canopy; most of
+// the power below 1 kHz, as much between 200 and 1000 Hz as below 200. The level match (the room's Render with the
+// module's direct sound) holds each level to Off: broadband and K-weighted within 0.5 dB, 200-1000 Hz and every band
+// from 100 Hz within 1 dB; the space's step against the kill switch per band stays within 1 dB of Off's own step.
+std::vector<double> KWeight(const std::vector<double>& x) {
+  const Biquad pre{1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585};
+  const Biquad rlb{1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621};
+  return Filter(Filter(x, pre), rlb);
+}
+struct Lv {
+  double all, k, band[4];  // 100-200, 200-1000, 1000-4000, 4000-12000
+};
+Lv Levels(const std::vector<float>& lr, size_t fromFrame) {
+  Lv r{};
+  const double eps = 1e-30;
+  double eAll = 0, eK = 0, eb[4] = {};
+  for (int ch = 0; ch < 2; ++ch) {
+    const std::vector<double> x = Ear(lr, ch);
+    eAll += Sum2(x, fromFrame);
+    eK += Sum2(KWeight(x), fromFrame);
+    const double lo[4] = {100, 200, 1000, 4000}, hi[4] = {200, 1000, 4000, 12000};
+    for (int b = 0; b < 4; ++b)
+      eb[b] += Sum2(Filter(Filter(Filter(Filter(x, HighPass(lo[b])), HighPass(lo[b])), LowPass(hi[b])), LowPass(hi[b])), fromFrame);
+  }
+  r.all = 10 * std::log10(eAll + eps), r.k = 10 * std::log10(eK + eps);
+  for (int b = 0; b < 4; ++b) r.band[b] = 10 * std::log10(eb[b] + eps);
+  return r;
+}
+void LiveMix() {
+  std::vector<Voice> vs;
+  const float A[3] = {-0.134f, 0.419f, 0.0f}, B[3] = {-0.834f, -0.581f, 0.0f};
+  for (int k = 0; k < 6; ++k) vs.push_back({kCockpitCtx, 2, kEngine, 0.30f - 0.03f * k, 88, {A[0], A[1], A[2]}, 77, false});
+  for (int k = 0; k < 3; ++k) vs.push_back({kCockpitCtx, 2, kEngine, 0.22f, 88, {B[0], B[1], B[2]}, 77, false});
+  const float spots[10][3] = {{0.15f, -0.25f, -0.41f}, {0.15f, -0.25f, 0.41f}, {0.75f, -0.28f, 0.0f}, {0.39f, 0.225f, 0.0f},
+                              {-0.30f, 0.18f, 0.0f},   {0.0f, 0.2f, -0.35f},   {0.0f, 0.2f, 0.35f},   {-0.2f, -0.3f, 0.5f},
+                              {-0.2f, -0.3f, -0.5f},   {0.5f, 0.1f, 0.0f}};
+  for (const auto& p : spots) vs.push_back({kCockpitCtx, 2, kEngine, 0.08f, 88, {p[0], p[1], p[2]}, 77, false});
+  vs.push_back({kCockpitCtx, 2, kEngine, 0.10f, 61, {0.166f, -0.081f, 0.0f}, 91, false});
+  for (int k = 0; k < 4; ++k) {
+    const double a = k * kPi / 2 + 0.3;
+    vs.push_back({kWorldCtx, 1, kNoise, 0.02f, 0, {static_cast<float>(30 * std::cos(a)), 2.0f, static_cast<float>(30 * std::sin(a))},
+                  static_cast<uint32_t>(120 + k), true});
+  }
+  constexpr int kSettle = 60, kBlocks = 900;
+  const size_t from = size_t(400) * kFrames;  // the match settles within 3 s (kRoomMatchTauS, its slew)
+  auto run = [&](int level, bool kill) {
+    return Scene(Ini(level), vs, kSettle, kBlocks, [&](Rig&, int k) {
+      if (k == kSettle) audio::g_userOff = kill;
+    });
+  };
+  const Run offRun = run(0, false), killRun = run(0, true);
+  audio::g_userOff = false;
+  const Lv off = Levels(offRun.hooked, from), kill = Levels(killRun.hooked, from);
+  printf("     live-like mix (%zu voices, 20 carrying one engine): Off vs kill switch all %+.2f K %+.2f, 100-200 %+.2f "
+         "200-1k %+.2f 1-4k %+.2f 4-12k %+.2f dB\n", vs.size(), off.all - kill.all, off.k - kill.k, off.band[0] - kill.band[0],
+         off.band[1] - kill.band[1], off.band[2] - kill.band[2], off.band[3] - kill.band[3]);
+  bool level = true, killStep = true, finite = true;
+  for (int lv = 1; lv <= 3; ++lv) {
+    const Run on = run(lv, false);
+    finite = finite && AllFinite(on.hooked);
+    const Lv l = Levels(on.hooked, from);
+    printf("     %-7s vs Off: all %+.2f K %+.2f, 100-200 %+.2f 200-1k %+.2f 1-4k %+.2f 4-12k %+.2f dB (d %.2f dB, %u voices "
+           "sent); vs kill switch 100-200 %+.2f 200-1k %+.2f 1-4k %+.2f 4-12k %+.2f dB\n",
+           kLevelName[lv], l.all - off.all, l.k - off.k, l.band[0] - off.band[0], l.band[1] - off.band[1],
+           l.band[2] - off.band[2], l.band[3] - off.band[3], on.dcompDb, on.roomVoices, l.band[0] - kill.band[0],
+           l.band[1] - kill.band[1], l.band[2] - kill.band[2], l.band[3] - kill.band[3]);
+    level = level && std::fabs(l.all - off.all) <= 0.5 && std::fabs(l.k - off.k) <= 0.5;
+    for (int b = 0; b < 4; ++b) {
+      level = level && std::fabs(l.band[b] - off.band[b]) <= 1.0;
+      // The space's own share of the step against the kill switch: Off's step (the direct path's, scenarios 1-4) plus
+      // at most 1 dB.
+      killStep = killStep && std::fabs((l.band[b] - kill.band[b]) - (off.band[b] - kill.band[b])) <= 1.0;
+    }
+  }
+  Check(level, "cockpit space e2e M17: the live-like mix (correlated engine layers, wide stereo voices near the head, "
+               "low-heavy) at Subtle, Normal and Strong: broadband and K-weighted within 0.5 dB of Off, every band from "
+               "100 Hz (200-1000 Hz included) within 1 dB");
+  Check(killStep, "cockpit space e2e M17: the step against the kill switch, per band from 100 Hz, within 1 dB of Off's own");
+  Check(finite, "cockpit space e2e M17: every output sample finite");
+}
+
 void RunAll() {
   printf("---- cockpit space end to end (real Room)\n");
   Externalisation();
   Level();
+  LiveMix();
   Clicks();
   OffExact();
   Cpu();
