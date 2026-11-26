@@ -461,6 +461,8 @@ public static class ConfigurationWriters
         dcs_motion_hud_guard={NvidiaOption(p, p.FrameGenHudGuard)}
         ; The focus view's own motion vectors in the focus area (patch 0128, NVIDIA path only; off until flown).
         dcs_motion_focus={NvidiaOption(p, p.FrameGenFocusMotion)}
+        ; A distant aircraft's motion spread over its edge (patch 0130, NVIDIA path only; off until flown).
+        dcs_motion_cover={NvidiaOption(p, p.FrameGenCover)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}

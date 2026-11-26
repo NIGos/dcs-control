@@ -13,12 +13,17 @@ The contract is `native/dcsqvcull/src/dcsvr_motion.h` at revision 4, plus one hi
 ## Status and gates
 
 The engine writer is implemented (`cockpit_mask.h` item 15, offline tested on the fake pass sequence; not flown yet).
-No reader uses the new fields yet. The engine and OFXR work is split out in the last section.
+OFXR 0128 reads the focus records and the depth plane (below); 0130 reads them for the aircraft cover too. The engine
+and OFXR work is split out in the last section.
 
 Engine details a reader may rely on:
 
-- `CockpitMotionFocus=1` makes the mask's views include 2 and 3 for the rest of the payload (the focus MVs come from
-  the same per-view runs). Its switch-off then keeps the larger set, as the held-set rules below require.
+- `CockpitMotionFocus=1` makes the set's layout include views 2 and 3 for the rest of the payload (the focus MVs come
+  from the same per-view runs). Its switch-off then keeps the larger set, as the held-set rules below require.
+- Review MEDIUM-1 (fg-cover): a focus view that is in the layout only for its MVs (not in `CockpitMaskViews`, which
+  the app writes as 3) is captured for the motion copy alone: no mask or depth dispatch for it and no mask or depth
+  record. The mask and depth blocks publish exactly the configured views, so OFXR 0034's moving-focus-edge band and
+  every other reader of the mask see the same image with the key on or off (engine test 8 of the revision 4 block).
 - A focus view's unknown DLSS jitter never resets the pair. Its own `jitter_proven` (and `true_motion_view`) gate it;
   views 0 and 1 keep the revision 2 reset rule.
 - The app writes the keys only when the profile turns them on (`FgFocusMotionVectors`, `FgPerPixelDepth`, profile
@@ -26,6 +31,11 @@ Engine details a reader may rely on:
   `CockpitMotionFocus=1`, since the consumer has nothing to read without it; it does not turn on the depth plane.
 - Integration branch `feat/fmv` (contract + engine + OFXR 0128) is built and tested offline only. The live A/B plan is
   in "Live A/B plan (validation-08)" below.
+- Review MEDIUM-4: `FrameGenFocusMotion` turns the engine's focus export on without `[Dev]
+  CockpitMotionFocusAssumeJitterFree`, so until gate P1 passes the engine publishes views 2 / 3 unproven, OFXR refuses
+  them (`motion_focus_refused`) and the pilot pays the focus copies, the larger atlases and OFXR's fine grids for no
+  image change. It is a research key (profile only, off) for that reason; the app should write it only together with
+  the proven flag once P1 has passed live.
 - `[Perception] CockpitMotionDump=N` writes the focus views' records too ("view 2" / "view 3" lines; they live in
   `Header::focusView[slot]`, not in the `MotionSlot`), and, when the slot publishes the depth plane, the plane as raw
   R16_FLOAT rows (`cockpit_motion_<seq>.r16f`, same size and rects as the MV atlas).
@@ -220,6 +230,18 @@ What is built (offline only; no producer writes revision 4 yet, nothing flown):
   output is byte-identical to the build before 0128: 144 of 144 compositions of `XRFG_TEST_DCS_MOTION` match
   (`XRFG_TEST_OUTPUT_HASHES`). Within one build, key off with focus data and key on without focus data each equal
   today's output in every fixture scene.
+- Review LOW-4: on a pair resampled on the fine grid the periphery outside the inset is not byte for byte today's: its
+  cells are duplicated on the 4 px grid, but `dcs_motion_field` interpolates bilinearly on that grid and the scatter
+  works per fine cell, so the periphery's field and occlusion differ slightly (every fixture within 0.01). Byte identity
+  holds for the pairs that are not fine.
+- **Moving focus (review HIGH-1, OFXR 0130).** With eye-tracked Quad Views the focus projection follows the gaze, and
+  DCS makes each view's MVs with that view's own previous camera (`gPrevFrameViewProj`), so a focus MV's previous end
+  is in the previous frame's focus projection. Not verified live yet (a gaze-sweep still-scene check belongs to gate
+  P1). Until then the consumer is safe under both readings: an eye's focus MVs are used only where the pair's previous
+  frame has that eye's focus record and its fovTan moved by at most a quarter focus texel; the previous end is mapped
+  with the previous frame's tangents. Otherwise that eye's focus region takes the periphery's MVs, as without the key
+  (counted: `motion_focus_moved`, OFXR log `cockpit_mask result=12` c bits 16-31). The focus import also checks the
+  jitters are finite, as the periphery's (review LOW-3).
 
 Fixtures (`XRFG_TEST_FG_FOCUS_MOTION`, `tests/fg_focus_motion.inc`): periphery MVs d10, cell 8; focus MVs d2 over the
 middle half, fine cell 4. The numbers are MAE in sRGB units, today -> focus.
@@ -250,6 +272,71 @@ for both eyes; the whole pair is +155 us. The consumer's larger copy (the full a
 grid target and scatter. At 5424 px those are 1356 x 1339 x 6 slices x 8 B plus x 4 slices x 4 B, about 116 MB
 together. Each ring entry's copies grow to the full atlas plus the plane. VRAM is already near the budget
 (`ofxr-0009`), which is one more reason the key stays off.
+
+## Aircraft cover: patch 0130 (`[ofxr] dcs_motion_cover`, profile `FrameGenCover`, off)
+
+The fix the fg-diag live diagnosis found (`artifacts\motion-study\fg-diag`, run 20261126-0237). DCS's MVs of the AI
+aircraft are right (0c: at most 0.17 texel error on model texels), but its class lands on the MV texels' centres for
+only 15-46 % of what is drawn of it at 450-1800 m. The rest reads as the sky with the sky's vector; the gather starts
+from the pixel's own (sky) cell and stays on that class; the scatter wins on 4-20 %; and the colour check accepts the
+sky's vector because a faint aircraft differs from the sky by less than 16/255. The generated frame was about 0.9 of a
+cross-fade of the aircraft's two places, though composing with the true motion passes the colour check (0.89-1.00).
+
+- **Lever 1, cover (resample).** A cell whose nearest texel is the sky takes the vector and class of the model texel
+  (DCS's model class) among the eight around it nearest the sample point. In the focus view with its depth plane a
+  farther surface gives way too, to the nearest model texel by depth. A covered cell is an edge cell (never
+  interpolated; flags bit 8), so the scatter carries it as well.
+- **Lever 2, the sky gather checked (composition).** After the scatter, `DcsMotionNearCS` sets bit 31 of both outputs'
+  scatter keys on a sky cell with a model cell within about 16 output px. A sky gather with that bit whose two samples
+  differ at all (encoded, above 2/255), where the two frames do not agree at the very pixel (HUD strokes stay where
+  they are), first tries the aircraft's own vector (the current end and rings 1-3 cells out, the fixed-point test of
+  `dcs_motion_sky_occlusion`). Where none holds but a surface was seen, the frame whose end DCS's class map calls sky
+  is taken alone. It runs before `dcs_motion_sky_occlusion`, which is unchanged.
+- **Lever 3, far aircraft.** Under one periphery texel the cover has nothing to spread (M0b below). With
+  `dcs_motion_focus` the focus view's MVs (d2 at 2.9.31's sizes) go through the same cover.
+- **Key and cost.** A quality key (live in OFXR, kFgQualityKeys bit 16). A pair whose only quality key is the cover
+  binds a `_cover` twin of the MV compositions (only this code compiled in: 27-28 registers as the plain composition,
+  the `_extras` twin has 34). The app writes the key at the start (an older OFXR would not read it live).
+- **Diagnosis records.** 0129's records are 16 bytes (json `recordStride`): the vector each pixel was composed along
+  and the cover's bits. `fgdiag_analyse.py` reads both sizes. With `XRFG_DEV_FG_DIAG=1` the twins are built from the
+  first pair, so the first dump session has records too (fg-diag cap00 had none).
+
+Fixtures (`XRFG_TEST_FG_COVER`, `tests/fg_cover.inc`, 640 x 480, periphery d10 at the headset's 8 px cell, sRGB view,
+the class sampled at texel centres; "d2": focus MVs over the middle half with the depth plane). MAE in sRGB codes of
+the true middle frame; xfade = |out - truth| over the aircraft, trail and lead regions against the plain cross-fade
+(1 = a cross-fade); within1 = share of aircraft pixels whose value is the composition along the true motion to within
+1 px. Off -> cover:
+
+| Scene | obj (aircraft) | model band | trail / lead | halo band (1-6 px) | xfade | within1 | must not regress |
+|---|---|---|---|---|---|---|---|
+| M0b small (4-8 px, 2 px tall), d10 | 21.97 -> 21.97 | 6.21 -> 6.21 | 3.17 / 14.68 same | 0.15 same | 0.81 same | 0.16 same | lights 17.46 same |
+| M0b small, d2 | 15.99 -> 8.45 | 5.28 -> 2.87 | 3.17 -> 2.12 / 14.68 -> 4.83 | 0.15 -> 0.14 | 0.69 -> 0.35 | 0.45 -> 0.76 | lights 14.47 -> 9.06 |
+| crossing day 450-1800 m, d10 | 0.98 -> 0.24 | 0.81 -> 0.23 | 3.03 -> 0.71 / 1.61 -> 0.28 | 0.00 | 0.38 -> 0.09 | 0.93 -> 0.98 | all 0.02 -> 0.01 |
+| crossing day, d2 | 0.68 -> 0.06 | 0.59 -> 0.06 | 3.02 -> 0.50 / 1.03 -> 0.01 | 0.00 | 0.30 -> 0.04 | 0.96 -> 1.00 | |
+| crossing dusk, d10 | 0.29 -> 0.07 | 0.24 -> 0.06 | 1.00 -> 0.19 / 0.53 -> 0.07 | 0.00 | 0.48 -> 0.10 | 1.00 | |
+| orbit (F2), d10 | 1.45 -> 0.05 | 1.40 -> 0.61 | | 1.12 -> 1.86 | 6.30 -> 0.98 | 0.80 -> 1.00 | far 0.18 same |
+| orbit, d2 | 0.81 -> 0.05 | 0.99 -> 0.26 | | 1.19 -> 0.23 | 3.93 -> 0.98 | 0.89 -> 1.00 | |
+| HUD over the sky, d10 | 3.20 -> 7.42 | 3.53 -> 2.30 | 15.56 -> 0.19 / 5.30 -> 0.27 | 0.33 -> 0.34 | 0.36 -> 0.23 | 0.72 -> 0.78 | HUD 2.31 -> 2.16 |
+| wires, d10 | 6.18 -> 6.62 | 6.68 -> 2.95 | 17.07 -> 0.46 / 11.55 -> 0.63 | 0.12 -> 0.50 | 0.52 -> 0.22 | 0.89 -> 0.90 | wires 13.09 -> 13.04 |
+| smoke, d10 | 9.06 -> 6.82 | 5.80 -> 4.18 | 14.22 -> 14.19 / 11.26 -> 2.01 | 0.56 -> 1.10 | 0.45 -> 0.31 | 0.85 -> 0.90 | smoke 1.51 -> 1.52 |
+
+Per crossing aircraft at d10, xfade off -> cover: 450 m 0.32 -> 0.04, 900 m 0.48 -> 0.00, 1200 m 0.73 -> 0.73 (no
+texel centre on it in this placement), 1800 m 0.25 -> 0.35; at d2: 1200 m 0.33 -> 0.00, 1800 m 0.26 -> 0.20.
+
+- The M0b aircraft (2 px tall) never land on a d10 texel centre: lever 1 has nothing to spread, as the diagnosis said
+  for 1800 m. At d2 the 6 and 8 px aircraft are fixed (xfade 0.18-0.20, within1 0.92-0.94); the 4 px one is still not
+  on a d2 centre.
+- The halo band grows where the sky beside the aircraft has texture of its own and moves differently (orbit d10 +0.74,
+  smoke +0.54, wires +0.38 codes): the covered texel moves that sky with the aircraft. The strict colour check on
+  covered cells lowered the orbit band (1.86 -> 1.54) but made the smoke trail worse than without the key (14.2 ->
+  21.2) and was dropped. DCS's sky near an aircraft is smooth; the live A/B judges it (ringErr, rearW).
+- The HUD fixture's "obj" (aircraft pixels at the middle instant, HUD strokes over them included) goes up 4.2 while the
+  aircraft band, its trail and lead and the HUD region itself go down.
+- With `dcs_motion_sky_occlusion` too the numbers are the cover's (the cover runs first). Without MVs the key changes
+  nothing (asserted). With every key off the compositions are byte for byte 0129's: 144 / 144 hashes of
+  `XRFG_TEST_DCS_MOTION` and every `XRFG_TEST_FG_FOCUS_MOTION` output; the six `XRFG_TEST_DCS_MOTION` compositions that
+  differ are the "quality 15" ones, which now run kFgQualityAll = 31 (the cover included): dark occlusion aircraft
+  0.44 -> 0.04, leading 3.02 -> 0.36, trailing 0.08 -> 0.23.
 
 ## Live A/B plan (validation-08)
 
@@ -298,8 +385,11 @@ the focus views (`header_flags::focus_views` clear) gives exactly today's output
 - **P1 focus jitter (R70 T1 on views 2 / 3).** Still frames with `[Suite] HoldPose`, `CockpitMotionFocus=1`,
   `CockpitMotionDump` on, `motion_check.py` T1 on views 2 / 3. Pass: |mv| <= 0.001 px at p99 on still frames, as views
   0 / 1 in R70. Fail: no A/B (the consumer refuses unproven views; forcing them would test jittered MVs).
-- **P2 writer cost.** Engine 30 s log line, focus + plane on: capture GPU time <= 60 us per frame; no
-  "larger motion set ... falls back" line; `motion contract revision 4` line shows the keys as written.
+- **P2 writer cost.** Engine 30 s log line, focus + plane on: capture GPU time <= 60 us per frame; no "the larger
+  motion atlases (...) could not be made; revision 3's motion set is used" line (review LOW-2: the engine's own text);
+  `motion contract revision 4` line shows the keys as written. A failed larger set is retried only when a key turns on
+  from both off or the layout changes (review LOW-1), so an A/B toggle under VRAM pressure does not rebuild it each
+  time.
 - **P3 OFXR import.** OFXR log: focus views imported (no `true_motion_view` refusals after P1), no generation reopen
   loop, `dcs_motion_focus=1` in the session's settings line.
 - **P4 Cheeky (only if the draft uses Cheeky / DLSS 5).** No "materialized" line, Cheeky log unchanged.
@@ -350,8 +440,15 @@ numbers go into this file as the input for M1.
    difference). A difference here is a bug, not a result.
 4. **Pacing, every group, both frame regimes:** composition + pack per pair <= OFF + max(100 us, 20 %); late frames per
    minute not FAIL by `ofxr_metrics.py`; 3X share not up; no KEY NOT LIVE line (the engine keys must show as reloaded in
-   DcsQvCull.log, the OFXR key is start-only by design).
-5. **VRAM** (`VramIntervalSec=10`, DXGI): g3 ON - OFF <= +250 MB; no OFXR VRAM-budget skip that OFF does not have.
+   DcsQvCull.log, the OFXR key is start-only by design). Review MEDIUM-3: `ofxr_metrics.py` takes liveness from OFXR's
+   own `live_settings` records only, so an engine-file group reads KEY NOT LIVE as it is; for those groups liveness has
+   to come from DcsQvCull.log's reload line and its "motion contract revision 4: CockpitMotionFocus=..." line (not
+   changed in the harness yet; OFXR-key groups such as 0130's `dcs_motion_cover` are unaffected).
+5. **VRAM** (`VramIntervalSec=10`, DXGI): measured against a separate launch with today's shipped configuration (keys
+   absent), not against arm A of the same launch (review MEDIUM-2): launched at 1 / 1, arm A already holds the larger
+   engine set, OFXR's fine grid and scatter (about 116 MB per synthesizer, made at session start with
+   `dcs_motion_focus=1`) and the full-atlas ring copies, so g3 - A is about 0. Budget: shipped + 250 MB; no OFXR
+   VRAM-budget skip that the shipped launch does not have.
 6. **Restore** as in `ORBIT-STATUS.md` (pilot's profile re-applied, `engineDevMode` off, user state files identical,
    quiet.lock removed, PimaxClient closed).
 

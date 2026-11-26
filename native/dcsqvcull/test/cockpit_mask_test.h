@@ -3797,7 +3797,14 @@ void TestPipeline() {
                         !(hm4.flags & (cmv::header_flags::focus_views | cmv::header_flags::depth_plane)) && zeroTail(hm4) &&
                         hm4.generation != genB;
       cmask::g_testFailExt = false;
-      cmask::ConfigureMotion(true, true, 0, true, true, true);  // a key changed: tried again
+      // Review LOW-1: one key changed while another stays on (an A/B toggle of the [Dev] key): no retry, no relayout.
+      cmask::ConfigureMotion(true, true, 0, true, true, true);
+      for (int f = 0; f < 2; ++f) frame(5880 + f, true);
+      const bool kept = cmask::g_extFailed.load() && cmask::g_relayouts.load() == rl1 + 1;
+      // Both off, then on again: tried again.
+      cmask::ConfigureMotion(true, true, 0, false, false, true);
+      for (int f = 0; f < 2; ++f) frame(5890 + f, true);
+      cmask::ConfigureMotion(true, true, 0, true, true, true);
       for (int f = 0; f < 3; ++f) frame(5900 + f, true);
       cmv::Header h2{};
       int s2 = -1;
@@ -3805,10 +3812,37 @@ void TestPipeline() {
       const bool again = s2 >= 0 && !cmask::g_extFailed.load() && cmask::g_relayouts.load() == rl1 + 2 &&
                          (h2.flags & cmv::header_flags::focus_views) && h2.atlasW == 95 + 198 + 198 &&
                          cmv::depth_usable(h2, s2, 2);
-      Check(fell && again, "motion revision 4: larger atlases not made -> revision 3's motion set at that relayout (one "
-                           "generation, logged once, no relayout loop over the next frames); a key change makes it again");
+      Check(fell && kept && again, "motion revision 4: larger atlases not made -> revision 3's motion set at that relayout "
+                                   "(one generation, logged once, no relayout loop over the next frames); a key that "
+                                   "changes while another stays on does not retry (LOW-1); on again from both off "
+                                   "makes it again");
       vpCut = 0;
       for (int f = 0; f < 2; ++f) frame(5950 + f, true);
+    }
+    // 8. Review MEDIUM-1: CockpitMaskViews=3 (the app's) with CockpitMotionFocus on: the motion block has the focus
+    // views, the mask and depth blocks only the configured periphery views (no focus record a reader would take for
+    // the moving focus edge), with the same set (no relayout: the layout keeps 2 / 3).
+    {
+      const uint64_t rl2 = cmask::g_relayouts.load();
+      cmask::Configure(true, 2, 3, 1.0, 0);
+      for (int f = 0; f < 4; ++f) frame(5960 + f, true);
+      cmv::Header hv{};
+      int s = -1;
+      readMotion(5963, hv, s);
+      cm::Header hm{};
+      const int ms = cm::seqlock_read(blk, hm) ? cm::find_slot(hm, 5963) : -1;
+      cdp::Header hd{};
+      const int ds = cdp::seqlock_read(dblk, hd) ? cdp::find_slot(hd, 5963) : -1;
+      const bool split = s >= 0 && ms >= 0 && ds >= 0 && hv.slot[s].viewMask == 15 &&
+                         cmv::view_usable(hv, s, 2) && cmv::view_usable(hv, s, 3) && hm.slot[ms].viewMask == 3 &&
+                         !cm::view_usable(hm, ms, 2) && !cm::view_usable(hm, ms, 3) &&
+                         !(hm.slot[ms].flags & cm::slot_flags::partial) && hd.slot[ds].viewMask == 3 &&
+                         !(hv.slot[s].flags & cmv::slot_flags::focus_partial) &&
+                         cmask::g_relayouts.load() == rl2;
+      Check(split, "review MEDIUM-1: CockpitMaskViews=3 with CockpitMotionFocus on -> the motion block carries views 2 / "
+                   "3, the mask and depth blocks only 0 / 1 (not partial), no relayout");
+      cmask::Configure(true, 2, 15, 1.0, 0);
+      for (int f = 0; f < 2; ++f) frame(5970 + f, true);
     }
     cmask::ConfigureMotion(true, true, 0);  // the shipped defaults (the larger set stays held until the uninstall)
     for (int f = 0; f < 2; ++f) frame(5990 + f, true);

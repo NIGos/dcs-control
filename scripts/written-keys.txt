@@ -350,6 +350,7 @@ Ofxr	ofxr	cursor_follow_mouse
 Ofxr	ofxr	cursor_templates
 Ofxr	ofxr	d3d11_bridge
 Ofxr	ofxr	dcs_motion
+Ofxr	ofxr	dcs_motion_cover
 Ofxr	ofxr	dcs_motion_focus
 Ofxr	ofxr	dcs_motion_hud_guard
 Ofxr	ofxr	dcs_motion_mask_band

@@ -130,3 +130,5 @@ a6adbd71f8fe080836ec263ae46aea28bd5bb29180f6383b6d9251d0133da2c3 cheeky-focus/Ch
 debd4e4d890cc9158d70519327b3f057177280e6e4f6a078879a2f38d48233b7 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
 b75725a5471ceb742d0c200b6ef16979bb3b7eb6737115f01bd9e27c03948849 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
 e3f28a61ba458b81972645cf8bd2860d6da2f506003ec6f0f0dd207f69094d76 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
+50e78ab8c8052bfbfaff8fbc70f407a0f866117d5868eb96e5131db636dc9ded dcsqvcull/DcsQvCull.dll (0.7.1-preview)
+42dcc5199abac6d5bbc30df5bfb2ae97df20aa7e7c891a5397c1a76f118bcc88 dcsqvcull/DcsQvCullPayload.dll (0.7.1-preview)

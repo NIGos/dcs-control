@@ -227,6 +227,10 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!ConfigurationWriters.DcsQvCull(nvidia).Contains("CockpitMotionFocus=1") && ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("\nCockpitMotionFocus=1")
         && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("CockpitMotionFocus=1")
         && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("CockpitMotionDepth=1"), "dcs_motion_focus brings the engine's CockpitMotionFocus, not the depth plane");
+    // OFXR 0130: the aircraft cover, off by default, 1 only with NVIDIA frame generation, in the profile only when on.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_cover=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenCover = true }).Contains("\ndcs_motion_cover=1\n")
+        && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenCover = true }).Contains("\ndcs_motion_cover=0\n") && !new VrProfile().FrameGenCover
+        && !qualitySaved.Contains("frameGenCover") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenCover = true }))!.FrameGenCover, "dcs_motion_cover: off by default, 1 only with NVIDIA frame generation");
     // The occlusion fill of the 0.7.1 development builds (OFXR dcs_motion_occlusion_fill) is gone: never written.
     Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion=1\n") && !ConfigurationWriters.Ofxr(nvidia).Contains("occlusion_fill"), "no occlusion fill key");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.

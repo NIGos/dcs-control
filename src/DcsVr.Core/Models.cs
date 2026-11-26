@@ -171,6 +171,12 @@ public sealed record VrProfile
     /// (finer, with its depth) instead of the periphery's, read where the engine module exports them (motion contract
     /// revision 4, docs/FOCUS_MOTION.md); without that export nothing changes. Off by default: not flown yet.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenFocusMotion { get; init; }
+    /// <summary>OFXR dcs_motion_cover (fork patch 0130): on DCS's motion vectors, a distant aircraft's vector and class are
+    /// spread over its edge (it is smaller than DCS's motion texel), and a sky pixel next to it is composed along the
+    /// aircraft's own vector before the sky's (else one frame alone), so a far aircraft is not shown as a cross-fade of its
+    /// two places. Profile only and off until flown; OFXR takes the key in live, the app writes it at the start (an older
+    /// OFXR would not read it).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenCover { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored

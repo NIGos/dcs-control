@@ -106,10 +106,13 @@
 //     jitter_proven, slot_flags focus_partial / depth_plane, header_flags focus_views / depth_plane, depthFormat /
 //     depthTextureHandle; the depth block's header_flags::per_pixel_in_motion. Read only from DCS's targets (MV, DSV,
 //     stencil) before DLSSPass, every CS binding saved and put back (RunCs), no NGX call, no reference past the pass.
-//     Once CockpitMotionFocus was on, the mask's views include 2 / 3 for the rest of the payload (EffectiveViews), so
+//     Once CockpitMotionFocus was on, the set's layout includes 2 / 3 for the rest of the payload (EffectiveViews), so
 //     its switch-off keeps the larger set (R85: the first switch-on of either key is one new generation; off and on
-//     again keep it). A set whose larger motion atlases cannot be made falls back to revision 3's (logged once, latched
-//     until either key changes: no build loop). Both off: the motion records are revision 3's byte for byte (plus
+//     again keep it). Review MEDIUM-1 (fg-cover): a focus view kept only for its MVs (not in CockpitMaskViews) is
+//     captured for the motion copy alone: no mask or depth dispatch for it and no mask or depth record (MaskViews), so
+//     the mask and depth blocks publish exactly the configured views and a reader's image does not change with the key.
+//     A set whose larger motion atlases cannot be made falls back to revision 3's (logged once, latched until a key turns
+//     on from both off or the layout changes, review LOW-1: no build loop). Both off: the motion records are revision 3's byte for byte (plus
 //     revision 4 and view_flags::jitter_proven on views 0 / 1).
 // Cost: GPU timestamps around each dispatch, render-thread QPC around the capture + commit; both in the 30 s log line.
 // SEH: the capture and the commit run inside the boundary callback's / the hook's __try; a fault latches the export
@@ -168,11 +171,15 @@ std::wstring g_mBlockName = cmv::block_name;  // + DCSVR_PERCEPTION_SHM_SUFFIX (
 std::atomic<bool> g_motionFocus{false};
 std::atomic<bool> g_motionPlane{false};
 std::atomic<bool> g_focusJitterAssumed{false};
-// Once CockpitMotionFocus was on (with the motion export) in this payload, the mask's views include 2 / 3
-// (EffectiveViews): its switch-off then keeps the set's layout (no new generation, 15. at the top).
+// Once CockpitMotionFocus was on (with the motion export) in this payload, the set's layout includes 2 / 3
+// (EffectiveViews): its switch-off then keeps the set's layout (no new generation, 15. at the top). The mask and depth
+// blocks still publish only the configured views (MaskViews, review MEDIUM-1).
 std::atomic<bool> g_focusViewsKept{false};
 // The larger motion set could not be made (VRAM): revision 3's set is used, latched until either key changes.
 std::atomic<bool> g_extFailed{false};
+// Review LOW-1: whether the larger set failed at a layout (g_extFailedAt, after Layout below); a relayout to another
+// layout tries it again (VRAM may be free then).
+bool g_extFailedAtSet = false;
 std::atomic<bool> g_testFailExt{false};  // tests: the larger motion atlases fail to be made
 
 bool Wanted() { return g_on.load(std::memory_order_relaxed); }
@@ -328,6 +335,8 @@ bool MakeLayout(const uint32_t srcW[4], const uint32_t srcH[4], uint32_t views, 
   out.div = div;
   return true;
 }
+
+Layout g_extFailedAt;  // review LOW-1: the layout the larger motion set failed at (g_extFailedAtSet)
 
 // Motion contract revision 4: the motion atlases' rects (the MV, class and depth-plane textures share them; divisor 1,
 // render resolution) for layout L. Without the focus views (focus false, or no focus view in L.views): views 0 / 1
@@ -1936,6 +1945,7 @@ struct Frame {
   int slot = -1, tsFrame = -1;
   uint64_t engineFrame = 0;
   uint32_t viewMask = 0, wantMask = 0, depthMask = 0;
+  uint32_t motionOnlyMask = 0;  // review MEDIUM-1: focus views captured for their MVs alone (no mask / depth record)
   cm::MaskView view[4] = {};
   cdp::DepthView dview[4] = {};  // R69
   ProjNote proj[4] = {};         // R69
@@ -1986,6 +1996,10 @@ uint32_t EffectiveViews() {
   const uint32_t views = g_views.load(std::memory_order_relaxed) | (g_focusViewsKept.load(std::memory_order_relaxed) ? 12u : 0u);
   return views & (n == 4 ? 15u : n == 2 ? 3u : 0u);
 }
+
+// Review MEDIUM-1: the views the mask and depth blocks publish: the configured ones of EffectiveViews. A focus view in
+// EffectiveViews only because CockpitMotionFocus kept it is captured for the motion copy alone.
+uint32_t MaskViews() { return EffectiveViews() & g_views.load(std::memory_order_relaxed); }
 
 bool HasPending() { return g_hasPend[0] || g_hasPend[1] || g_hasPend[2] || g_hasPend[3]; }
 
@@ -2055,7 +2069,7 @@ bool BeginFrame() {
   g_f = Frame{};
   g_f.begun = true;
   g_f.engineFrame = g_s.frame;
-  g_f.wantMask = EffectiveViews();
+  g_f.wantMask = MaskViews();  // review MEDIUM-1
   g_f.depth = !g_dIdle && DepthWanted() && g_r.haveDepth && g_dview.load() != nullptr;  // R69
   g_f.motion = !g_mIdle && MotionWanted() && g_r.haveMotion && g_mview.load() != nullptr;  // R70
   g_f.focus = g_f.motion && g_r.haveFocus && FocusMotionWanted();  // revision 4
@@ -2213,6 +2227,9 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
     return;
   }
   if (!BeginFrame()) return;
+  // Review MEDIUM-1: a focus view kept only for its MVs: the motion copy alone (no mask / depth dispatch or record).
+  const bool motionOnly = (MaskViews() & (1u << idx)) == 0;
+  if (motionOnly) g_f.motionOnlyMask |= 1u << idx;
   const float nearM = std::max(0.0f, g_nearM.load(std::memory_order_relaxed));
   const int dilate = std::clamp(g_dilate.load(std::memory_order_relaxed), 0, kMaxDilate);
   const bool nearTest = nearM > 0 && r.cb != nullptr;
@@ -2248,10 +2265,11 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
   const int tf = g_f.tsFrame;
   if (tf >= 0) c->End(g_r.ts[tf][idx][0]);
   // R69: the depth variant (second UAV) when this frame writes depth and the view's cPerView is known (gProj).
-  const bool depthView = g_f.depth && r.cb != nullptr && g_r.duav[g_f.slot] != nullptr;
-  if (g_f.depth && !r.cb) g_dNoCb++;
-  RunCs(r, g_r.params, g_r.cs[r.variant + (depthView ? 4 : 0)], srvs, g_r.uav[g_f.slot], (L.w[idx] + 7) / 8,
-        (L.h[idx] + 7) / 8, depthView ? g_r.duav[g_f.slot] : nullptr);
+  const bool depthView = !motionOnly && g_f.depth && r.cb != nullptr && g_r.duav[g_f.slot] != nullptr;
+  if (g_f.depth && !r.cb && !motionOnly) g_dNoCb++;
+  if (!motionOnly)  // review MEDIUM-1
+    RunCs(r, g_r.params, g_r.cs[r.variant + (depthView ? 4 : 0)], srvs, g_r.uav[g_f.slot], (L.w[idx] + 7) / 8,
+          (L.h[idx] + 7) / 8, depthView ? g_r.duav[g_f.slot] : nullptr);
   // R70: the motion copy of a periphery view (render resolution, verbatim) and its class byte. Revision 4: of a focus
   // view too (its own rect), and the view's depth into the plane (u2) when gProj is bound.
   bool motionView = false;
@@ -2309,8 +2327,10 @@ void Capture(const Run& r, int idx, int point, ID3D11RenderTargetView* mvRtv = n
   mv.divisor = static_cast<uint32_t>(div);
   mv.nearM = nearTest ? nearM : 0.0f;
   mv.dilate = static_cast<uint32_t>(dilate);
-  g_f.view[idx] = mv;
-  g_f.viewMask |= 1u << idx;
+  if (!motionOnly) {  // review MEDIUM-1: no mask record for a view kept for its MVs alone
+    g_f.view[idx] = mv;
+    g_f.viewMask |= 1u << idx;
+  }
   if (depthView) {  // R69: the depth view record (pose, xrFov and jitter are added at the commit)
     cdp::DepthView dv{};
     dv.flags = cdp::view_flags::valid | cdp::view_flags::same_grid_as_mask |
@@ -2558,8 +2578,10 @@ void SwapIn(Built& b) {
   }
   g_r.mW = b.mW;
   g_r.mH = b.mH;
-  if (b.extFailed) {  // revision 4: latched until either key changes (ConfigureMotion); no build loop
+  if (b.extFailed) {  // revision 4: latched until a key turns on or the layout changes (LOW-1); no build loop
     g_extFailed = true;
+    g_extFailedAt = L;
+    g_extFailedAtSet = true;
     if (g_mExtFails++ == 0)
       Log("cockpit mask: the larger motion atlases (focus views %s, depth plane %s) could not be made; revision 3's "
           "motion set is used (views 0 / 1, no depth plane) until CockpitMotionFocus / CockpitMotionDepth change "
@@ -2640,6 +2662,11 @@ void Relayout() {
   const bool wantDepth = DepthWanted() && g_dview.load() != nullptr;  // R69
   const bool wantMotion = MotionWanted() && g_mview.load() != nullptr && (L.views & 3u);  // R70
   // Revision 4: the focus rects / the depth plane (unless the larger set failed: 15. at the top).
+  // Review LOW-1: the larger set failed at another layout: tried again at this one.
+  if (g_extFailed.load(std::memory_order_relaxed) && g_extFailedAtSet && !g_extFailedAt.Same(L)) {
+    g_extFailed = false;
+    Log("cockpit mask: the larger motion set is tried again (the layout changed)");
+  }
   const bool extOk = wantMotion && !g_extFailed.load(std::memory_order_relaxed);
   const bool wantFocus = extOk && FocusMotionWanted() && (L.views & 12u);
   const bool wantPlane = extOk && PlaneWanted();
@@ -3891,7 +3918,7 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
   ms.viewMask = mvMask;
   const uint32_t want = f.wantMask & 3u;
   // Revision 4: a focus view the mask slot has (this frame's mask views) without MVs here; any view with its depth.
-  const bool focusPartial = f.focus && (f.viewMask & 12u & ~mvMask) != 0;
+  const bool focusPartial = f.focus && ((f.viewMask | f.motionOnlyMask) & 12u & ~mvMask) != 0;  // MEDIUM-1
   bool planeAny = false;
   for (int v = 0; v < 4; ++v)
     if ((mvMask & (1u << v)) && (f.mview[v].flags & cmv::view_flags::depth_plane)) planeAny = true;
@@ -4400,7 +4427,12 @@ void ConfigureMotion(bool on, bool cls = true, int dump = 0, bool focus = false,
                      bool assumeJitterFree = false) {
   static int lastDump = 0;
   if (focus != g_motionFocus.load() || plane != g_motionPlane.load() || assumeJitterFree != g_focusJitterAssumed.load()) {
-    if (g_extFailed.exchange(false)) Log("cockpit mask: the larger motion set is tried again (a key changed)");
+    // Review LOW-1: retried only when a key goes on from both off (an A/B toggle of one key under VRAM pressure no
+    // longer rebuilds the failing set and swaps in a new generation every time); a relayout to another layout
+    // retries too (Relayout).
+    const bool wasAny = g_motionFocus.load() || g_motionPlane.load();
+    if ((focus || plane) && !wasAny && g_extFailed.exchange(false))
+      Log("cockpit mask: the larger motion set is tried again (a key turned on)");
     if (on && (focus || plane || g_motionFocus.load() || g_motionPlane.load()))
       Log("cockpit mask: motion contract revision 4: CockpitMotionFocus=%d (the focus views' MVs and class), "
           "CockpitMotionDepth=%d (the per-pixel depth plane), [Dev] CockpitMotionFocusAssumeJitterFree=%d",
