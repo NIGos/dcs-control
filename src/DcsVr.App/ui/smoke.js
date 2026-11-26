@@ -11,7 +11,7 @@ window.runWebSmoke = async function() {
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
     'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenFoveated','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
-    'frameGenHudSymbology','smoothCursor','frameGenSkyOcclusion','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
+    'frameGenHudSymbology','smoothCursor','frameGenSkyOcclusion','frameGenCover','frameGenHudGuard','frameGenEdgeChoice','frameGenMaskBand','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',

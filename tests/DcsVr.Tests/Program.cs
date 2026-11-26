@@ -246,7 +246,7 @@ Test("Profiles for 0.7.0: a profile that changed no setting new since 0.7.0 has 
     // refuses keys it does not know: simulated by these options' strict reader with exactly these members taken out.
     string[] newSince070 = ["binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects",
         "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey",
-        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard"];
+        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard", "frameGenCover"];
     var strict070 = new System.Text.Json.JsonSerializerOptions
     {
         PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,

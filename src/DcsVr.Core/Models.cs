@@ -174,7 +174,7 @@ public sealed record VrProfile
     /// <summary>OFXR dcs_motion_cover (fork patch 0130): on DCS's motion vectors, a distant aircraft's vector and class are
     /// spread over its edge (it is smaller than DCS's motion texel), and a sky pixel next to it is composed along the
     /// aircraft's own vector before the sky's (else one frame alone), so a far aircraft is not shown as a cross-fade of its
-    /// two places. Profile only and off until flown; OFXR takes the key in live, the app writes it at the start (an older
+    /// two places. Frame generation > Fine-tune, off by default; OFXR takes the key in live, the app writes it at the start (an older
     /// OFXR would not read it).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenCover { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
