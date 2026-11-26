@@ -690,3 +690,9 @@ whose key table has them, `Binaural.PayloadHasCockpitSpace`); the status reads t
 (`CockpitSpaceStatus`); Checks code `audio-space-early` (its close reflections left out for CPU), `audio-cockpit-space`
 and `audio-cockpit-type` (ranges). The listening test's `[AudioTest]` is written only by `DcsVr.Cli audio-test`
 (`tools/listening-test/`) and goes with Launch DCS, Live writes of the file and Back to stock DCS.
+
+The payload links the core's Room (`native/binaural/src/room.cpp`) next to the Renderer. `DcsQvCullAudioE2ETests`
+scenario 5 checks the space end to end with the real core (externalisation per preset, level against the kill switch,
+no click on live changes, Off bit-identical, CPU at 48 voices); its scenarios 1-4 keep measuring the direct path with
+`CockpitSpace=0`. Results and the live validation plan (the validation-08 hrtf session per level, then the pilot's
+listening test): [COCKPIT_SPACE.md](COCKPIT_SPACE.md) sections 13.2 and 10.1.

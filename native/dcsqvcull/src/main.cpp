@@ -39,7 +39,7 @@
 // where #pragma once makes that a no-op).
 #include "binaural_config.h"
 #include "binaural_core.h"
-#include "binaural_room.h"  // cockpit space (the core's, or the module's stand-in until CORE is merged); global scope
+#include "binaural_room.h"  // cockpit space (native/binaural); global scope
 #include "head_pose_shm.h"
 #include "head_pose_reader.h"
 

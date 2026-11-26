@@ -532,6 +532,8 @@ const KeyRow kKeys[] = {
     {L"Audio", L"LevelTrimDb", kNum, L"0", IVA(r.cfg.levelTrimDb)},
     {L"Audio", L"CpuBudgetPercent", kNum, L"25", IVA(r.cfg.cpuBudgetPercent)},
     {L"Audio", L"LogVoices", kNum, L"0", IVA(r.cfg.logVoices)},
+    {L"Audio", L"CockpitSpace", kNum, L"1", IVA(r.space.level)},  // docs/COCKPIT_SPACE.md 7
+    {L"Audio", L"CockpitSpaceCanopy", kNum, L"1", IVA(r.space.canopy)},
     {L"Hotkeys", L"AudioToggle", kHotkey, nullptr, IVA(r.toggleVk * 8 + r.toggleMods)},
 };
 #undef IV
@@ -548,6 +550,7 @@ const struct {
     {L"Model", L"ShaderCacheDir", L"a folder; resolved by qvcachedir (shader_cache_dir_test)"},
     {L"Audio", L"Hrtf", L"a set name (text); read and validated by audcfg::ReadIni (audio_test Config)"},
     {L"Audio", L"ExcludeContexts", L"a list of context ids (text); parsed by binaural_config::ParseExcludeContexts"},
+    {L"Audio", L"CockpitSpaceFamily", L"auto or a family key (text); read by audcfg::ReadIni (audio_space_test Families)"},
 };
 
 double Expected(int kind, const std::wstring& v, bool* ok) {

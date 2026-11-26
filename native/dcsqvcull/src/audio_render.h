@@ -59,7 +59,7 @@
 #include "audio_space.h"
 #include "audio_voice.h"
 #include "binaural_core.h"
-#include "binaural_room.h"  // cockpit space (native/binaural, or the module's stand-in until CORE is merged)
+#include "binaural_room.h"  // cockpit space (native/binaural)
 #include "head_pose_reader.h"  // head_pose_shm.h and its checked readers (staleness, writer, speed guards)
 
 namespace audr {
@@ -132,9 +132,8 @@ inline void CoreReleaseHrtf(binaural::HrtfSet*) {}
 inline binaural::HrtfInfo CoreDescribe(const binaural::HrtfSet*) { return binaural::HrtfInfo{}; }
 #endif
 
-// ---- cockpit space (docs/COCKPIT_SPACE.md 4, 8.2): the core's Room (binaural_room.h). Builds without a Room
-// implementation (the core's src/room.cpp not merged yet: the module's stand-in header) create none: no room call is
-// ever made and the output is exactly today's. ----------------------------------------------------------------------
+// ---- cockpit space (docs/COCKPIT_SPACE.md 4, 8.2): the core's Room (binaural_room.h, native/binaural/src/room.cpp).
+// Builds without DCSQV_HAVE_ROOM create none: no room call is ever made and the output is the direct sound alone. -----
 #ifndef DCSQV_HAVE_ROOM
 #define DCSQV_HAVE_ROOM 0
 #endif

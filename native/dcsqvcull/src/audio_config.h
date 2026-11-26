@@ -18,15 +18,15 @@
 #include <string>
 
 #include "binaural_config.h"
-#include "cockpit_space.h"  // the cockpit space's families (native/binaural, or the module's stand-in until CORE is merged)
+#include "cockpit_space.h"  // the cockpit space's families (native/binaural)
 
 namespace audcfg {
 
 using binaural_config::AudioConfig;
 
 // Cockpit space (docs/COCKPIT_SPACE.md 7): [Audio] CockpitSpace 0..3 (Off, Subtle, Normal, Strong; default 1),
-// CockpitSpaceFamily auto | a family key (default auto), CockpitSpaceCanopy 0/1 (default 1). All Live. The keys belong
-// to binaural_config.h's table (CORE adds them there); until that is merged their ranges are spelt out here.
+// CockpitSpaceFamily auto | a family key (default auto), CockpitSpaceCanopy 0/1 (default 1). All Live. The keys are in
+// binaural_config.h's table (kKeys); the ranges spelt out here are the same.
 struct SpaceConfig {
   int level = 1;
   bool familyAuto = true;

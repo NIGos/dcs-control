@@ -11,10 +11,10 @@ the seat, and a short diffuse tail, fixed to the aircraft so they stay put when 
 small parametric model per aircraft family, with no per-aircraft simulation. The user gets one control: **Cockpit
 space: Off / Subtle / Normal / Strong** (default Subtle), Live.
 
-Status: CORE built and tested offline (branch `feat/cspace-core`: `native/binaural` `binaural_room.h`,
-`cockpit_space.h`, `src/room.cpp`, `src/room_model.h`, `src/room_fdn.h`, `test/room_test.cpp`, the
-`binaural_room_render` tool; results in section 13.1). MODULE and APP are not built yet. Where CORE's implementation
-differs from the first draft of this document, the text below says what was built and why (marked "Built:").
+Status: CORE, MODULE and APP built and merged on `feat/cspace` (from `dev/next`), tested offline end to end: the
+module on the fake ed_sound image with the real Room (section 13.2). Not heard in DCS yet: the live checks and the
+pilot's listening test are in section 10.1. Where the implementation differs from the first draft of this document, the
+text below says what was built and why (marked "Built:").
 Labels as in the hook spec: **[V]** read in the disassembly or the files at the address or line given, **[A]**
 inferred, with what settles it.
 
@@ -657,10 +657,9 @@ control thread, which resolves the family and publishes the preset, the canopy a
 
 As built (MODULE, `feat/cspace-module`): the payload exports behind them are `DcsQvPayload_AudioWanted()`,
 `DcsQvPayload_AudioAircraft(const char*)` and `DcsQvPayload_AudioState(double canopy, int source, int inside)`
-(`loader_api.h`). Until CORE is merged the module builds against stand-in copies of `binaural_room.h` and
-`cockpit_space.h` (`native/dcsqvcull/src/standin`, used only while `native/binaural/src/room.cpp` does not exist) with
-`DCSQV_HAVE_ROOM=0`: the payload creates no Room and its output is unchanged; the module's tests link a recording fake
-Room. The module skips every room call while the block-end wet weight and the previous one are 0 and `Room::Idle()` is
+(`loader_api.h`). The payload and `DcsQvCullAudioE2ETests` link the core's Room (`native/binaural/src/room.cpp`,
+`DCSQV_HAVE_ROOM=1`); `DcsQvCullTests` links a recording fake Room (`test/audio_fake_core.cpp`). The module's
+stand-in headers were removed at integration. The module skips every room call while the block-end wet weight and the previous one are 0 and `Room::Idle()` is
 true; CORE's `Idle()` must therefore become true once the wet weight is 0 and the tail has decayed, whatever the
 sends (voices keep playing in external views).
 
@@ -756,6 +755,35 @@ Live (only on the user's go, never by an agent unasked), with LogVoices on: `aud
 cockpit and 0 in F2, the family and type, frame from sound with spread under 1°, yaw following the head; the
 `audio: running` line's room p99 under 0.15 ms; kill switch on/off loudness of the cockpit within ±1 dB (existing
 hrtf check) with the space at Subtle and Normal; the listener probe answers [A] of section 3.1.
+
+### 10.1 Live validation plan
+
+Two steps, both only on the user's go. Nothing of it has run yet.
+
+**Step 1: the validation-08 harness, hrtf session (unattended, about 6 minutes per arm).** The harness in
+`artifacts\validation-08` (`go-v8.ps1 -Sessions hrtf -NoRegress`) already flies `qvbench_v8_hrtf.miz` with 3D audio on,
+LogVoices and Follow the head: WASAPI loopback FLY+6..+172 s, a head sweep, the kill switch at +85 / +150 s, analysis
+by `audio\hrtf_audio.py` (run 20261125-1351: PASS, CPU p99 median 0.37 ms, max 0.40, budget 2.5 ms, 41 sounds). For
+the space, three arms in one start, each with the profile override `cockpitSpace` (the app's `CockpitSpace`): 0 (the
+baseline, equal to 20261125-1351), 1 (Subtle), 2 (Normal). The hrtf arm of `scenarios\make_scenarios.py` needs that
+override and the arm name per level; `hrtf_audio.py` needs to read `audio_space.csv`. Pass per arm:
+- the existing hrtf checks unchanged (owned voices, radio untouched, listener against the pose, kill switch on/off
+  loudness within ±1 dB, no overrun);
+- the `audio: running` line: `space Subtle|Normal bubble inside 1 ... early on`, its `room p99` under 0.15 ms (0.30 ms is
+  the ceiling of the offline gates) and the module's p99 within 0.2 ms of the Off arm;
+- `audio_space.csv`: `inside 1` while in the cockpit, `type` the aircraft's, `frame_src` sound with `spread_deg` under
+  1°, `yaw_deg` following the head sweep (the [A] of section 3.2), `wet 1`, `early 1`, `dcomp_mean_db` between -0.1 and
+  -0.4 dB;
+- the `audio: ctx N listener gain=... lowpass=...` probe line logged once (the [A] of section 3.1, read, not judged);
+- no click in the loopback at the kill switch (largest sample step against the steady signal's own, as offline).
+A fourth arm with an F2 view switch in the schedule checks inside 0 and the room idle (`wet 0`, no room time).
+
+**Step 2: the pilot's listening test (in the headset, about 10 minutes, section 11).** Only after step 1 passes. The
+kit is `tools/listening-test/` (README): Part A offline stimuli made with `binaural_room_render.exe` and the pilot's own
+HRTF set (DCS closed), Part B in DCS with the test mission made by `DcsVr.Cli audio-test mission` (the F-16C Cold and
+Dark copy under `artifacts\cspace-listening\`, not committed) and the watcher `part-b.ps1`, results and `summary.md`
+under `artifacts\listening\<date>\`. Decides: Subtle as the default (section 11's rule), the R1 shortfall of median
+sources (section 13.1), colouration ("tin can") in the free comment.
 
 ## 11. Listening test (pilot, in the headset, about 10 minutes)
 
@@ -975,6 +1003,44 @@ bundled KU100 set, else the synthetic sphere. Exit 0 written, 1 bad arguments, 2
   expected medians, reversal rates, Wilcoxon and binomial p.
 - P9 profile round trip of the new properties (JSON).
 - P10 personal-data check of the kit's outputs (no user paths in committed files).
+
+### 13.2 Integration results (2026-11-26, `feat/cspace`: core, then module, then app)
+
+The module's stand-in headers are gone; the payload links the real Room. `DcsQvCullAudioE2ETests` scenario 5 runs the
+payload's audio module on the fake ed_sound image with the real BinauralCore and Room and the synthetic spherical head
+(F-16C: bubble family, canopy closed, inside, the cockpit sounds carrying the aircraft frame). Scenarios 1-4 (the
+direct path) run with `CockpitSpace=0`.
+
+| Check | Result | Limit |
+|---|---|---|
+| R2 DRR 1-4 kHz, 0.6 m front (Subtle / Normal / Strong) | 15.1 / 10.7 / 7.1 dB (broadband 15.5 / 11.0 / 7.5) | 13-19 / 9-15 / 6-11 |
+| R2 DRR 1-4 kHz, above-front 0.45 m | 18.2 / 13.8 / 10.3 dB | falls each step by ≥ 1 dB |
+| R2 DRR 1-4 kHz, right console 0.5 m | 19.1 / 14.7 / 11.2 dB | falls each step by ≥ 1 dB |
+| R1 IACC 1-4 kHz (Off → Subtle / Normal / Strong), front | 1.000 → 0.971 / 0.925 / 0.846 | never higher than Off; Strong lower |
+| R1 IACC 1-4 kHz, above-front / right console | 1.000 → 0.986 / 0.965 / 0.928; 0.951 → 0.938 / 0.912 / 0.862 | as above |
+| IACC 1-4 kHz of the room part alone | 0.19-0.42 | under 0.9 x the direct sound's |
+| Direct gain d (module's figure; least-squares fit) | front -0.06 / -0.16 / -0.35 dB, fit equal within 0.01 dB | fit within 0.1 dB away from the canopy |
+| Cockpit mix vs the kill switch (DCS's own output) | Off -0.32, Subtle -0.36, Normal -0.38, Strong -0.38 dB | ±1 dB |
+| M8: cockpit mix vs Off | -0.04 / -0.06 / -0.06 dB | ±0.5 dB |
+| R4 per sound vs Off (5 sounds) | worst -0.96 dB (a pure 700 Hz tone on the front panel at Strong); mean -0.10 / -0.16 / -0.20 dB | ±1 dB each, ±0.5 mean |
+| Kill-switch halves vs DCS's own | 0.000 dB | 0.05 dB |
+| R6: 13 live changes 0.4 s apart, head turning 90°/s | largest second difference 5.1e-4 (at the kill switch), steady 2.6e-4 | steady + 1e-3 |
+| R7: `CockpitSpace=0` vs the module without a Room | bit-identical | bit-identical |
+| R8: 48 voices (24 cockpit, 24 through the canopy), head 90°/s, Normal / Strong | module p99 0.57 / 0.61 ms per 10 ms block; room p50 0.087 ms, p99 0.115 / 0.121 ms; 48 owned and sent, early on, no back-off, 0 allocations | budget 2.5 ms; room 0.5 ms (gate), 0.15 ms (target) |
+
+Notes:
+- The above-front source's least-squares fit reads +0.3 to +0.55 dB against d: its canopy reflection arrives within
+  the direct sound's own correlation time and the fit counts it as direct. The DRRs use the module's d (exact with one
+  voice), not the fit.
+- R8 here is wall time inside the module's room calls with this scene (QPC, the module's own `room p99`); CORE's C9
+  (0.19-0.22 ms p99, section 9) is thread CPU time with its own scene, best of 5. Both under the 0.30 ms gate; the 0.15
+  ms target is met here and missed in C9, so the live `room p99` decides (section 10.1).
+- The "stereo above" sound of the mix reads -1.47 dB against DCS's own output already with the space Off: that is the
+  direct path of a stereo voice 0.36 m above the head, not the space (which changes it by at most +0.10 dB).
+- The other suites: `build-binaural.ps1` 7/7 ctest, `build-dcsqvcull.ps1` 6/6 ctest (`DcsQvCullTests` now reads back
+  `CockpitSpace` and `CockpitSpaceCanopy` in its invariants), the .NET suite 423 passed 0 failed, `build-release.ps1
+  -LocalOnly` and `test-release.ps1` pass, `check-contracts.ps1` 7 identical, `gen_audio_sigs.py --check` in step with
+  ed_sound.dll 0x6acb8057, `check-personal-data.ps1 -All` clean.
 
 ## 14. Limits and open questions
 

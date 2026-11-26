@@ -38,17 +38,9 @@ target_compile_definitions(DcsQvBinauralCore PRIVATE ${DCSQV_DEFS})
 # kernels_avx2.cpp is the only file built with /arch:AVX2; it runs only when the CPU reports AVX2 and FMA.
 set_source_files_properties(${DCSQV_BINAURAL_DIR}/src/kernels_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 # Cockpit space (docs/COCKPIT_SPACE.md): the core's Room (native/binaural/src/room.cpp, include/binaural_room.h and
-# cockpit_space.h) once it is merged; until then the module builds against its stand-in headers (src/standin, after
-# native/binaural/include in the search order) with no Room implementation (DCSQV_HAVE_ROOM=0: the payload creates no
-# room and its output is unchanged). DcsQvCullTests always links the recording fake Room of test/audio_fake_core.cpp.
-if(EXISTS ${DCSQV_BINAURAL_DIR}/src/room.cpp)
-  target_sources(DcsQvBinauralCore PRIVATE ${DCSQV_BINAURAL_DIR}/src/room.cpp)
-  set(DCSQV_ROOM_DEF DCSQV_HAVE_ROOM=1)
-  set(DCSQV_ROOM_INCLUDE "")
-else()
-  set(DCSQV_ROOM_DEF DCSQV_HAVE_ROOM=0)
-  set(DCSQV_ROOM_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/standin)
-endif()
+# cockpit_space.h). The payload and the end-to-end test link it (DCSQV_HAVE_ROOM=1); DcsQvCullTests links the recording
+# fake Room of test/audio_fake_core.cpp instead.
+target_sources(DcsQvBinauralCore PRIVATE ${DCSQV_BINAURAL_DIR}/src/room.cpp)
 
 # Measurements and optimizations; can be replaced while DCS runs.
 set(DCSQV_PAYLOAD_SOURCES src/main.cpp src/d3d_vtbl.c)
@@ -63,10 +55,10 @@ endif()
 add_library(DcsQvCullPayload SHARED ${DCSQV_PAYLOAD_SOURCES})
 target_compile_options(DcsQvCullPayload PRIVATE ${DCSQV_OPTS} /bigobj)  # main.cpp passed the COFF section limit (C1128)
 target_compile_definitions(DcsQvCullPayload PRIVATE ${DCSQV_DEFS})
-target_include_directories(DcsQvCullPayload PRIVATE ${DCSQV_BINAURAL_INCLUDE} ${DCSQV_ROOM_INCLUDE})
+target_include_directories(DcsQvCullPayload PRIVATE ${DCSQV_BINAURAL_INCLUDE})
 target_link_libraries(DcsQvCullPayload PRIVATE DcsQvBinauralCore)
 target_link_options(DcsQvCullPayload PRIVATE /Brepro)
-target_compile_definitions(DcsQvCullPayload PRIVATE DCSQV_HAVE_BINAURAL_CORE=1 ${DCSQV_ROOM_DEF})
+target_compile_definitions(DcsQvCullPayload PRIVATE DCSQV_HAVE_BINAURAL_CORE=1 DCSQV_HAVE_ROOM=1)
 
 # Offline checks (frustum decoding, Scene.dll export lookup, timer cache, partition boost, kill switch, suite report).
 # The audio module's scenarios link a stand-in BinauralCore (test/audio_fake_core.cpp: a core whose output and refusals
@@ -76,7 +68,7 @@ enable_testing()
 add_executable(DcsQvCullTests test/test_main.cpp src/d3d_vtbl.c test/audio_fake_core.cpp test/audio_rt_alloc.cpp)
 target_compile_options(DcsQvCullTests PRIVATE /W4 /O2 /wd4201 /bigobj $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 target_compile_definitions(DcsQvCullTests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1 DCSQV_HAVE_ROOM=1)
-target_include_directories(DcsQvCullTests PRIVATE ${DCSQV_BINAURAL_INCLUDE} ${DCSQV_ROOM_INCLUDE})
+target_include_directories(DcsQvCullTests PRIVATE ${DCSQV_BINAURAL_INCLUDE})
 target_link_libraries(DcsQvCullTests PRIVATE user32 kernel32)
 # The profiler check looks for its own module name in the samples.
 set_target_properties(DcsQvCullTests PROPERTIES OUTPUT_NAME test_main)
@@ -102,8 +94,8 @@ set_tests_properties(DcsQvCullTests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 fail
 # radio centred, no allocation on the audio threads.
 add_executable(DcsQvCullAudioE2ETests test/audio_e2e_test.cpp src/d3d_vtbl.c test/audio_rt_alloc.cpp)
 target_compile_options(DcsQvCullAudioE2ETests PRIVATE /W4 /O2 /wd4201 /bigobj $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
-target_compile_definitions(DcsQvCullAudioE2ETests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1 ${DCSQV_ROOM_DEF})
-target_include_directories(DcsQvCullAudioE2ETests PRIVATE ${DCSQV_BINAURAL_DIR}/test ${DCSQV_BINAURAL_DIR}/src ${DCSQV_ROOM_INCLUDE})
+target_compile_definitions(DcsQvCullAudioE2ETests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1 DCSQV_HAVE_ROOM=1)
+target_include_directories(DcsQvCullAudioE2ETests PRIVATE ${DCSQV_BINAURAL_DIR}/test ${DCSQV_BINAURAL_DIR}/src)
 target_link_libraries(DcsQvCullAudioE2ETests PRIVATE DcsQvBinauralCore user32 kernel32)
 set_target_properties(DcsQvCullAudioE2ETests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test)
 add_test(NAME DcsQvCullAudioE2ETests COMMAND DcsQvCullAudioE2ETests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
