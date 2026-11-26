@@ -537,6 +537,15 @@ void LoadConfig(bool initial) {
   c.cockpitMotionClass = GetPrivateProfileIntW(L"Perception", L"CockpitMotionClass", 1, ini.c_str()) != 0;
   c.cockpitMotionDump =
       (std::max)(0, (std::min)(300, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMotionDump", 0, ini.c_str()))));
+  // Motion contract revision 4 (docs/FOCUS_MOTION.md): the focus views' MVs and the per-pixel depth plane.
+  c.cockpitMotionFocus = GetPrivateProfileIntW(L"Perception", L"CockpitMotionFocus", 0, ini.c_str()) != 0;
+  c.cockpitMotionDepth = GetPrivateProfileIntW(L"Perception", L"CockpitMotionDepth", 0, ini.c_str()) != 0;
+  {  // [Dev] CockpitMotionFocusAssumeJitterFree (default 0) from the settings' ini, else from the deployed one (as R97's)
+    int aj = static_cast<int>(GetPrivateProfileIntW(L"Dev", L"CockpitMotionFocusAssumeJitterFree", -1, ini.c_str()));
+    if (aj < 0 && ini != deployedIni)
+      aj = static_cast<int>(GetPrivateProfileIntW(L"Dev", L"CockpitMotionFocusAssumeJitterFree", -1, deployedIni.c_str()));
+    c.cockpitMotionFocusAssumeJitterFree = aj > 0;
+  }
   c.cockpitFgDump =  // R71
       (std::max)(0, (std::min)(300, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitFgDump", 0, ini.c_str()))));
   c.symbologyExport = GetPrivateProfileIntW(L"Perception", L"SymbologyExport", 0, ini.c_str()) != 0;  // R95

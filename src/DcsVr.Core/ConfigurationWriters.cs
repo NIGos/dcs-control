@@ -392,7 +392,7 @@ public static class ConfigurationWriters
         ; Cockpit depth and DCS's motion vectors for Framegen (R69/R70): computed only while the frame generation layer reads
         ; them (its heartbeats), so they cost nothing otherwise.
         CockpitDepthExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
-        CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}{FocusMotionLines(p)}
         ; The HUD and helmet symbols as their own layer for frame generation (R95); with or without the dual camera.
         SymbologyExport={(p.UsesHudSymbology ? 1 : 0)}
         ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
@@ -406,6 +406,14 @@ public static class ConfigurationWriters
         IniPath={(p.EngineOptimizations && p.EngineDevMode ? p.EngineDevIniPath?.Trim() : null)}
 
         """;
+
+    /// <summary>Motion contract revision 4 (docs/FOCUS_MOTION.md): the focus views' motion vectors and the per-pixel depth
+    /// plane for frame generation, written only while the profile turns them on (research options, off until a live A/B;
+    /// the module's default is off). OFXR's consumer (FrameGenFocusMotion, NVIDIA) needs the focus views' export, so it
+    /// turns that on too: without it the consumer would have nothing to read.</summary>
+    private static string FocusMotionLines(VrProfile p) => p.FrameGen == FrameGeneration.Off || p.Desktop ? "" :
+        (p.FgFocusMotionVectors || NvidiaOption(p, p.FrameGenFocusMotion) == 1 ? "\nCockpitMotionFocus=1" : "") +
+        (p.FgPerPixelDepth ? "\nCockpitMotionDepth=1" : "");
 
     /// <summary>1 for an OFXR quality option that is on with NVIDIA frame generation, else 0.</summary>
     private static int NvidiaOption(VrProfile p, bool on) => on && p.FrameGen == FrameGeneration.Nvidia ? 1 : 0;
@@ -455,6 +463,10 @@ public static class ConfigurationWriters
         nvidia_edge_choice={NvidiaOption(p, p.FrameGenEdgeChoice)}
         dcs_motion_mask_band={NvidiaOption(p, p.FrameGenMaskBand)}
         dcs_motion_hud_guard={NvidiaOption(p, p.FrameGenHudGuard)}
+        ; The focus view's own motion vectors in the focus area (patch 0128, NVIDIA path only; off until flown).
+        dcs_motion_focus={NvidiaOption(p, p.FrameGenFocusMotion)}
+        ; A distant aircraft's motion spread over its edge (patch 0130, NVIDIA path only; off until flown).
+        dcs_motion_cover={NvidiaOption(p, p.FrameGenCover)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}

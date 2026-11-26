@@ -8,7 +8,8 @@
 //                          requires CockpitMaskExport=1; independent of CockpitDepthExport) while a reader stores its
 //                          heartbeat in this block AND in the mask block.
 //
-// What it holds (periphery views 0 / 1 only in v1).
+// What it holds (periphery views 0 / 1; revision 4 adds the focus views 2 / 3 and a per-pixel linear depth plane, see
+// "Revision 4" below; design: docs/FOCUS_MOTION.md).
 //  - MV atlas (R16G16_FLOAT, `format`): DCS's own G-buffer motion vectors of each view, copied verbatim at the view's
 //    RENDER resolution (the DLSS input, before DLSS; divisor 1: the rect is DCS's viewport, w = srcW, h = srcH), at the
 //    mask's sample point (after the view's opaque G-buffer and water passes). Units: render pixels of the view, +x
@@ -63,6 +64,46 @@
 // from XR_KHR_win32_convert_performance_counter_time; with time_flags::sim_stable on both, simTime may time world and
 // ownship motion instead.
 //
+// Revision 4 (Q1 + Q2 of the motion study; additive: version 1, the size 2048, every older offset and the meaning of
+// every older field are unchanged; the new records took 416 bytes at the start of the former reserved tail).
+//  - Focus views (header_flags::focus_views, [Perception] CockpitMotionFocus=1). The focus views 2 (left) and 3 (right)
+//    get MV and class rects in the SAME atlases, sampled the same way as views 0 / 1: DCS's own G-buffer MVs of that
+//    focus view at its render resolution (divisor 1), copied inside the view's own pass at its sample point (the
+//    view's WaterSeaPass end, view_flags::after_water, else its GBufferPass end; per-view targets are bound only inside
+//    the passes), before DLSSPass, so the same DLSS input DCS (or Cheeky's private focus SR) gets, read only. Their
+//    records are header.focusView[s][v - 2] (MotionSlot::view keeps 2 entries: an older reader never sees them); slot
+//    s's viewMask bits 2 / 3 say which are valid; use view_record() / view_usable() for any view 0..3. Units and
+//    direction as views 0 / 1 (render pixels of THAT view, B -> A). Mapping by tangent (fovTan of the focus rect).
+//    Jitter: the jitter-free proof (R70 T1) was made on views 0 / 1 only. A view's MVs count as jitter-free only with
+//    view_flags::jitter_proven on that view (the writer sets it on 0 / 1 together with slot_flags::jitter_free, and on
+//    2 / 3 only once the same check has passed live for the focus views); true_motion_view() applies it. Without it a
+//    reader uses flow (or the periphery MVs by tangent) in the focus region. slot_flags::focus_partial: the mask slot
+//    has a focus view that this slot has no MVs for (slot_flags::partial stays about views 0 / 1 only).
+//  - Depth plane (header_flags::depth_plane, [Perception] CockpitMotionDepth=1). A third per-slot texture,
+//    depthFormat (format_r16_float), depthTextureHandle[s], the SAME size and rects as the MV atlas: per render texel of
+//    every view whose view_flags::depth_plane is set, the LINEAR view depth in metres along the view axis (the depth
+//    companion's unit: w = near / d from DCS's gProj of that view and frame, reverse-Z, viewport MinDepth/MaxDepth
+//    undone first), taken from the view's own DSV at the SAME sample point as its MVs (so MV, class and depth of a texel
+//    describe the same surface), sky_depth_m (65504) for the sky and anything beyond (class bit 7), cockpit texels at
+//    the cockpit camera's depth (as the depth companion). Half-float steps: 1 m at 1-2 km, 2 m at 2-4 km. Texels
+//    outside the rects are undefined. The depth companion (dcsvr_cockpit_depth.h, revision 3) sets its
+//    header_flags::per_pixel_in_motion while this plane is published, and keeps its own block min/max grid unchanged.
+//  - Previous frame (for depth-ordered composition): the pair (A, B) of usable_for_pair() has A in the slot whose seq is
+//    B.prevSeq (prev_slot()). The engine reuses a slot after slot_count - 1 newer frames, so at B's xrEndFrame both A
+//    and B are intact on the GPU; a reader that reads A later than that, or on another queue that may run after the
+//    next frame's writes, holds it with the mask block's releaseFence (signal A.seq - 1) or keeps its own copy of A
+//    (recommended: copy each frame's slot at its own xrEndFrame, as today, and keep the last copy as "previous").
+//  - Layout. Rects are authoritative; the writer packs the four views in one atlas (recommended: periphery 0 above 1 in
+//    a column at x = 0, focus 2 and 3 side by side to its right). With neither option on, the atlases and records are
+//    revision 3's (header_flags focus_views / depth_plane clear, focusView, depthFormat and depthTextureHandle zero);
+//    the only differences are revision 4 and view_flags::jitter_proven on views 0 / 1.
+//  - Held set (R85). The first switch-on of either option is a layout change (a companion the held set lacks: a new
+//    generation, once). Switching it off keeps the larger set (same generation and handles; the flag clears, the focus
+//    records and viewMask bits 2 / 3 are 0, the depth plane is not written); back on, the same generation again.
+//  - Older readers (revision <= 3) keep working: they read views 0 / 1 only, ignore viewMask bits 2 / 3 and the new
+//    flags, and see a larger atlasW / atlasH (they size their copies from it: with the focus views on, an older OFXR
+//    allocates larger copy textures). Older writers: header_flags focus_views / depth_plane clear, revision 3.
+//
 // Self-contained: <atomic>, <cstddef>, <cstdint>, <cstring>. #pragma pack(8), little-endian. The name takes the optional
 // suffix of the environment variable DCSVR_PERCEPTION_SHM_SUFFIX (as the mask; tests use it).
 #pragma once
@@ -78,12 +119,16 @@ constexpr const wchar_t* block_name = L"Local\\DcsVrMotion_v1";
 constexpr const char* name_suffix_variable = "DCSVR_PERCEPTION_SHM_SUFFIX";
 constexpr std::uint32_t block_magic = 0x564D4344u;  // "DCMV"
 constexpr std::uint32_t block_version = 1;
-constexpr std::uint32_t contract_revision = 3;  // 2 (R70 live): slot_flags::jitter_free, the sky bit beyond 65504 m;
-                                                // 3 (R74a): slotTime
-constexpr int max_views = 2;  // v1: periphery only (0 left, 1 right)
+constexpr std::uint32_t contract_revision = 4;  // 2 (R70 live): slot_flags::jitter_free, the sky bit beyond 65504 m;
+                                                // 3 (R74a): slotTime; 4 (Q1 + Q2): focus views 2 / 3, depth plane
+constexpr int periphery_views = 2;  // MotionSlot::view: 0 left, 1 right (every revision)
+constexpr int focus_views = 2;      // revision 4: Header::focusView: 2 left, 3 right
+constexpr int max_views = periphery_views + focus_views;  // view indices 0..3 (revision <= 3: 2; use view_record())
 constexpr int slot_count = 3;
 constexpr std::uint32_t format_r16g16_float = 34;  // DXGI_FORMAT_R16G16_FLOAT
 constexpr std::uint32_t format_r8_uint = 62;       // DXGI_FORMAT_R8_UINT
+constexpr std::uint32_t format_r16_float = 54;     // DXGI_FORMAT_R16_FLOAT (revision 4: the depth plane)
+constexpr float sky_depth_m = 65504.0f;            // depth plane: the sky / beyond half float (as the depth companion)
 constexpr std::uint8_t class_composition_mask = 7;
 constexpr std::uint8_t class_sky = 0x80;
 constexpr std::uint8_t class_reserved_late = 0x40;  // never set in v1
@@ -112,8 +157,8 @@ struct MotionSlot {               // 184 bytes
     std::uint64_t prevSeq;        // seq of the previous committed frame the MVs point to (0: none)
     std::int64_t prevDisplayTime; // its displayTime (0: unknown); the reader requires == its A capture's displayTime
     std::uint32_t flags;          // slot_flags
-    std::uint32_t viewMask;       // bit v: view[v] valid
-    MotionView view[max_views];
+    std::uint32_t viewMask;       // bit v: view v valid (bits 2 / 3: revision 4 focus views, Header::focusView)
+    MotionView view[periphery_views];  // views 0 / 1 (the focus views' records are Header::focusView[slot])
 };
 
 // R74a: content time of the frame of slot[s]; identical to dcsvr_cockpit_depth::SlotTime (fields documented there).
@@ -143,7 +188,10 @@ struct Header {                   // 2048 bytes
     std::uint64_t reserved1;
     MotionSlot slot[slot_count];
     SlotTime slotTime[slot_count];                 // R74a (revision 3, header_flags::slot_time): see slot_time_usable
-    std::uint64_t reserved2[148];
+    MotionView focusView[slot_count][focus_views]; // revision 4 (header_flags::focus_views): views 2 / 3 of slot s
+    std::uint32_t depthFormat, reserved3;          // revision 4: format_r16_float with header_flags::depth_plane, else 0
+    std::uint64_t depthTextureHandle[slot_count];  // revision 4: depth planes (NT handles, the MV atlas's size), or 0
+    std::uint64_t reserved2[96];
     std::uint64_t readerHeartbeatQpc;              // offset 2040, written by the READER only (R67 rules)
 };
 #pragma pack(pop)
@@ -168,8 +216,12 @@ static_assert(offsetof(Header, readerHeartbeatQpc) == 2040, "readerHeartbeatQpc:
 static_assert(sizeof(SlotTime) == 48 && offsetof(SlotTime, poseQpc) == 8 && offsetof(SlotTime, poseReturnQpc) == 16 &&
                   offsetof(SlotTime, poseDisplayTime) == 24 && offsetof(SlotTime, simTime) == 32 &&
                   offsetof(SlotTime, flags) == 40 && offsetof(SlotTime, locateCalls) == 44 &&
-                  offsetof(Header, slotTime) == 712 && offsetof(Header, reserved2) == 712 + 144,
+                  offsetof(Header, slotTime) == 712,
               "SlotTime layout (R74a): 48 bytes, slotTime at 712");
+static_assert(offsetof(Header, focusView) == 712 + 144 && offsetof(Header, depthFormat) == 856 + 384 &&
+                  offsetof(Header, reserved3) == 1244 && offsetof(Header, depthTextureHandle) == 1248 &&
+                  offsetof(Header, reserved2) == 1272 && 1272 + sizeof(Header::reserved2) == 2040,
+              "Revision 4 layout: focusView at 856, depthFormat at 1240, depthTextureHandle at 1248, tail to 2040");
 
 namespace header_flags {
 constexpr std::uint32_t active = 1u;
@@ -179,6 +231,8 @@ constexpr std::uint32_t idle = 16u;              // no fresh heartbeat (this blo
 constexpr std::uint32_t shares_mask_fence = 32u;
 constexpr std::uint32_t class_atlas = 64u;       // classFormat / classTextureHandle set
 constexpr std::uint32_t slot_time = 128u;        // R74a: the writer fills slotTime (revision >= 3)
+constexpr std::uint32_t focus_views = 256u;      // revision 4: focusView records and viewMask bits 2 / 3 are written
+constexpr std::uint32_t depth_plane = 512u;      // revision 4: depthFormat / depthTextureHandle set, the plane written
 }  // namespace header_flags
 namespace time_flags {                           // R74a: SlotTime::flags (as dcsvr_cockpit_depth::time_flags)
 constexpr std::uint32_t pose_observed = 1u;
@@ -196,12 +250,17 @@ constexpr std::uint32_t reset = 16u;             // the MVs must not be used for
 constexpr std::uint32_t includes_jitter = 32u;   // proven live (R70 T1): mv includes jitterPrev - jitterCur
 constexpr std::uint32_t sky_is_infinity = 64u;   // proven live (R70 T2): sky texels hold the camera MV at infinity
 constexpr std::uint32_t jitter_free = 128u;      // proven live (R70 T1, revision 2): mv is the jitter-free motion
+constexpr std::uint32_t focus_partial = 256u;    // revision 4: a focus view of the mask slot has no MVs here
+constexpr std::uint32_t depth_plane = 512u;      // revision 4: some view of this slot has view_flags::depth_plane
 }  // namespace slot_flags
 namespace view_flags {
 constexpr std::uint32_t valid = 1u;
 constexpr std::uint32_t after_water = 2u;
 constexpr std::uint32_t from_rgba16f = 4u;       // DCS's MV target was R16G16B16A16_FLOAT (.xy copied)
 constexpr std::uint32_t no_stencil = 8u;         // class bits 0-2 unknown (7) for this view
+constexpr std::uint32_t focus = 16u;             // revision 4: a focus view (2 / 3); as dcsvr_cockpit_depth's bit 16
+constexpr std::uint32_t depth_plane = 32u;       // revision 4: the depth plane's rect holds this view's depth this frame
+constexpr std::uint32_t jitter_proven = 64u;     // revision 4: the slot's jitter flag is proven live for THIS view
 }  // namespace view_flags
 
 // ---- Seqlock (copies bytes 8 .. 2039, never the reader's field) ----------------------------------------------------
@@ -286,11 +345,41 @@ inline bool content_fraction(const SlotTime& a, const SlotTime& b, std::int64_t 
     out = double(tQpc - a.poseQpc) / double(b.poseQpc - a.poseQpc);
     return true;
 }
+// Revision 4: the record of view v (0..3) of slot s: slot[s].view[v] for 0 / 1; focusView[s][v - 2] for 2 / 3 when the
+// writer publishes focus views (header_flags::focus_views, revision >= 4); else nullptr.
+inline const MotionView* view_record(const Header& h, int s, int v) {
+    if (s < 0 || s >= slot_count || v < 0 || v >= max_views) return nullptr;
+    if (v < periphery_views) return &h.slot[s].view[v];
+    if (!(h.flags & header_flags::focus_views) || h.revision < 4) return nullptr;
+    return &h.focusView[s][v - periphery_views];
+}
 inline bool view_usable(const Header& h, int s, int v) {
-    if (s < 0 || s >= slot_count || v < 0 || v >= max_views) return false;
-    const MotionView& m = h.slot[s].view[v];
+    const MotionView* r = view_record(h, s, v);
+    if (r == nullptr) return false;
+    const MotionView& m = *r;
     return (m.flags & view_flags::valid) && (h.slot[s].viewMask & (1u << v)) && m.w > 0 && m.h > 0 &&
            m.x + m.w <= h.atlasW && m.y + m.h <= h.atlasH;
+}
+// Revision 4: the depth plane of slot s holds view v's per-pixel linear depth (metres along the view axis) in the
+// view's MV rect.
+inline bool depth_usable(const Header& h, int s, int v) {
+    if (!view_usable(h, s, v) || !(h.flags & header_flags::depth_plane) || h.revision < 4 ||
+        h.depthFormat != format_r16_float || h.depthTextureHandle[s] == 0)
+        return false;
+    return (view_record(h, s, v)->flags & view_flags::depth_plane) != 0;
+}
+// Revision 4: the slot holding the earlier capture A of the pair that ends at slot s (seq == slot[s].prevSeq, its
+// displayTime == slot[s].prevDisplayTime), or -1 when the ring no longer (or never) held it.
+inline int prev_slot(const Header& h, int s) {
+    if (s < 0 || s >= slot_count) return -1;
+    const MotionSlot& b = h.slot[s];
+    if (b.prevSeq == 0 || b.prevDisplayTime == 0) return -1;
+    const std::uint32_t need = slot_flags::valid | slot_flags::display_time;
+    for (int i = 0; i < slot_count; ++i) {
+        const MotionSlot& a = h.slot[i];
+        if (i != s && a.seq == b.prevSeq && (a.flags & need) == need && a.displayTime == b.prevDisplayTime) return i;
+    }
+    return -1;
 }
 // The MVs of slot s may be used for the pair whose earlier capture had displayTime prevCaptureDisplayTime.
 inline bool usable_for_pair(const Header& h, int s, std::int64_t prevCaptureDisplayTime) {
@@ -314,6 +403,14 @@ inline bool true_motion(std::uint32_t slotFlags, const MotionView& m, const floa
         return true;
     }
     return false;
+}
+// Revision 4: true_motion for view v (0..3) of slot s: additionally, a focus view (2 / 3) needs view_flags::jitter_proven
+// on its record (the jitter-free proof is per view). Views 0 / 1 keep the revision 2 rule (the slot flags alone).
+inline bool true_motion_view(const Header& h, int s, int v, const float mv[2], float out[2]) {
+    const MotionView* m = view_record(h, s, v);
+    if (m == nullptr) return false;
+    if (v >= periphery_views && !(m->flags & view_flags::jitter_proven)) return false;
+    return true_motion(h.slot[s].flags, *m, mv, out);
 }
 inline bool tan_to_texel(const MotionView& m, float tx, float ty, std::uint32_t& col, std::uint32_t& row) {
     const float l = m.fovTan[0], r = m.fovTan[1], u = m.fovTan[2], d = m.fovTan[3];

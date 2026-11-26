@@ -167,6 +167,16 @@ public sealed record VrProfile
     /// <summary>OFXR dcs_motion_hud_guard: over the sky, DCS's motion vectors judge colours as you see them, so a HUD or a dark
     /// object over the night sky is not taken for sky and smeared with it.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenHudGuard { get; init; }
+    /// <summary>OFXR dcs_motion_focus (fork patch 0128): in the focus area, DCS's motion vectors of the focus view itself
+    /// (finer, with its depth) instead of the periphery's, read where the engine module exports them (motion contract
+    /// revision 4, docs/FOCUS_MOTION.md); without that export nothing changes. Off by default: not flown yet.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenFocusMotion { get; init; }
+    /// <summary>OFXR dcs_motion_cover (fork patch 0130): on DCS's motion vectors, a distant aircraft's vector and class are
+    /// spread over its edge (it is smaller than DCS's motion texel), and a sky pixel next to it is composed along the
+    /// aircraft's own vector before the sky's (else one frame alone), so a far aircraft is not shown as a cross-fade of its
+    /// two places. Frame generation > Fine-tune, off by default; OFXR takes the key in live, the app writes it at the start (an older
+    /// OFXR would not read it).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool FrameGenCover { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored
@@ -347,6 +357,12 @@ public sealed record VrProfile
     public bool DiagnosticFrameRecords { get; init; }
     /// <summary>The engine module's frame ring around each ini reload ([Log] ReloadFrameTimes, R142), for live-reload hitch checks. Profile only, off.</summary>
     public bool DiagnosticReloadFrameTimes { get; init; }
+    /// <summary>Framegen research (motion study Q1, docs/FOCUS_MOTION.md): the engine module also exports the focus views'
+    /// own motion vectors and class ([Perception] CockpitMotionFocus, with Framegen). Profile only, off until a live A/B.</summary>
+    public bool FgFocusMotionVectors { get; init; }
+    /// <summary>Framegen research (motion study Q2, docs/FOCUS_MOTION.md): the engine module also exports every view's
+    /// per-pixel depth ([Perception] CockpitMotionDepth, with Framegen). Profile only, off until a live A/B.</summary>
+    public bool FgPerPixelDepth { get; init; }
     /// <summary>OFXR's always-on FPS counter; the diagnostic panel (its own key) shows FPS on demand.</summary>
     public bool ShowOverlay { get; init; }
     public FpsLimitMode FpsLimit { get; init; }

@@ -55,8 +55,17 @@ void TickFixationDepth() {
       loggedNoMaskMv = true;
       Log("config: [Perception] CockpitMotionExport=1 needs CockpitMaskExport=1; motion companion off");
     }
+    // Motion contract revision 4: CockpitMotionFocus / CockpitMotionDepth act only with the motion companion.
+    static bool loggedNoMotion = false;
+    if ((g_cfg.cockpitMotionFocus || g_cfg.cockpitMotionDepth) && !(g_cfg.cockpitMotionExport && g_cfg.cockpitMaskExport) &&
+        !loggedNoMotion) {
+      loggedNoMotion = true;
+      Log("config: [Perception] CockpitMotionFocus / CockpitMotionDepth need CockpitMotionExport=1 (and "
+          "CockpitMaskExport=1); off");
+    }
     fixdepth::cmask::ConfigureMotion(g_cfg.cockpitMotionExport && g_cfg.cockpitMaskExport, g_cfg.cockpitMotionClass,
-                                     g_cfg.cockpitMotionDump);
+                                     g_cfg.cockpitMotionDump, g_cfg.cockpitMotionFocus, g_cfg.cockpitMotionDepth,
+                                     g_cfg.cockpitMotionFocusAssumeJitterFree);
     // R71: the frame-generation fixture dump (dev folder in dev mode; a new value > 0 starts a session).
     fixdepth::cmask::ConfigureFg(g_cfg.cockpitMaskExport ? g_cfg.cockpitFgDump : 0, g_devDir.empty() ? g_dir : g_devDir);
     // R95: the symbology emission companion (SymbologyExport needs CockpitMaskExport).

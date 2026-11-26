@@ -219,6 +219,18 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
     var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
     Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
+    // OFXR 0128: the focus view's own MVs, off by default, 1 only with NVIDIA frame generation, in the profile only when on.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_focus=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=1\n")
+        && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=0\n") && !new VrProfile().FrameGenFocusMotion
+        && !qualitySaved.Contains("frameGenFocusMotion") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenFocusMotion = true }))!.FrameGenFocusMotion, "dcs_motion_focus: off by default, 1 only with NVIDIA frame generation");
+    // ... and the consumer turns on the engine's focus-view export it reads (motion contract revision 4), NVIDIA only.
+    Require(!ConfigurationWriters.DcsQvCull(nvidia).Contains("CockpitMotionFocus=1") && ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("\nCockpitMotionFocus=1")
+        && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("CockpitMotionFocus=1")
+        && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("CockpitMotionDepth=1"), "dcs_motion_focus brings the engine's CockpitMotionFocus, not the depth plane");
+    // OFXR 0130: the aircraft cover, off by default, 1 only with NVIDIA frame generation, in the profile only when on.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_cover=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenCover = true }).Contains("\ndcs_motion_cover=1\n")
+        && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenCover = true }).Contains("\ndcs_motion_cover=0\n") && !new VrProfile().FrameGenCover
+        && !qualitySaved.Contains("frameGenCover") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenCover = true }))!.FrameGenCover, "dcs_motion_cover: off by default, 1 only with NVIDIA frame generation");
     // The occlusion fill of the 0.7.1 development builds (OFXR dcs_motion_occlusion_fill) is gone: never written.
     Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion=1\n") && !ConfigurationWriters.Ofxr(nvidia).Contains("occlusion_fill"), "no occlusion fill key");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.
@@ -234,7 +246,7 @@ Test("Profiles for 0.7.0: a profile that changed no setting new since 0.7.0 has 
     // refuses keys it does not know: simulated by these options' strict reader with exactly these members taken out.
     string[] newSince070 = ["binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects",
         "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey",
-        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard"];
+        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard", "frameGenCover"];
     var strict070 = new System.Text.Json.JsonSerializerOptions
     {
         PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,

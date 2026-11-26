@@ -537,8 +537,8 @@ bool MakeCb(ID3D11Device* dev, View& v, UINT first) {
 // Every binding fixation_depth.h may touch, plus neighbours it must not.
 struct Snap {
   void* cs = nullptr;
-  void* srv[2] = {};
-  void* uav[2] = {};
+  void* srv[3] = {};  // t2 / u2: the motion copy's MV target and depth plane (R70, motion contract revision 4)
+  void* uav[3] = {};
   void* cb[3] = {};
   UINT first[3] = {}, num[3] = {};
   void* rtv[8] = {};
@@ -559,10 +559,10 @@ Snap TakeSnap(ID3D11DeviceContext1* c) {
   ID3D11ComputeShader* cs = nullptr;
   c->CSGetShader(&cs, nullptr, nullptr);
   s.cs = cs;
-  ID3D11ShaderResourceView* srv[2] = {};
-  c->CSGetShaderResources(0, 2, srv);
-  ID3D11UnorderedAccessView* uav[2] = {};
-  c->CSGetUnorderedAccessViews(0, 2, uav);
+  ID3D11ShaderResourceView* srv[3] = {};
+  c->CSGetShaderResources(0, 3, srv);
+  ID3D11UnorderedAccessView* uav[3] = {};
+  c->CSGetUnorderedAccessViews(0, 3, uav);
   ID3D11Buffer* cb[3] = {};
   c->CSGetConstantBuffers1(0, 3, cb, s.first, s.num);
   ID3D11RenderTargetView* rtv[8] = {};
@@ -577,7 +577,7 @@ Snap TakeSnap(ID3D11DeviceContext1* c) {
     return static_cast<void*>(p);
   };
   s.cs = keep(cs);
-  for (int i = 0; i < 2; ++i) s.srv[i] = keep(srv[i]), s.uav[i] = keep(uav[i]);
+  for (int i = 0; i < 3; ++i) s.srv[i] = keep(srv[i]), s.uav[i] = keep(uav[i]);
   for (int i = 0; i < 3; ++i) s.cb[i] = keep(cb[i]);
   for (int i = 0; i < 8; ++i) s.rtv[i] = keep(rtv[i]);
   s.dsv = keep(dsv);
