@@ -442,6 +442,43 @@ Verdict, against the targets (within 1 px > 0.8, cross-fade < 0.4, ghostW clearl
 - Limit: DCS's class and MVs cover a fraction of a distant aircraft's drawn pixels, and the farthest aircraft are
   smaller than one MV texel; no composition rule can move pixels the G-buffer does not hold.
 
+### Aircraft cover, round 3 (2026-11-26, the night F2 orbit and the slow-group repeat)
+
+- **Night F2 orbit** (the pilot's complaint as a scenario): the Kola Night Intercept autopilot copy, F2 with the camera
+  orbiting the player's F-14B(U) at the rig's closed-loop 20 deg/s (`orbit\rig_orbit.lua`, dev/rig-orbit dd65789
+  cherry-picked onto the TEST branch `test/fg-cover-rigext` only), `dcs_motion_cover` ABBA x3 live, captures at
+  bearings +-90 degrees and 0129 dumps across each capture window. The rig orbits the ownship only: there is no
+  orbit around another aircraft. Three flights: `fg-diag\runs\20261126-1052` (dumps finished before the captures:
+  no overlap), `20261126-1114` (the capture layer's 6 GB disk budget stopped captures after block 4) and
+  `20261126-1151` (budget raised, dumps spread over the window: 18 of 18 captures and 11 of 12 blocks measured, ownship
+  alive to the end, all windows valid).
+- Located from the class atlas (`analysis\orbit_band.py`: the ownship's model texels in B, a band 2-16 px outside
+  the silhouette, the reference along DCS's own MV), periphery layer, off -> cover: band error 0.30 -> 0.28 codes
+  (log luminance 0.020 -> 0.021, local-contrast-normalised 0.055 -> 0.062), cross-fade fraction 0.38 -> 0.47 (sums over
+  the synthetics; 0.41 -> 0.47 log luminance). The silhouette is 2.0-2.7 codes DARKER than its band (band level
+  3.3-3.7 codes): the whole error is under one code in the swapchain. Validation-08's `fg_orbit.py` (colour-located)
+  keeps too few captures at night to judge (captures 1 / 4, 3 / 1, 4 / 0 off / on per group: NOT JUDGED).
+- Pacing (fast regime only: the orbit holds 2X): comp + pack 211 -> 212 / 213 / 215 us, late frames per minute 9.6 ->
+  1.8, 8.2 -> 6.4, 8.5 -> 3.2, all groups PASS. The second flight's g2 had 1.1 -> 19.1 late per minute with the dumps
+  and captures written in the same blocks; the third flight writes them in every block and has none.
+- **Slow-group repeat** (validation-08 `runs\20261126-1131`, fgday ABBA under the lock): the slow-regime g2 that went
+  over the 20 % gate (202 -> 318 us) is 220 -> 248 us now (limit 320, PASS); slow comp + pack 308 -> 249 (g1), 198 ->
+  228 (g3); fast 198 -> 226-229 us. The late-frame failure moved again (slow g1 0.0 -> 7.2; g2 14.4 -> 14.1): noise.
+  ghostW ON - OFF +0.104 [-0.223, 0.431], -0.050 [-0.323, 0.222], -0.113 [-0.327, 0.102]: NOT JUDGEABLE, as in round
+  2; objErr lower in g1 / g2 (-4.1 / -3.7 codes), ringErr +0.06..+0.09 higher in every group.
+
+Final verdict (targets: within 1 px > 0.8, cross-fade < 0.4, ghostW clearly lower, no pacing regression):
+- Lever 1 (spreading the aircraft's MV / class over its edge): offline it meets the targets (fixtures and the
+  live-condition pairs); live, 600 m and 1200 m crossings by day improve, but ghostW is not clearly lower in three A/B
+  rounds, and in the night orbit the cover is not better (cross-fade 0.38 -> 0.47, error under one code either way).
+  Pacing within the gate (the 318 us group was noise). NO-GO as a default; stays an EXPERIMENTAL option, off.
+- Lever 2 (the aircraft vector before a sky gather): fires live since round 2 (8-12 % of the trail); no separate live
+  gain beyond lever 1's. NO-GO as a default (part of the same option).
+- Lever 3 (focus-view MVs through the cover): worse than the periphery cover in both diagnosis rounds. NO-GO.
+- What the night pilot sees: the swapchain holds the orbit silhouette at 2-3 codes against a 3-4 code sky; the grey
+  ghost the pilot reports must be lifted by the headset's brightness / gamma. Nothing in the composition can tell
+  sub-code differences apart, and DCS's G-buffer does not hold more of a distant aircraft than it draws.
+
 ## Live A/B plan (validation-08)
 
 Nothing below has been flown. The harness is `artifacts/validation-08` (`go-v8.ps1`, `scenarios/make_scenarios.py`,
