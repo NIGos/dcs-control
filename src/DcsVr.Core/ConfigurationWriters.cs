@@ -132,6 +132,7 @@ public static class ConfigurationWriters
 
         ; 3D headphone audio (docs/BINAURAL_AUDIO.md): DCS's left/right panning of mono 3D sounds replaced by HRTF
         ; rendering. Every key applies in flight. toggle_audio.flag next to DcsQvCull.dll switches it off and on.
+        ; CockpitSpace (docs/COCKPIT_SPACE.md): 0 off, 1 subtle, 2 normal, 3 strong.
         [Audio]
         Binaural=1
         Hrtf={AudioHrtf(p, hrtf)}
@@ -142,6 +143,9 @@ public static class ConfigurationWriters
         LevelTrimDb={Number(Math.Clamp(double.IsFinite(p.BinauralLevelTrimDb) ? p.BinauralLevelTrimDb : 0, Binaural.LevelTrimMin, Binaural.LevelTrimMax))}
         CpuBudgetPercent={Int(Math.Clamp(p.BinauralCpuBudgetPercent, Binaural.CpuBudgetMin, Binaural.CpuBudgetMax))}{(Binaural.ExcludeContextsValue(p.BinauralExcludeContexts) is { } excluded ? "\nExcludeContexts=" + excluded : "")}
         LogVoices={(p.BinauralLogVoices ? 1 : 0)}
+        CockpitSpace={Int(Math.Clamp(p.CockpitSpace, Binaural.CockpitSpaceMin, Binaural.CockpitSpaceMax))}
+        CockpitSpaceFamily={Binaural.CockpitFamilyValue(p.CockpitSpaceFamily)}
+        CockpitSpaceCanopy={(p.CockpitSpaceCanopy ? 1 : 0)}
         """ : "";
     /// <summary>The Hrtf value: the plan's replacement, else the profile's set when it is a valid name, else "default".</summary>
     private static string AudioHrtf(VrProfile p, string? hrtf) => hrtf ?? (Binaural.IsValidHrtfName(p.BinauralHrtf) ? p.BinauralHrtf : Binaural.DefaultHrtf);

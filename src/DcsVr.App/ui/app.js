@@ -1048,8 +1048,13 @@ function buildFields() {
     form.addEventListener('submit',e => { e.preventDefault(); importHrtf($('hrtfNameInput').value.trim()); });
     $('hrtfNameCancel').addEventListener('click',() => { form.hidden = true; }); }
   field(c,'binauralLateHeadTracking','Follow the head between frames',['Sounds stay in place when you turn your head fast.','The headset\'s head position is read at audio rate, from the pupil shift layer, which Launch DCS installs for it. VR only.'],'toggle',null,p => audioOn(p) && !p.desktop && state?.headPoseLayer !== false);
-  more = disclosure(c,'Advanced','The defaults suit most pilots.',() => `${shown('binauralMaxObjects')} sounds · Level ${shown('binauralLevelTrimDb')} · CPU ${shown('binauralCpuBudgetPercent')}`);
+  // Cockpit space (docs/COCKPIT_SPACE.md): the cockpit's reflections and a short tail; Off is 3D sound as before.
+  segmented(field(c,'cockpitSpace','<span class="tag">EXPERIMENTAL</span> Cockpit space',['Puts cockpit sounds around you instead of inside your head.','Adds the close reflections of the canopy and panels and a short echo, as in a real cockpit. Subtle suits most people. Choose Strong if sounds still seem inside your head. It fades out in outside views and opens with the canopy. Off is 3D sound as before.'],
+    'select',[['0','Off'],['1','Subtle · default'],['2','Normal'],['3','Strong']],audioOn,'',null,{prop:'cockpitSpace',get:p => String(p.cockpitSpace ?? 1),set:(p,v) => p.cockpitSpace = Number(v)}),{0:'Off',1:'Subtle',2:'Normal',3:'Strong'});
+  more = disclosure(c,'Advanced','The defaults suit most pilots.',p => `${shown('binauralMaxObjects')} sounds · Level ${shown('binauralLevelTrimDb')} · CPU ${shown('binauralCpuBudgetPercent')}${spaceOn(p) && p.cockpitSpaceFamily && p.cockpitSpaceFamily !== 'auto' ? ' · '+shown('cockpitSpaceFamily') : ''}`);
   field(more,'binauralNearField','Close sounds per ear','Switches and voices in the cockpit sound close, each ear on its own.','toggle',null,audioOn);
+  field(more,'cockpitSpaceFamily','Cockpit type','Automatic picks it from the aircraft you fly.','select',[['auto','Automatic · default'],['bubble','Bubble canopy'],['framed','Framed canopy'],['helicopter','Helicopter cabin'],['warbird','Warbird'],['transport','Transport flight deck'],['generic','Generic']],spaceOn);
+  field(more,'cockpitSpaceCanopy','Open canopy opens the space','With the canopy open there is less echo, as in the real aircraft.','toggle',null,spaceOn);
   field(more,'binauralMaxObjects','Most 3D sounds','The loudest sounds at once in 3D. The rest keep DCS\'s panning.','number',[8,64,1],audioOn,'');
   field(more,'binauralLevelTrimDb','3D sound level','Louder or softer 3D sounds against the rest of DCS\'s sound. 0 = as DCS.','number',[-12,6,.5],audioOn,'dB');
   field(more,'binauralCpuBudgetPercent','CPU budget','How much of each sound block 3D audio may use. If it needs more, it renders fewer sounds in 3D.','number',[5,50,1],audioOn,'%');
@@ -1141,6 +1146,7 @@ function buildFields() {
   because(f => f.condition === gVisionOn,'Turn on G vision to change these.');
   because(at('binauralLateHeadTracking'),p => !audioOn(p) ? 'Turn on 3D headphone audio to change this.' : p.desktop ? 'In VR only. On a monitor, sounds follow DCS\'s own head position.' : 'Needs the pupil shift layer, which this DCS Control build does not have.');
   because(f => f.condition === audioOn,'Turn on 3D headphone audio to change these.');
+  because(f => f.condition === spaceOn,p => !audioOn(p) ? 'Turn on 3D headphone audio to change these.' : 'Turn on Cockpit space to change these.');
   because(at('headsetPanel'),'In VR only.');
   because(f => f.condition === panelOn,p => p.desktop ? 'In VR only.' : 'Turn on the headset panel, or Frame generation, to change these.');
   const keyFeature = {diagnosticOverlayKey:'the headset panel',engineToggleKey:'Engine Optimizations',neuralToggleKey:'DLSS 5',pupilShiftToggleKey:'Pupil shift',farDepthToggleKey:'Far depth',depthBoostToggleKey:'Depth boost',audioToggleKey:'3D headphone audio'};
@@ -1331,6 +1337,8 @@ const depthMaxAt = (p, mm) => mm > 1 ? depthMax(p) : 1;
 const usesPerceptionLayer = p => usesPupilShift(p) || usesDepthBoost(p) || usesGazePublish(p) || usesPeripheryDlssPreset(p) || usesHeadPosePublish(p);
 /** 3D headphone audio runs, in VR or on a monitor (VrProfile.UsesBinauralAudio). */
 const usesBinauralAudio = p => Boolean(p.binauralAudio);
+/** Cockpit space runs: 3D audio on and a level above Off (VrProfile.CockpitSpace). */
+const spaceOn = p => usesBinauralAudio(p) && Number(p.cockpitSpace ?? 1) > 0;
 /** The pupil shift layer publishes the head pose for 3D audio's late head tracking: VR only (VrProfile.UsesHeadPosePublish). */
 const usesHeadPosePublish = p => Boolean(usesBinauralAudio(p) && p.binauralLateHeadTracking && !p.desktop);
 /** The Periphery DLSS preset runs (VrProfile.UsesPeripheryDlssPreset): a VR flight with Quad Views-Foveated and Engine
@@ -1537,13 +1545,17 @@ function renderAudio() {
     ['Sounds in 3D', s.sounds != null ? String(s.sounds) : '—'], ['CPU per sound block (p99)', s.costMs != null ? s.costMs.toFixed(2)+' ms' : '—'],
     ['Ears (HRTF)', s.hrtf ? (s.hrtf === 'default' ? 'Generic (KU100)' : s.hrtf === 'personal' ? 'Your own' : s.hrtf) : '—'], ['Follows the head between frames', s.headTracking == null ? '—' : s.headTracking ? 'Yes' : 'No'],
     ['Fewer sounds to stay in budget', s.backoffs ? `${s.backoffs} time${s.backoffs === 1 ? '' : 's'}${s.maxObjectsNow ? ', down to '+s.maxObjectsNow : ''}` : 'No'],
+    // Cockpit space, when the module said anything about it (CockpitSpaceStatus).
+    ...(s.cockpitSpace?.level ? [['Cockpit space', [s.cockpitSpace.level, s.cockpitSpace.level !== 'Off' && s.cockpitSpace.inside === false ? 'outside view' : null,
+      s.cockpitSpace.earlyOffs ? `close reflections left out ${s.cockpitSpace.earlyOffs}× for CPU` : null].filter(Boolean).join(' · ')]] : []),
   ] : [];
+  const spaceLine = s?.cockpitSpace?.summary && ['running','switched-off'].includes(s.state) ? `<p class="fine">${escape(s.cockpitSpace.summary)}</p>` : '';
   const lines = s?.lines?.length ? `<details class="report-details"><summary>Log lines</summary><pre class="log-lines">${escape(s.lines.join('\n'))}</pre></details>` : '';
   const open = [...box.querySelectorAll('details.report-details')].map(d => d.open);
   box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(asSummary ? pendingText : s?.summary || 'Select DCS\'s options.lua first.')}</span></div>${pending}`
     + (profile?.binauralAudio && layout !== undefined && layoutValue !== 'stereo' ? `<p class="pimax-note">DCS's speaker layout is ${escape(LAYOUT_NAMES[layoutValue] ?? layoutValue)}. Launch DCS sets it to Stereo while 3D audio is on; Back to stock DCS puts yours back.</p>` : '')
     + (s?.hrtfFallback ? `<p class="pimax-note">Your HRTF${s.hrtfFallback === 'personal' ? '' : ` "${escape(s.hrtfFallback)}"`} could not be used (${escape(s.hrtfFallbackReason || 'refused')}), so the generic one played. Import the SOFA file again.</p>` : '')
-    + statusRows(rows, []) + lines
+    + statusRows(rows, []) + spaceLine + lines
     + `<p class="fine">To compare: ${keyText ? `press <kbd>${escape(keyText)}</kbd> in flight` : 'set a key on the Keys & headset panel page'}, or use the button below. Turn your head while a sound plays behind you.</p>`;
   box.querySelectorAll('details.report-details').forEach((d,i) => { d.open = Boolean(open[i]); });
   $('audioToggleNow').disabled = busy || !r.dcsRunning || !r.applied;
@@ -1965,6 +1977,8 @@ const CHECK_INFO = {
   'audio-head-pose':['Follow the head between frames',{reveal:'binauralLateHeadTracking',label:'Open'}], 'audio-status':['3D headphone audio',{page:'audio',label:'Open'}],
   'audio-hrtf-refused':['3D audio ears (HRTF)',{reveal:'binauralHrtf',label:'Choose'}],
   'audio-backoff':['3D audio CPU budget',{reveal:'binauralCpuBudgetPercent',label:'Open'}],
+  'audio-cockpit-space':['Cockpit space',{reveal:'cockpitSpace',label:'Open'}], 'audio-cockpit-type':['Cockpit type',{reveal:'cockpitSpaceFamily',label:'Choose'}],
+  'audio-space-early':['Cockpit space',{reveal:'cockpitSpace',label:'Open'}],
   'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}], 'quad-vertical-offset':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}], 'quad-offset-gaze':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}],
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],
   'quad-focus':['Focus adapter',null], 'pimax-native-replaced':['Quad Views provider',null], 'fovea-source':['Focus area source',{reveal:'foveaSource',label:'Open'}],
@@ -2149,7 +2163,9 @@ function renderFlight() {
   // switched off with its key (grey).
   if (f.audio) {
     const a = f.audio, running = a.state === 'running';
-    rows.push(['3D audio',running ? 'On' : a.state === 'switched-off' ? 'Switched off' : 'Off',running ? [a.sounds != null ? `${a.sounds} sounds` : null, a.costMs != null ? `${fmt(a.costMs,2)} ms p99` : null, a.backoffs ? `fewer sounds ${a.backoffs}× to stay in its CPU budget` : null].filter(Boolean).join(' · ') || 'All flight'
+    // Cockpit space: its level and the cockpit it used, and any CPU step that left out its close reflections.
+    const sp = a.cockpitSpace, space = sp?.level && sp.level !== 'Off' ? `cockpit space ${sp.level}${sp.summary ? ' ('+sp.summary.replace(/^In the cockpit: /,'').replace(/\.$/,'')+')' : ''}${sp.earlyOffs ? `, close reflections left out ${sp.earlyOffs}× for CPU` : ''}` : null;
+    rows.push(['3D audio',running ? 'On' : a.state === 'switched-off' ? 'Switched off' : 'Off',running ? [a.sounds != null ? `${a.sounds} sounds` : null, a.costMs != null ? `${fmt(a.costMs,2)} ms p99` : null, a.backoffs ? `fewer sounds ${a.backoffs}× to stay in its CPU budget` : null, space].filter(Boolean).join(' · ') || 'All flight'
       : a.state === 'switched-off' ? (a.switchedOffBy === 'settings' ? 'In the settings; DCS\'s own sound since' : 'With its key; DCS\'s own sound since') : `${a.reason || 'see the module log'}; DCS's own sound played`, running ? (a.backoffs ? true : 'ok') : a.state === 'switched-off' ? 'off' : true]);
   }
   // A frame rate held by the headset software (motion smoothing at half the refresh rate, for example): CPU and GPU
