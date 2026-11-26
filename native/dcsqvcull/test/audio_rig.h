@@ -149,6 +149,7 @@ inline bool RigUp(Rig& r, const char* ini, uint32_t stamp = 0x6acb8057u) {
   WriteIni(r.dir, ini);
   g_rig = &r;
   audio::g_testNoThread = true;
+  audio::g_luaHoldMs = 0;  // the space's hold for a fresh camera check: off in the rig (its own test turns it on)
   audio::g_testEdBase = &RigBase;
   audio::g_testImports = &FakeImports;
   audio::g_testTable = &r.tab.t;

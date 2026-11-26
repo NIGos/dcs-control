@@ -794,8 +794,95 @@ void IdleSetAdopt() {
                          "set can be freed); otherwise the idle room is never called");
 }
 
+// Review round (2026-11-26) 3: the space switched on in an external view. The bridge is quiet while the space is off,
+// so the camera check it reported before (the cockpit) is stale: the space must stay out until a fresh one arrives.
+void LuaHold() {
+  StartReportCapture();
+  Rig r;
+  SpaceRig(r, "[Audio]\r\nBinaural=1\r\nHrtf=default\r\nMaxObjects=16\r\nLateHeadTracking=0\r\nCockpitSpace=0\r\n");
+  audio::g_luaHoldMs = 1500;
+  audio::LuaState(-1, 0, 1);  // from before: the cockpit
+  Tick();
+  Frames(r, 10);
+  // now in an external view (nothing reported: the bridge only reports while the space is on); the space switches on
+  WriteIni(r.dir, kIniSpace);
+  Tick();
+  Frames(r, 40);
+  Tick();
+  Frames(r, 20);
+  const bool held = audiofake::g_roomLastFrame.wet == 0.0f || audiofake::g_roomBegins.load() == 0;
+  audio::LuaState(-1, 0, 0);  // the fresh camera check: outside
+  Tick();
+  Frames(r, 40);
+  const bool out = audiofake::g_roomLastFrame.wet == 0.0f || audiofake::g_roomBegins.load() == 0;
+  audio::LuaState(-1, 0, 1);  // back in the cockpit
+  Tick();
+  Frames(r, 40);
+  const bool in = audiofake::g_roomLastFrame.wet == 1.0f;
+  audio::g_luaHoldMs = 0;
+  StopReportCapture();
+  RigDown(r);
+  Check(held && out && in, "cockpit space: switched on in an external view, the space stays out (wet 0) until the "
+                           "bridge's fresh camera check says where the camera is (a stale 'cockpit' is not taken)");
+}
+
+// Review round 6: a room that does not render (no HRTF data at this rate, no parameters yet) gets no voice, and the
+// direct sound keeps its level (no d): the output equals the space switched off.
+void NotReady() {
+  auto run = [](const char* ini, bool notReady) {
+    audiofake::g_roomOutput = true;
+    audiofake::g_roomNotReady = notReady;
+    Rig r;
+    SpaceRig(r, ini);
+    audio::LuaState(-1, 0, 1);
+    Tick();
+    const uint64_t adds0 = audiofake::g_roomAdds.load();
+    std::vector<float> a(960), b(960);
+    double e = 0;
+    for (int k = 0; k < 80; ++k) {
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+      if (k >= 40)
+        for (float v : a) e += double(v) * v;
+    }
+    const uint64_t adds = audiofake::g_roomAdds.load() - adds0;
+    RigDown(r);
+    audiofake::g_roomOutput = false;
+    audiofake::g_roomNotReady = false;
+    return std::make_pair(e, adds);
+  };
+  const auto off = run("[Audio]\r\nBinaural=1\r\nHrtf=default\r\nMaxObjects=16\r\nLateHeadTracking=0\r\nCockpitSpace=0\r\n", false);
+  const auto nr = run(kIniSpace, true);
+  const double db = 10 * std::log10(nr.first / off.first);
+  printf("     room not ready: %llu voices sent, level vs space off %+.4f dB\n", static_cast<unsigned long long>(nr.second), db);
+  Check(nr.second == 0 && std::fabs(db) < 0.01, "cockpit space: a room that does not render gets no voice and the "
+                                                 "direct sound no direct gain (the level of the space off)");
+}
+
+// Review round 7: an HRTF set is still held while the current binding or a retired one not yet freed was given it;
+// one only an old binding (freed, another rate) had is released.
+void SetHeld() {
+  auto* s1 = reinterpret_cast<const binaural::HrtfSet*>(uintptr_t(0x1000));
+  auto* s2 = reinterpret_cast<const binaural::HrtfSet*>(uintptr_t(0x2000));
+  auto* s3 = reinterpret_cast<const binaural::HrtfSet*>(uintptr_t(0x3000));
+  audr::Binding cur, old;
+  cur.given = {s2};
+  old.given = {s1, s3};
+  std::vector<audr::Binding*> retired = {&old};
+  const bool alive = audr::SetStillHeld(s1, s2, &cur, retired) && audr::SetStillHeld(s3, s2, &cur, retired) &&
+                     audr::SetStillHeld(s2, s2, &cur, retired);
+  retired.clear();  // the old binding freed
+  const bool freed = !audr::SetStillHeld(s1, s2, &cur, retired) && !audr::SetStillHeld(s3, s2, &cur, retired) &&
+                     audr::SetStillHeld(s2, s2, &cur, retired);
+  Check(alive && freed, "audio HRTF sets: a set stays while a live binding holds it, and is released once the binding "
+                        "that had it is freed (a rebind at another rate no longer leaks it)");
+}
+
 inline void Run() {
   printf("---- cockpit space (audio module side)\n");
+  LuaHold();
+  NotReady();
+  SetHeld();
   Families();
   InsideOutside();
   Canopy();

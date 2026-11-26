@@ -105,8 +105,17 @@ if ok then
     -- The type when it changed (checked every 2 s, sent again every 10 s: a reloaded payload hears it too), the
     -- canopy and the camera every 0.2 s.
     local lastType, typeAt, sentAt, stateAt = nil, -1, -1, -1
+    local wasWanted = false
     audioTick = function(force)
-      if audioWanted() ~= true then return end
+      if audioWanted() ~= true then
+        wasWanted = false
+        return
+      end
+      -- The space just switched on: the type, canopy and camera at once (the module holds the space out until then).
+      if not wasWanted then
+        wasWanted = true
+        force = true
+      end
       local now = clock()
       if force or typeAt < 0 or now < typeAt or now - typeAt >= 2 then
         typeAt = now

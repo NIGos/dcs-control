@@ -448,6 +448,29 @@ M18: the list's last voice never rendered (the fake mix passes voices flagged `k
 and ending one by one, varying blocks: 699 of 700 blocks flushed inside the mix, 0 after it with the room wet, the level
 within 0.04 dB of Off.
 
+Review round (after round 4, f42a88c), the flush and its neighbours:
+- The flush point is the list's real last node, found by walking renderer+0x20 at the block's first call (new voices
+  come in at the list's front in the fake; where ed_sound links them is not in the hook notes, so it is not assumed).
+  The fallback (the previous block's last rendered voice) runs only after a block whose last node was not rendered,
+  and only if no node came in after that voice. The earlier "same number of calls" fallback fired before the real
+  last node when the list grew: that voice then played without d, its play-out was skipped and its next block came
+  with kReset. Calls after the flush are counted (`late`); e2e "the list growing and shrinking": 0 late calls, every
+  block within 0.40 dB of Off.
+- The dry path runs only after a block flushed inside the mix (never in a binding's first block); ed_sound's master
+  gain is measured at every flush inside the mix with no call after it (the first measure as it is, then smoothed at
+  0.3 per block), so a block flushed after the mix is scaled by a gain that is known. M18 checks the first 50 blocks one
+  by one (worst 1.08 dB at Strong while the match settles; the old fallback was +9 dB).
+- A block with no flush inside the mix adds the room's output at that gain once it is known (its tail no longer gets a
+  hole); before that it is dropped (the wet weight is still near 0 then).
+- `Room::Ready()`: a room without parameters or this rate's HRTF data gets no voice and the direct sound no d.
+- The match's shelves: coefficients interpolated per sample between the block's start and end designs, filters
+  restarted at bypass after an idle stretch (C18: largest second difference at block edges 2.7e-3, inside 6.9e-3).
+- The space switched on: the camera check the bridge reported before is stale; the space stays out until a fresh one
+  (1.5 s at most), and the bridge sends type, canopy and camera at once when the space switches on.
+- HRTF sets: each binding keeps the sets it was given; once a retired binding is freed, a set no live binding holds is
+  released (a rebind at another rate leaked the old rate's sets).
+- The running line's energy counters are added with a compare-and-swap (the running line exchanges them).
+
 **The level match (built after the live flight of 2026-11-26).** The first live run (validation-08, F-16C, about 30
 owned voices) played the space louder than Off: Subtle +0.7 dB, Normal +1.3 dB broadband, +1 / +2 dB at 200-1000 Hz,
 while `d` was only -0.04 / -0.10 dB. Cause: `RoomDirectGain` adds energies (direct, each reflection, the tail as

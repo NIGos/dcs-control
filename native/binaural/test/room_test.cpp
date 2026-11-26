@@ -1422,6 +1422,45 @@ static void TestCpuTradeoffs(const std::vector<std::uint32_t>& file, const char*
     }
 }
 
+// ---- C18: the level match's shelves never step at a block's edge -----------------------------------------------------------
+// The match held at +2 / 0 / -2 dB (low / middle / high band), a 100 Hz and a 3 kHz tone 0.6 m ahead, the wet weight
+// switched off and on (the room slews it over 50 ms, the match's gains follow as gain^wet): the output's largest second
+// difference at the first samples of the blocks is no larger than inside them. Before the shelves were interpolated
+// they changed in one step at each block's start.
+static void TestMatchShelfRamp(const std::vector<std::uint32_t>& file) {
+    RoomRig rig(file);
+    CHECK(rig.ok);
+    if (!rig.ok) return;
+    const std::uint32_t n = 48000 * 4;
+    Vec sig(n);
+    for (std::uint32_t i = 0; i < n; ++i)
+        sig[i] = static_cast<float>(0.4 * std::sin(2 * kPi * 100.0 * i / 48000) + 0.05 * std::sin(2 * kPi * 3000.0 * i / 48000));
+    const float db[3] = {2.0f, 0.0f, -2.0f};
+    room_probe::ForceMatchDb(db);
+    SceneState st;
+    st.params = Params(Family::Bubble, 2);
+    st.levelMatch = true;
+    std::vector<SceneSource> src(1);
+    const float pos[3] = {0.6f, 0.0f, 0.0f};
+    std::memcpy(src[0].pos, pos, sizeof(pos));
+    src[0].signal = sig.data();
+    const SceneOut o = RenderScene(rig, st, src, n, 480, [&](std::uint32_t b, std::uint32_t, SceneState& s, std::vector<SceneSource>&) {
+        s.wet = (b / 60) % 2 == 0 ? 1.0f : 0.0f;  // on and off every 0.6 s
+    });
+    room_probe::ForceMatchDb(nullptr);
+    const Vec l = Channel(o.Total(), 0);
+    double edge = 0, inside = 0;
+    for (std::size_t i = 480 * 60; i + 1 < l.size(); ++i) {
+        const double d2 = std::fabs(double(l[i + 1]) - 2.0 * l[i] + l[i - 1]);
+        const std::size_t ph = i % 480;
+        if (ph <= 1 || ph == 479) edge = std::max(edge, d2);
+        else inside = std::max(inside, d2);
+    }
+    std::printf("C18 level match shelves (+2 / 0 / -2 dB held, wet on and off): largest second difference at block edges "
+                "%.3e, inside blocks %.3e\n", edge, inside);
+    CHECKM(edge <= inside * 1.05 + 1e-6, "the match's shelves do not step at a block's edge");
+}
+
 // ---- the bundled set -----------------------------------------------------------------------------------------------------------
 static std::vector<std::uint32_t> ReadFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -1479,6 +1518,7 @@ int main(int argc, char** argv) {
         TestLiveMix(file, "(synthetic)");  // C16
         TestMatchDynamics(file);     // C16
         TestCpuTradeoffs(file, "(synthetic)");  // C17
+        TestMatchShelfRamp(file);    // C18
         TestMetrics(file, "(synthetic)");  // R1, R2, R3, R9
         TestCrossfades(file, file2); // C10, R6
         TestBlockInvariance(file);

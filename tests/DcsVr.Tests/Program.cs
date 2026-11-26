@@ -7179,7 +7179,9 @@ Test("Cockpit space: Subtle, automatic and canopy by default, saved only when ch
     Require(wild["Audio.CockpitSpace"] == "3" && wild["Audio.CockpitSpaceFamily"] == "auto" && IniFile.Parse(Ini(AudioOn() with { CockpitSpace = -2 }))["Audio.CockpitSpace"] == "0", "clamped; an unknown cockpit type is automatic");
     Require(!Ini(new VrProfile { EngineOptimizations = true, CockpitSpace = 3 }).Contains("CockpitSpace", StringComparison.Ordinal), "3D audio off: nothing written");
     string[] Errors(VrProfile v) => [.. ProfileValidation.Validate(v).Where(x => x.Severity == IssueSeverity.Error).Select(x => x.Code)];
-    Require(Errors(AudioOn() with { CockpitSpace = 4 }).Contains("audio-cockpit-space") && Errors(AudioOn() with { CockpitSpaceFamily = "zeppelin" }).Contains("audio-cockpit-type")
+    string[] Warnings(VrProfile v) => [.. ProfileValidation.Validate(v).Where(x => x.Severity == IssueSeverity.Warning).Select(x => x.Code)];
+    Require(Errors(AudioOn() with { CockpitSpace = 4 }).Contains("audio-cockpit-space") && !Errors(AudioOn() with { CockpitSpaceFamily = "zeppelin" }).Contains("audio-cockpit-type")
+        && Warnings(AudioOn() with { CockpitSpaceFamily = "zeppelin" }).Contains("audio-cockpit-type")
         && !Errors(AudioOn() with { CockpitSpace = 0, CockpitSpaceFamily = "warbird" }).Any(c => c.StartsWith("audio-cockpit", StringComparison.Ordinal))
         && !Errors(new VrProfile { CockpitSpace = 9, CockpitSpaceFamily = "zeppelin" }).Any(c => c.StartsWith("audio-cockpit", StringComparison.Ordinal)), "Checks");
     // The families are the design's (section 5.1), "auto" first, and the core's header names each once it is here.

@@ -33,6 +33,7 @@ namespace audiofake {
 constexpr float kFakeRoomGain = 0.25f;
 constexpr float kFakeRoomEnergy = 0.25f;
 extern std::atomic<bool> g_roomOutput;
+extern std::atomic<bool> g_roomNotReady;  // Room::Ready false (an HRTF set at another rate): the module applies no d
 extern std::atomic<uint64_t> g_roomInits, g_roomBegins, g_roomAdds, g_roomAddsWeighted, g_roomResets, g_roomRenders,
     g_roomEnds, g_roomSetParams, g_roomSetHrtf, g_roomRejected;
 extern std::atomic<int> g_roomLive;              // Room objects alive

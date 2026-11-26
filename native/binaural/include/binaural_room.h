@@ -154,6 +154,8 @@ public:
     void Render(float* outLR, std::uint32_t frames, const float* directLR);
     void EndBlock();
     bool Idle() const;                           // wet 0, every tap line and the tail silent: the module may skip the room
+    bool Ready() const;                          // it renders: Init done, parameters and this rate's HRTF data adopted
+                                                 // (else the module applies no d and sends nothing)
     RoomDirectState DirectState() const;         // after BeginBlock: the values d must use for this block
 
     // ---- any thread -------------------------------------------------------------------------------------------

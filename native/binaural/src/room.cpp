@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -115,6 +116,8 @@ std::atomic<int> g_forceRoomKernels{0};  // harness: 0 by the CPU, 1 SSE2
 std::atomic<int> g_forceBusTaps{0};
 std::atomic<float> g_forceTapMinShare{-1.0f};
 std::atomic<int> g_forceOwnTaps{-1};
+// Harness: the level match's gains held at these (dB) instead of measured; NaN in [0]: measured (C18).
+std::atomic<float> g_forceMatchDb[3] = {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
 
 // A seqlock mailbox: the control thread writes (serialised by a mutex), the audio thread reads a consistent copy in a
 // bounded number of tries (and keeps its old copy when it cannot).
@@ -194,7 +197,26 @@ struct LevelMatch {
     bool primed = false;
     float gainDb[kRoomMatchBands] = {};    // at full wet
     float appliedPrev[kRoomMatchBands] = {1.0f, 1.0f, 1.0f};  // linear, as applied at the end of the last block
+    std::uint64_t lastBlock = 0;  // the block MatchMix last ran in: a gap (the room idled) restarts the filters at bypass
 };
+// The match's shelves: designed for the block's start gains and its end gains, the coefficients interpolated per
+// sample between the two (no step at a block's edge while the gains or the wet weight move).
+// RBJ low / high shelf (S = 1) for a gain in dB, with the corner's cos and sin given (they do not change).
+inline rf::Biquad ShelfFast(bool high, float db, float c, float sn) {
+    const float A = std::pow(10.0f, db / 40.0f), al = sn * 0.70710678f, sa = 2.0f * std::sqrt(A) * al;
+    rf::Biquad q;
+    float a0;
+    if (!high) {
+        q.b0 = A * ((A + 1) - (A - 1) * c + sa), q.b1 = 2 * A * ((A - 1) - (A + 1) * c), q.b2 = A * ((A + 1) - (A - 1) * c - sa);
+        a0 = (A + 1) + (A - 1) * c + sa, q.a1 = -2 * ((A - 1) + (A + 1) * c), q.a2 = (A + 1) + (A - 1) * c - sa;
+    } else {
+        q.b0 = A * ((A + 1) + (A - 1) * c + sa), q.b1 = -2 * A * ((A - 1) + (A + 1) * c), q.b2 = A * ((A + 1) + (A - 1) * c - sa);
+        a0 = (A + 1) - (A - 1) * c + sa, q.a1 = 2 * ((A - 1) - (A + 1) * c), q.a2 = (A + 1) - (A - 1) * c - sa;
+    }
+    const float inv = 1.0f / a0;
+    q.b0 *= inv, q.b1 *= inv, q.b2 *= inv, q.a1 *= inv, q.a2 *= inv;
+    return q;
+}
 
 struct Slot {
     float* line = nullptr;
@@ -1584,19 +1606,39 @@ void Room::Render(float* outLR, std::uint32_t frames, const float* directLR) {
 void Room::Impl::MatchMix(float* outLR, const float* directLR, std::uint32_t nfr) {
     LevelMatch& lm = match;
     const float* w = wetBuf.get();
+    const bool forced = !std::isnan(g_forceMatchDb[0].load(std::memory_order_relaxed));
+    if (forced)
+        for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) lm.gainDb[b] = g_forceMatchDb[b].load(std::memory_order_relaxed);
     float g1[kRoomMatchBands];
     for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) g1[b] = std::pow(10.0f, lm.gainDb[b] * wetCur / 20.0f);
     const float invF = 1.0f / static_cast<float>(nfr);
-    // The shelves at this block's end gains (relative to the middle band), as SSE coefficient vectors.
-    const double fsd = static_cast<double>(fs);
-    const rf::Biquad sh[2] = {rf::LowShelf(kRoomMatchLowHz, 20.0 * std::log10(double(g1[0]) / g1[1]), fsd),
-                              rf::HighShelf(kRoomMatchHighHz, 20.0 * std::log10(double(g1[2]) / g1[1]), fsd)};
-    __m128 eb0[2], eb1[2], eb2[2], ea1[2], ea2[2], ez1[2], ez2[2];
-    for (int k = 0; k < 2; ++k) {
-        eb0[k] = _mm_set1_ps(sh[k].b0), eb1[k] = _mm_set1_ps(sh[k].b1), eb2[k] = _mm_set1_ps(sh[k].b2);
-        ea1[k] = _mm_set1_ps(sh[k].a1), ea2[k] = _mm_set1_ps(sh[k].a2);
-        ez1[k] = _mm_loadu_ps(lm.eqZ[k][0]), ez2[k] = _mm_loadu_ps(lm.eqZ[k][1]);
+    if (lm.lastBlock + 1 != blockIndex) {
+        // Back after an idle stretch (or the first block): the filters start empty at bypass, so nothing of an old state
+        // rings into the first block (with the wet weight rising from 0 the gains are near bypass anyway).
+        std::memset(lm.z, 0, sizeof(lm.z)), std::memset(lm.eqZ, 0, sizeof(lm.eqZ));
+        for (float& g : lm.appliedPrev) g = 1.0f;
     }
+    lm.lastBlock = blockIndex;
+    // The shelves (the low and the high band relative to the middle one), from the block's start gains to its end gains.
+    const float kPi2 = 6.28318530718f;
+    const float cl = std::cos(kPi2 * kRoomMatchLowHz / static_cast<float>(fs)), sl = std::sin(kPi2 * kRoomMatchLowHz / static_cast<float>(fs));
+    const float ch = std::cos(kPi2 * kRoomMatchHighHz / static_cast<float>(fs)), shn = std::sin(kPi2 * kRoomMatchHighHz / static_cast<float>(fs));
+    const float lo0 = 20.0f * std::log10(lm.appliedPrev[0] / lm.appliedPrev[1]), lo1 = 20.0f * std::log10(g1[0] / g1[1]);
+    const float hi0 = 20.0f * std::log10(lm.appliedPrev[2] / lm.appliedPrev[1]), hi1 = 20.0f * std::log10(g1[2] / g1[1]);
+    __m128 eb0[2], eb1[2], eb2[2], ea1[2], ea2[2], ez1[2], ez2[2];
+    __m128 db0[2], db1[2], db2[2], da1[2], da2[2];  // per-sample steps of the coefficients
+    {
+        const rf::Biquad s0[2] = {ShelfFast(false, lo0, cl, sl), ShelfFast(true, hi0, ch, shn)};
+        const rf::Biquad s1[2] = {ShelfFast(false, lo1, cl, sl), ShelfFast(true, hi1, ch, shn)};
+        for (int k = 0; k < 2; ++k) {
+            eb0[k] = _mm_set1_ps(s0[k].b0), eb1[k] = _mm_set1_ps(s0[k].b1), eb2[k] = _mm_set1_ps(s0[k].b2);
+            ea1[k] = _mm_set1_ps(s0[k].a1), ea2[k] = _mm_set1_ps(s0[k].a2);
+            db0[k] = _mm_set1_ps((s1[k].b0 - s0[k].b0) * invF), db1[k] = _mm_set1_ps((s1[k].b1 - s0[k].b1) * invF);
+            db2[k] = _mm_set1_ps((s1[k].b2 - s0[k].b2) * invF), da1[k] = _mm_set1_ps((s1[k].a1 - s0[k].a1) * invF);
+            da2[k] = _mm_set1_ps((s1[k].a2 - s0[k].a2) * invF);
+        }
+    }
+    for (int k = 0; k < 2; ++k) ez1[k] = _mm_loadu_ps(lm.eqZ[k][0]), ez2[k] = _mm_loadu_ps(lm.eqZ[k][1]);
     __m128 bb0[3][2], bb1[3][2], bb2[3][2], ba1[3][2], ba2[3][2], bz1[3][2], bz2[3][2];
     for (int b = 0; b < 3; ++b)
         for (int k = 0; k < 2; ++k) {
@@ -1615,6 +1657,10 @@ void Room::Impl::MatchMix(float* outLR, const float* directLR, std::uint32_t nfr
     __m128 eD[3] = {_mm_setzero_ps(), _mm_setzero_ps(), _mm_setzero_ps()}, eT[3] = {_mm_setzero_ps(), _mm_setzero_ps(), _mm_setzero_ps()};
     const float m0 = lm.appliedPrev[1], dm = g1[1] - lm.appliedPrev[1];
     for (std::uint32_t i = 0; i < nfr; ++i) {
+        for (int k = 0; k < 2; ++k) {
+            eb0[k] = _mm_add_ps(eb0[k], db0[k]), eb1[k] = _mm_add_ps(eb1[k], db1[k]), eb2[k] = _mm_add_ps(eb2[k], db2[k]);
+            ea1[k] = _mm_add_ps(ea1[k], da1[k]), ea2[k] = _mm_add_ps(ea2[k], da2[k]);
+        }
         const __m128 x = _mm_setr_ps(directLR[2 * i], directLR[2 * i + 1], w[2 * i], w[2 * i + 1]);
         for (int b = 0; b < 3; ++b) {
             const __m128 y0 = tick(x, bb0[b][0], bb1[b][0], bb2[b][0], ba1[b][0], ba2[b][0], bz1[b][0], bz2[b][0]);
@@ -1656,7 +1702,7 @@ void Room::Impl::MatchMix(float* outLR, const float* directLR, std::uint32_t nfr
     // Measured only at full wet (the gain is applied as gain^wet while the wet weight moves), with voices sent, above
     // the floor; otherwise it holds.
     const bool steady = wetPrev >= 0.999f && wetCur >= 0.999f;
-    if (!steady || !(wSum > 0.0) || !(edSum / nfr > kMatchFloor) || !std::isfinite(edSum)) return;
+    if (forced || !steady || !(wSum > 0.0) || !(edSum / nfr > kMatchFloor) || !std::isfinite(edSum)) return;
     const double a = std::exp(-double(nfr) / (double(kRoomMatchTauS) * fs));
     if (!lm.primed) {
         for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) lm.sD[b] = ed[b], lm.sT[b] = et[b];
@@ -1699,6 +1745,8 @@ RoomDirectState Room::DirectState() const {
     const Impl& m = *impl_;
     return RoomDirectState{m.haveParams ? &m.eff : nullptr, m.wetCur, m.canCur, m.earlyCur};
 }
+
+bool Room::Ready() const { return impl_->Ready(); }
 
 bool Room::Idle() const {
     const Impl& m = *impl_;
@@ -1802,6 +1850,10 @@ void ForceRoomKernels(int which) { g_forceRoomKernels.store(which); }
 void ForceBusTaps(int taps48) { g_forceBusTaps.store(taps48); }
 void ForceTapMinShare(float share) { g_forceTapMinShare.store(share); }
 void ForceOwnTaps(int voices) { g_forceOwnTaps.store(voices); }
+void ForceMatchDb(const float* db) {
+    g_forceMatchDb[1].store(db ? db[1] : 0.0f), g_forceMatchDb[2].store(db ? db[2] : 0.0f);
+    g_forceMatchDb[0].store(db ? db[0] : std::numeric_limits<float>::quiet_NaN());
+}
 float HNorm(const Room& r) { return RoomAccess::HNorm(r); }
 float EFront(const Room& r) { return RoomAccess::EFront(r); }
 float EDiff(const Room& r) { return RoomAccess::EDiff(r); }

@@ -205,6 +205,7 @@ std::uint32_t Renderer::SampleRate() const { return impl_->cfg.sampleRate; }
 // call (counted as rejected), as the contract's non-finite rule.
 namespace audiofake {
 std::atomic<bool> g_roomOutput{false};
+std::atomic<bool> g_roomNotReady{false};
 std::atomic<uint64_t> g_roomInits{0}, g_roomBegins{0}, g_roomAdds{0}, g_roomAddsWeighted{0}, g_roomResets{0},
     g_roomRenders{0}, g_roomEnds{0}, g_roomSetParams{0}, g_roomSetHrtf{0}, g_roomRejected{0};
 std::atomic<int> g_roomLive{0};
@@ -343,6 +344,8 @@ void Room::EndBlock() {
   if (impl_->wet > 0.0f) impl_->quietBlocks = 0;
   else if (impl_->quietBlocks < 1000) ++impl_->quietBlocks;
 }
+// Ready: once it has parameters, unless a test says it is not (an HRTF set at another rate).
+bool Room::Ready() const { return impl_->haveParams && !audiofake::g_roomNotReady.load(std::memory_order_relaxed); }
 // Idle: wet 0 for 3 blocks (the fake's "tail").
 bool Room::Idle() const { return impl_->wet == 0.0f && impl_->quietBlocks >= 3; }
 RoomDirectState Room::DirectState() const {

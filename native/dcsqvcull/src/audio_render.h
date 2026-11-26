@@ -51,11 +51,13 @@
 #include <windows.h>  // QueryPerformanceCounter (Ticks)
 #include <immintrin.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <vector>
 
 #include "audio_space.h"
 #include "audio_voice.h"
@@ -158,6 +160,7 @@ inline void RoomRender(binaural::Room* r, float* out, uint32_t frames, const flo
 }
 inline void RoomEnd(binaural::Room* r) { r->EndBlock(); }
 inline bool RoomIdle(const binaural::Room* r) { return r->Idle(); }
+inline bool RoomReady(const binaural::Room* r) { return r->Ready(); }
 inline void RoomSectionsUs(const binaural::Room* r, double out[binaural::kRoomSections]) {
   const binaural::RoomStats s = r->GetStats();
   for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = s.sectionUs[k];
@@ -195,6 +198,7 @@ inline void RoomRender(binaural::Room*, float* out, uint32_t frames, const float
 }
 inline void RoomEnd(binaural::Room*) {}
 inline bool RoomIdle(const binaural::Room*) { return true; }
+inline bool RoomReady(const binaural::Room*) { return false; }
 inline void RoomMatchDb(const binaural::Room*, float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
 inline void RoomSectionsUs(const binaural::Room*, double out[binaural::kRoomSections]) {
   for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = 0.0;
@@ -364,7 +368,8 @@ struct Counters {
   std::atomic<uint64_t> roomFlushInMix{0}, roomFlushAfterMix{0}, roomRenders{0};
   // blocks whose room output was dropped (no voice rendered inside the mix, nothing in `dry`), and the flushes after the
   // mix of those with sound in `dry` (scaled by the measured master gain), with the wet weight above 0
-  std::atomic<uint64_t> roomDropped{0}, roomAfterWet{0};
+  std::atomic<uint64_t> roomDropped{0}, roomAfterWet{0}, roomLateCalls{0};
+  std::atomic<uint64_t> setsReleasedAfterRebind{0};  // HRTF sets freed once no live binding held them
   std::atomic<double> roomSendUs{0.0};  // the per-voice room work in ProcessVoice (sends, d, send gain), summed
   std::atomic<float> masterGainDb{0.0f};
   std::atomic<double> roomEDry{0.0}, roomEOutBefore{0.0}, roomEOutAfter{0.0};
@@ -708,9 +713,16 @@ struct Binding {
   // Cockpit space, render thread: the last block's voice-render calls and its last caller (where to flush when the
   // list's last voice is not rendered), and ed_sound's master gain as measured (out after the mix over out at the flush,
   // amplitude, smoothed), for the rare block that can only be flushed after the mix.
+  // The HRTF sets this binding's core and room were given (control thread): a set none of the live bindings was given
+  // can be released (a rebind at another rate leaves the old rate's sets with nobody; SetStillHeld).
+  std::vector<const binaural::HrtfSet*> given;
   uint32_t lastCalls = 0;
   void* lastCaller = nullptr;
+  uint32_t lastFollowing = 0xffffffffu;  // list nodes after lastCaller at the end of the last block (none known)
+  bool prevFlushInMix = false;           // the last armed block flushed the room inside the mix (the dry path may run)
+  bool prevFlushAtTail = false;          // ... at the list's last node
   float masterGain = 1.0f;
+  bool masterKnown = false;              // masterGain measured at least once on this binding
   uint32_t* overrun = nullptr;  // ED's overrun counter of this WASAPI renderer
   uint32_t lastOverrun = 0;
   bool haveOverrun = false;
@@ -736,6 +748,18 @@ struct Binding {
   std::atomic<uint32_t> roomSetGen{0};
   uint32_t roomSetSeen = 0;    // render thread
 };
+
+// Control thread: whether a loaded set may still be in use: the current set, or given to the current binding or to a
+// retired binding not freed yet (its core and room are deleted 2 s after its last block).
+inline bool SetStillHeld(const binaural::HrtfSet* s, const binaural::HrtfSet* curSet, const Binding* cur,
+                         const std::vector<Binding*>& retired) {
+  if (s == curSet) return true;
+  auto has = [s](const Binding* b) { return b && std::find(b->given.begin(), b->given.end(), s) != b->given.end(); };
+  if (has(cur)) return true;
+  for (const Binding* b : retired)
+    if (has(b)) return true;
+  return false;
+}
 
 // What one armed device block carries (render thread, set by MixWrap, read by RenderWrap).
 struct Block {
@@ -772,6 +796,12 @@ struct Block {
   // next block when the list's last voice is not rendered (main/audio.inc RoomFlush).
   uint32_t calls = 0;
   void* lastCaller = nullptr;
+  bool walked = false;      // the list was walked at the first call: its last node, the last block's last caller's place
+  void* tail = nullptr;
+  uint32_t prevLastFollowing = 0xffffffffu;
+  bool flushAtTail = false, flushedInMix = false;
+  uint32_t callsAfterFlush = 0;
+  bool roomReady = false;   // the room renders (its parameters and HRTF data in): else no d and no sends
   bool dryUsed = false;     // an owned voice's direct sound went into `dry`
   double ePreMaster = 0.0;  // `out`'s energy right after a flush at the list's last voice (the master gain's measure)
   bool measured = false;    // this block's flush measured the energies (every 8th room block)
@@ -934,7 +964,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     float posA[3] = {u.position[0], u.position[1], u.position[2]};
     uint32_t rflags = 0;
     float send = 0.0f;
-    if (blk.roomOn && !blk.roomFlushed) {
+    if (blk.roomOn && blk.roomReady && !blk.roomFlushed) {
       const int64_t r0 = Ticks();
       if (blk.roomFrameValid) {
         const float ci[4] = {-blk.roomC[0], -blk.roomC[1], -blk.roomC[2], blk.roomC[3]};
@@ -975,7 +1005,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
       cnt.hrtfCalls.fetch_add(1, std::memory_order_relaxed);
       if (pm.flags & audv::meta_flags::kStereo) cnt.stereoCalls.fetch_add(1, std::memory_order_relaxed);
       ++blk.hrtfVoices;
-      if (blk.roomOn && !blk.roomFlushed) {
+      if (blk.roomOn && blk.roomReady && !blk.roomFlushed) {
         // The room gets exactly the core's input and weights: it follows every fade of the direct path. A voice that
         // was not sent in the last block starts a fresh tap line.
         binaural::RoomSource src{};
@@ -1022,7 +1052,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   if (!roomSent && rs.roomLive) {
     // Not sent in this block (its HRTF share ended, or the room was skipped): the room's tap line plays out what it
     // holds with zero input weight, once, then starts afresh at the voice's next send.
-    if (blk.roomOn && !blk.roomFlushed) {
+    if (blk.roomOn && blk.roomReady && !blk.roomFlushed) {
       binaural::RoomSource src{};
       memcpy(src.posAircraft, rs.roomPos, sizeof(src.posAircraft));
       src.send = rs.roomSend;
@@ -1181,7 +1211,10 @@ inline void RoomBlockBegin(Block& blk, const audspace::SpaceData* sd, const Spac
   audr::RoomBegin(b.room, blk.frames, f);
   b.roomSetSeen = b.roomSetGen.load(std::memory_order_acquire);  // a running room adopts a new set by itself
   blk.roomOn = true;
-  if (b.dry) {
+  blk.roomReady = audr::RoomReady(b.room);
+  // The dry path only after a block flushed inside the mix (main/audio.inc RoomFlush): never in a binding's first
+  // block, nor after a block whose voices were not rendered (a mission load).
+  if (b.dry && b.prevFlushInMix && blk.roomReady) {
     blk.dry = b.dry;
     memset(blk.dry, 0, sizeof(float) * 2 * blk.frames);
   }

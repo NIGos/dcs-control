@@ -1139,14 +1139,87 @@ void BuildUp() {
     const size_t from = size_t(300) * 470 * 2, to = std::min(off.size(), size_t(400) * 470 * 2);
     for (size_t i = from; i < to && i < on.size(); ++i) eOn += double(on[i]) * on[i], eOff += double(off[i]) * off[i];
     const double db = 10 * std::log10(eOn / eOff);
+    // the first blocks after the bind, one by one (review round 2: the master gain not measured yet)
+    double first = 0;
+    size_t at = 0;
+    for (int k = 0; k < 50; ++k) {
+      const uint32_t n = sizes[static_cast<size_t>(k) % sizes.size()];
+      double e1 = 0, e0 = 0;
+      for (size_t i = at; i < at + 2 * size_t(n) && i < on.size() && i < off.size(); ++i) e1 += double(on[i]) * on[i], e0 += double(off[i]) * off[i];
+      at += 2 * size_t(n);
+      if (e0 > 1e-12) first = std::max(first, std::fabs(10 * std::log10(e1 / e0)));
+    }
     printf("     voices coming and going, the list's last voice never rendered, %s: flushes inside the mix %llu, after it "
-           "with the room wet %llu; level with all playing %+.2f dB vs Off\n", kLevelName[level],
-           static_cast<unsigned long long>(inMix), static_cast<unsigned long long>(after), db);
-    ok = ok && after == 0 && inMix > 0 && std::fabs(db) <= 0.5;
+           "with the room wet %llu; level with all playing %+.2f dB vs Off, worst of the first 50 blocks %.2f dB\n",
+           kLevelName[level], static_cast<unsigned long long>(inMix), static_cast<unsigned long long>(after), db, first);
+    ok = ok && after == 0 && inMix > 0 && std::fabs(db) <= 0.5 && first <= 2.0;  // (the old fallback: +9 dB)
   }
   Check(ok, "cockpit space e2e M18: voices coming and going and the list's last voice never rendered: the room and the "
             "direct sound never reach `out` after the master stage, and the level stays at Off's (0.5 dB)");
   Check(finite, "cockpit space e2e M18: every output sample finite");
+  g_fakeMasterGain = 1.0f;
+}
+
+// Review round 1 and 2: the list grows (new voices come in at its front, as the fake's lock-free list hands them in)
+// and shrinks while every voice is rendered. The room flushes at the list's real last node every block (no call
+// after it), and no block is louder or softer than Off by more than 1 dB; the first blocks after the bind included
+// (the master gain not measured yet: the dry path waits for a block flushed inside the mix).
+void GrowShrink() {
+  g_fakeMasterGain = 0.35f;
+  auto run = [&](int level, uint64_t* late, uint64_t* after) {
+    Rig r;
+    RigUp(r, Ini(level).c_str());
+    SetCtxCockpitGain(r, kWorldCtx, true);
+    const int anchor = AddBoth(r, kCockpitCtx, true, 2, kEngine, 0.05f, 88, 1.0f, 77);
+    PosBoth(r, anchor, -0.13, 0.42, 0.0);
+    r.w.SetOrient(anchor, kIdentity);
+    CreateVoice(r, anchor);
+    audio::LuaAircraft("F-16C_50");
+    audio::LuaState(0.0, 1, 1);
+    const uint64_t l0 = audio::g_cnt.roomLateCalls.load(), a0 = audio::g_cnt.roomAfterWet.load();
+    Bind(r);
+    Tick();
+    std::vector<float> a(960), b(960), hooked;
+    std::vector<int> voices;
+    for (int k = 0; k < 500; ++k) {
+      if (k >= 20 && k < 260 && k % 6 == 0) {  // forty voices come in, one every 60 ms
+        const int i = AddBoth(r, k % 12 ? kCockpitCtx : kWorldCtx, true, 2, kEngine, 0.02f + 0.001f * (k % 7), 88, 1.0f, 77);
+        PosBoth(r, i, 0.3 * std::cos(k * 0.3), -0.2 + 0.01 * (k % 9), 0.3 * std::sin(k * 0.3));
+        if (k % 12) r.w.SetOrient(i, kIdentity);
+        CreateVoice(r, i);
+        voices.push_back(i);
+      }
+      if (k >= 300 && k < 480 && k % 6 == 0 && !voices.empty()) {
+        const int i = voices.back();
+        voices.pop_back();
+        W<int64_t>(r.w.voices[i], kVRemaining, 100), W<int64_t>(r.ref.voices[i], kVRemaining, 100);
+      }
+      SimFrame(r);
+      Block(r, a.data(), b.data(), 480);
+      if (k == 100) Tick();
+      hooked.insert(hooked.end(), a.begin(), a.end());
+    }
+    *late = audio::g_cnt.roomLateCalls.load() - l0, *after = audio::g_cnt.roomAfterWet.load() - a0;
+    RigDown(r);
+    return hooked;
+  };
+  uint64_t lateOff = 0, afterOff = 0, late = 0, after = 0;
+  const std::vector<float> off = run(0, &lateOff, &afterOff), on = run(2, &late, &after);
+  double worst = 0;
+  int worstBlock = -1;
+  for (size_t k = 0; k < 500 && (k + 1) * 960 <= on.size() && (k + 1) * 960 <= off.size(); ++k) {
+    double eOn = 0, eOff = 0;
+    for (size_t i = k * 960; i < (k + 1) * 960; ++i) eOn += double(on[i]) * on[i], eOff += double(off[i]) * off[i];
+    if (eOff < 1e-9) continue;
+    const double db = std::fabs(10 * std::log10(eOn / eOff));
+    if (db > worst) worst = db, worstBlock = static_cast<int>(k);
+  }
+  printf("     the list growing and shrinking (all rendered), Normal: calls after the flush %llu, after the master stage "
+         "%llu; worst block vs Off %.2f dB (block %d)\n", static_cast<unsigned long long>(late),
+         static_cast<unsigned long long>(after), worst, worstBlock);
+  Check(late == 0 && after == 0 && worst <= 1.0 && AllFinite(on),
+        "cockpit space e2e: with the list growing at its front and shrinking, the room flushes at its real last node "
+        "(no voice after it), and every block, the first after the bind too, stays within 1 dB of Off");
   g_fakeMasterGain = 1.0f;
 }
 
@@ -1156,6 +1229,7 @@ void RunAll() {
   Level();
   LiveMix();
   BuildUp();
+  GrowShrink();
   Clicks();
   OffExact();
   Cpu();
