@@ -351,6 +351,12 @@ struct Counters {
   std::atomic<float> dcompMeanDb{0.0f};
   std::atomic<float> roomWet{0.0f}, roomCanopy{0.0f};
   std::atomic<float> roomMatchDb[3] = {};  // the room's level match per band (below 200 Hz, 200-1000 Hz, above 1 kHz)
+  // Where the room's Render ran (inside the mix at the last voice, or after it: before / after ed_sound's master gain)
+  // and the block energies around it (render thread adds, the running line takes them): the dry direct sound, `out`
+  // before the Render (DCS's voices and the re-panned shares) and `out` after it.
+  std::atomic<uint64_t> roomFlushInMix{0}, roomFlushAfterMix{0}, roomRenders{0};
+  std::atomic<double> roomEDry{0.0}, roomEOutBefore{0.0}, roomEOutAfter{0.0};
+  std::atomic<uint64_t> roomEBlocks{0};
   std::atomic<uint32_t> roomFrameValid{0}, roomEarly{1};
   std::atomic<float> roomC[4] = {};  // C_now of the last room block (aircraft -> head)
   std::atomic<uint64_t> roomBlocks{0}, roomSends{0}, roomRefused{0};
@@ -740,6 +746,10 @@ struct Block {
   // Cockpit space: while the room runs, the owned voices' direct sound (their HRTF renders and kept sides, the paths d
   // scales) goes here instead of `out`; the room's Render adds it, level-matched with the room, to `out`. Null: `out`.
   float* dry = nullptr;
+  // The room's Render (and the dry sound with it) went into `out` this block: at the list's last voice, inside the
+  // mix, before ed_sound's master processing (limiter, global gain); else after the mix (main/audio.inc RoomFlush).
+  bool roomFlushed = false;
+  int64_t roomRenderTicks = 0;  // QPC ticks of that Render and EndBlock
 };
 
 // QPC ticks (the module's clock, as Qpc() in main/audio.inc): the room's per-voice share of a block's time.

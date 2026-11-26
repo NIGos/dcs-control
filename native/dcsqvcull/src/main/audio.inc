@@ -145,6 +145,8 @@ std::atomic<bool> g_testNoThread{false};  // tests drive ControlTick themselves
 // Tests: the room renders without its level match (the direct sound added as it is), for the e2e scenarios that
 // separate the direct sound from the room by d alone (DRR, IACC).
 std::atomic<bool> g_testRoomNoMatch{false};
+// The same for a live bisection: [Dev] AudioRoomNoMatch=1 in the (dev) ini (read with the config, Live).
+std::atomic<bool> g_devRoomNoMatch{false};
 void (*g_testAfterRestore)() = nullptr;   // Stop: right after the sites are restored
 
 inline int64_t Qpc() {
@@ -265,6 +267,44 @@ void PanWrapA(void* voice) { PanWrapImpl(voice, false); }
 void PanWrapB(void* voice) { PanWrapImpl(voice, true); }
 
 // ---- render thread --------------------------------------------------------------------------------------------------
+// Cockpit space: the room's buses and tail, and the owned voices' direct sound (blk.dry), into the block. ed_sound's mix
+// renders the voices of renderer+0x20 (a list, voice+0 the next one) and THEN runs its master processing over `out`
+// (the limiter and the global gain ramp, docs/BINAURAL_AUDIO_HOOKS.md 2.3). So this runs at the last voice's render,
+// inside the mix, like every other voice's output; after the mix only when no voice was last (an empty list), counted.
+// (Run after the mix, the room and the direct sound skipped DCS's master gain: +9 dB on the F-16 in the second flight;
+// in the first flight the room alone came out that much too loud against the direct sound.)
+void RoomFlush(audr::Block& blk, float* out, uint32_t frames, bool inMix) {
+  if (!blk.roomOn || blk.roomFlushed) return;
+  blk.roomFlushed = true;
+  audr::Binding* b = blk.b;
+  const int64_t r0 = Qpc();
+  {
+    audr::MxcsrScope fz;
+    double eDry = 0, eBefore = 0, eAfter = 0;
+    for (uint32_t i = 0; i < 2 * frames; ++i) {
+      eBefore += double(out[i]) * out[i];
+      if (blk.dry) eDry += double(blk.dry[i]) * blk.dry[i];
+    }
+    if (blk.dry && (g_testRoomNoMatch.load(std::memory_order_relaxed) || g_devRoomNoMatch.load(std::memory_order_relaxed))) {
+      for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += blk.dry[i];
+      audr::RoomRender(b->room, out, frames);
+    } else {
+      audr::RoomRender(b->room, out, frames, blk.dry);
+    }
+    audr::RoomEnd(b->room);
+    for (uint32_t i = 0; i < 2 * frames; ++i) eAfter += double(out[i]) * out[i];
+    g_cnt.roomEDry.store(g_cnt.roomEDry.load(std::memory_order_relaxed) + eDry, std::memory_order_relaxed);
+    g_cnt.roomEOutBefore.store(g_cnt.roomEOutBefore.load(std::memory_order_relaxed) + eBefore, std::memory_order_relaxed);
+    g_cnt.roomEOutAfter.store(g_cnt.roomEOutAfter.load(std::memory_order_relaxed) + eAfter, std::memory_order_relaxed);
+    g_cnt.roomEBlocks.fetch_add(1, std::memory_order_relaxed);
+  }
+  blk.roomRenderTicks += Qpc() - r0;
+  g_cnt.roomRenders.fetch_add(1, std::memory_order_relaxed);
+  (inMix ? g_cnt.roomFlushInMix : g_cnt.roomFlushAfterMix).fetch_add(1, std::memory_order_relaxed);
+}
+// The voice is the last of the mix's list (its next pointer, voice+0, is null).
+inline bool LastVoice(void* voice) { return *static_cast<void* const*>(voice) == nullptr; }
+
 int RenderWrap(void* voice, float* out, uint32_t frames) {
   InflightScope in;
   audr::Block* blk = t_block;
@@ -278,7 +318,11 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
       slot = s;
       break;
     }
-  if (slot < 0) return g_res.voiceRender(voice, out, frames);  // not a candidate: DCS's own call, untouched
+  if (slot < 0) {  // not a candidate: DCS's own call, untouched
+    const int r = g_res.voiceRender(voice, out, frames);
+    if (blk->roomOn && LastVoice(voice)) RoomFlush(*blk, out, frames, true);
+    return r;
+  }
   audr::Binding& b = *blk->b;
   float* scratch = b.scratch;
   const int64_t t0 = Qpc();
@@ -293,6 +337,7 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
   if (!ok) g_meta.torn.fetch_add(1, std::memory_order_relaxed);
   if (ok && md.voice != voice) {  // the slot was just given to another voice: this one is DCS's
     for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += scratch[i];
+    if (blk->roomOn && LastVoice(voice)) RoomFlush(*blk, out, frames, true);
     return r;
   }
   {
@@ -301,6 +346,7 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
   }
   g_cnt.candidateCalls.fetch_add(1, std::memory_order_relaxed);
   blk->dspTicks += (t1 - t0) + (Qpc() - t2);
+  if (blk->roomOn && LastVoice(voice)) RoomFlush(*blk, out, frames, true);
   return r;
 }
 
@@ -382,20 +428,9 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
     audr::CoreEnd(b->core);
   }
   if (blk.roomOn) {
-    // After every voice's send: the room's buses and tail are added to the block, inside our FTZ / DAZ scope and the
-    // budget's measure.
-    const int64_t r0 = Qpc();
-    {
-      audr::MxcsrScope fz;
-      if (blk.dry && g_testRoomNoMatch.load(std::memory_order_relaxed)) {
-        for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += blk.dry[i];
-        audr::RoomRender(b->room, out, frames);
-      } else {
-        audr::RoomRender(b->room, out, frames, blk.dry);
-      }
-      audr::RoomEnd(b->room);
-    }
-    roomTicks += Qpc() - r0;
+    // Normally done at the last voice, inside the mix (RoomFlush); here only when no voice was last.
+    RoomFlush(blk, out, frames, false);
+    roomTicks += blk.roomRenderTicks;
     blk.dspTicks += roomTicks;
   }
   if (b->room) audr::RoomBlockEnd(blk, g_cnt, roomTicks, freq);
@@ -871,6 +906,13 @@ void ReadConfig(bool force) {
   g_cfgTime = a.ftLastWriteTime;
   g_cfgDevTime = d.ftLastWriteTime;
   g_devDirAudio = devDir;
+  {
+    const bool noMatch = GetPrivateProfileIntW(L"Dev", L"AudioRoomNoMatch", 0, ini.c_str()) != 0;
+    if (noMatch != g_devRoomNoMatch.load()) {
+      g_devRoomNoMatch.store(noMatch);
+      Log("audio: cockpit space: level match %s ([Dev] AudioRoomNoMatch=%d)", noMatch ? "off" : "on", noMatch ? 1 : 0);
+    }
+  }
   audcfg::Read r = audcfg::ReadIni(ini.c_str());
   for (int i = 0; i < r.noteCount; ++i) Log("%s", r.notes[i]);
   const bool first = !g_haveCfg;
@@ -1438,17 +1480,30 @@ void ControlTick() {
       const uint32_t owned = g_cnt.ownedNow.load(), st = std::min(owned, g_cnt.ownedStereoNow.load());
       // Cockpit space: its level and family, inside, the voices sent to the room in the last block, the early
       // reflections, the room's own p99 and the mean direct-gain compensation (before "; head pose", which ends the line).
-      char space[200] = "Off";
+      char space[360] = "Off";
       if (g_spaceSt.blind) {
         snprintf(space, sizeof(space), "Test");  // a listening test: neither the level nor its room figures
       } else if (g_spaceSt.level > 0) {
         double p50 = 0, p99 = 0;
         RoomTimes(&p50, &p99);
+        // The block energies around the room's Render since the last line (mean per block, dB): the owned voices' dry
+        // direct sound, `out` before the Render and after it; where the Render ran (inside the mix / after it).
+        const double eb = static_cast<double>(std::max<uint64_t>(1, g_cnt.roomEBlocks.exchange(0)));
+        auto edb = [eb](double e) { return e > 0 ? 10.0 * std::log10(e / eb) : -999.0; };
+        const double eDry = edb(g_cnt.roomEDry.exchange(0.0)), eBefore = edb(g_cnt.roomEOutBefore.exchange(0.0)),
+                     eAfter = edb(g_cnt.roomEOutAfter.exchange(0.0));
         snprintf(space, sizeof(space),
                  "%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB, match %+.1f/%+.1f/%+.1f dB",
                  SpaceLevelName(g_spaceSt.level), cockpit_space::FamilyKey(g_spaceSt.family), g_spaceSt.insideNow,
                  g_cnt.roomVoicesNow.load(), g_cnt.roomEarly.load() ? "on" : "off", p99 / 1000.0, g_cnt.dcompMeanDb.load(),
                  g_cnt.roomMatchDb[0].load(), g_cnt.roomMatchDb[1].load(), g_cnt.roomMatchDb[2].load());
+        const size_t used = strlen(space);
+        snprintf(space + used, sizeof(space) - used,
+                 ", energy dry %.1f out %.1f -> %.1f dB, renders %llu in mix %llu after %llu, blocks %llu", eDry, eBefore,
+                 eAfter, static_cast<unsigned long long>(g_cnt.roomRenders.load()),
+                 static_cast<unsigned long long>(g_cnt.roomFlushInMix.load()),
+                 static_cast<unsigned long long>(g_cnt.roomFlushAfterMix.load()),
+                 static_cast<unsigned long long>(g_cnt.roomBlocks.load()));
       }
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
           "%u; mono %u, stereo %u; wide %u (near or diffuse); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "

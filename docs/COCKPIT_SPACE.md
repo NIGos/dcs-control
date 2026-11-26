@@ -427,6 +427,18 @@ power gains at 48 kHz (it has no sample rate; at 44.1 or 96 kHz the wet energy d
 `ComputeTaps` per call (the preset's part, `WetConsts`, is kept per thread while the parameters and canopy stay the
 same), about 0.1 µs.
 
+**Where the room joins the mix (second live round, 2026-11-26, a556222: +9.1 dB on the F-16, flat in every band;
+F-4E +3 dB).** ed_sound's mix renders its voices and then runs its master processing over the block: the limiter and
+the global gain ramp ([BINAURAL_AUDIO_HOOKS.md](BINAURAL_AUDIO_HOOKS.md) 2.3). The room was rendered after the mix
+returned, so the room skipped DCS's master gain (about -9 dB in that F-16 flight); with the level match the owned
+voices' direct sound went the same way (the dry buffer), hence +9 dB on the owned share, invisible to the match (which
+compares direct and room after both skipped the gain). Since then the room's Render, with the dry sound, runs inside
+the mix at the last voice's render (the list's next pointer, voice+0, is null: `RoomFlush` in main/audio.inc), before
+the master processing like every other voice; after the mix only when no voice is last (counted: `renders ... in mix
+... after ...` on the running line). The first flight's +0.7 / +1.3 dB had the same cause: the room alone about 9 dB
+louder against the direct sound than designed. The fake ed_sound now applies a master gain after its voices
+(`g_fakeMasterGain`); M17 runs with 0.35 and fails with the room after the mix (+9.12 dB, measured).
+
 **The level match (built after the live flight of 2026-11-26).** The first live run (validation-08, F-16C, about 30
 owned voices) played the space louder than Off: Subtle +0.7 dB, Normal +1.3 dB broadband, +1 / +2 dB at 200-1000 Hz,
 while `d` was only -0.04 / -0.10 dB. Cause: `RoomDirectGain` adds energies (direct, each reflection, the tail as
@@ -682,7 +694,8 @@ wet = inside ⋅ (CockpitSpace > 0) ⋅ blk.on, canopy, early = !backoffEarly}`;
 after the voice's `CoreRender`: `posA = rotate(conj(C_now), u.position)`; `RoomSource{posA, send = u.gain ⋅
 RoomSendDistanceGain(...), flags}`; `Room::AddSource(slot, src, in, frames, cw0, cw1)`; `u.gain *= RoomDirectGain(...)`
 before the `CoreRender` call (and `gS` of the side). As built, the voices' HRTF output and kept side go to the binding's
-`dry` buffer while the room runs, and `RoomSource::direct = d`. After the mix: `Room::Render(out, frames, dry)` inside the same
+`dry` buffer while the room runs, and `RoomSource::direct = d`. At the mix's last voice (before ed_sound's master
+processing; after the mix only without one): `Room::Render(out, frames, dry)` inside the same
 `MxcsrScope` and `dspTicks` measurement, then `Room::EndBlock`. `Room::ResetSource` wherever `CoreResetSource` is
 called. Skip all room calls while `Room::Idle()` and the wet target is 0.
 
@@ -728,7 +741,8 @@ audio: cockpit space: inside signals: ed_sound <inside|outside|unknown>, camera 
 audio: cockpit space: frame from <sound|none>, cockpit ctx <i>, spread <deg> deg, unreliable frames <n>, outlier sounds <n>   (on change, and once per minute while unreliable)
 audio: cockpit space: early reflections off (CPU budget) | early reflections on again
 audio: ctx <i> listener gain=<f> pitch=<f> lowpass=<f>                                       (probe: at enable and on any change > 1 %)
-audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB, match <lo>/<mid>/<hi> dB; head pose <on|off|unused>
+audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB, match <lo>/<mid>/<hi> dB, energy dry <dB> out <dB> -> <dB> dB, renders <n> in mix <n> after <n>, blocks <n>; head pose <on|off|unused>
+audio: cockpit space: level match <on|off> ([Dev] AudioRoomNoMatch=<0|1>)                    (dev ini, for a live bisection; on change)
 audio: cockpit space: ed_sound's cockpit fields not found (<why>); <what is off>               (at install, only when a signature row is missing)
 ```
 

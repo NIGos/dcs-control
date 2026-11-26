@@ -633,7 +633,8 @@ struct Run {
 // The F-16C (bubble canopy, closed), inside (DCS's flag set on the world context), the cockpit sounds carrying the
 // aircraft frame (identity: the head looks forward). perBlock(r, k) runs before block k's sim frame.
 template <typename Fn>
-Run Scene(const std::string& ini, const std::vector<Voice>& vs, int settle, int blocks, Fn perBlock) {
+Run Scene(const std::string& ini, const std::vector<Voice>& vs, int settle, int blocks, Fn perBlock,
+          const std::vector<uint32_t>* sizes = nullptr) {
   Rig r;
   RigUp(r, ini.c_str());
   SetCtxCockpitGain(r, kWorldCtx, true);
@@ -648,14 +649,17 @@ Run Scene(const std::string& ini, const std::vector<Voice>& vs, int settle, int 
   audio::LuaState(0.0, 1, 1);
   Bind(r);
   Tick();
-  std::vector<float> a(2 * kFrames), b(2 * kFrames);
+  std::vector<float> a(2 * 1024), b(2 * 1024);
   Run t;
   t.hooked.reserve(size_t(2) * kFrames * blocks);
   t.stock.reserve(size_t(2) * kFrames * blocks);
   for (int k = 0; k < settle + blocks; ++k) {
     perBlock(r, k);
     SimFrame(r);
-    Block(r, a.data(), b.data(), kFrames);
+    // The device block: kFrames, or the given sizes in turn (WASAPI periods vary).
+    const uint32_t n = sizes ? (*sizes)[static_cast<size_t>(k) % sizes->size()] : kFrames;
+    a.resize(2 * size_t(n)), b.resize(2 * size_t(n));
+    Block(r, a.data(), b.data(), n);
     if (k == settle / 2) Tick();  // the control thread's pass (stats, Live)
     if (k < settle) continue;
     t.hooked.insert(t.hooked.end(), a.begin(), a.end());
@@ -1006,6 +1010,9 @@ Lv Levels(const std::vector<float>& lr, size_t fromFrame) {
   return r;
 }
 void LiveMix() {
+  // ed_sound's master gain after the voices (the F-16's flight: about -9 dB): what skips it shows up at once.
+  g_fakeMasterGain = 0.35f;
+  const std::vector<uint32_t> sizes = {480, 441, 512, 480, 448, 496};  // per-block device frames, varying
   std::vector<Voice> vs;
   const float A[3] = {-0.134f, 0.419f, 0.0f}, B[3] = {-0.834f, -0.581f, 0.0f};
   for (int k = 0; k < 6; ++k) vs.push_back({kCockpitCtx, 2, kEngine, 0.30f - 0.03f * k, 88, {A[0], A[1], A[2]}, 77, false});
@@ -1014,6 +1021,8 @@ void LiveMix() {
                               {-0.30f, 0.18f, 0.0f},   {0.0f, 0.2f, -0.35f},   {0.0f, 0.2f, 0.35f},   {-0.2f, -0.3f, 0.5f},
                               {-0.2f, -0.3f, -0.5f},   {0.5f, 0.1f, 0.0f}};
   for (const auto& p : spots) vs.push_back({kCockpitCtx, 2, kEngine, 0.08f, 88, {p[0], p[1], p[2]}, 77, false});
+  for (const auto& p : spots)  // the world context near the head too (the F-16's ctx 3 voices of its first flight)
+    vs.push_back({kWorldCtx, 2, kEngine, 0.03f, 61, {p[0] * 1.5f, p[1] * 1.5f, p[2] * 1.5f}, 91, false});
   vs.push_back({kCockpitCtx, 2, kEngine, 0.10f, 61, {0.166f, -0.081f, 0.0f}, 91, false});
   for (int k = 0; k < 4; ++k) {
     const double a = k * kPi / 2 + 0.3;
@@ -1022,10 +1031,14 @@ void LiveMix() {
   }
   constexpr int kSettle = 60, kBlocks = 900;
   const size_t from = size_t(400) * kFrames;  // the match settles within 3 s (kRoomMatchTauS, its slew)
+  uint64_t afterMix = 0, inMix = 0;
   auto run = [&](int level, bool kill) {
-    return Scene(Ini(level), vs, kSettle, kBlocks, [&](Rig&, int k) {
+    const uint64_t a0 = audio::g_cnt.roomFlushAfterMix.load(), i0 = audio::g_cnt.roomFlushInMix.load();
+    Run t = Scene(Ini(level), vs, kSettle, kBlocks, [&](Rig&, int k) {
       if (k == kSettle) audio::g_userOff = kill;
-    });
+    }, &sizes);
+    afterMix += audio::g_cnt.roomFlushAfterMix.load() - a0, inMix += audio::g_cnt.roomFlushInMix.load() - i0;
+    return t;
   };
   const Run offRun = run(0, false), killRun = run(0, true);
   audio::g_userOff = false;
@@ -1056,6 +1069,11 @@ void LiveMix() {
                "100 Hz (200-1000 Hz included) within 1 dB");
   Check(killStep, "cockpit space e2e M17: the step against the kill switch, per band from 100 Hz, within 1 dB of Off's own");
   Check(finite, "cockpit space e2e M17: every output sample finite");
+  printf("     the room's Render inside the mix (at the last voice) %llu times, after it %llu\n",
+         static_cast<unsigned long long>(inMix), static_cast<unsigned long long>(afterMix));
+  Check(inMix > 0 && afterMix == 0, "cockpit space e2e M17: the room and the direct sound go in inside ed_sound's mix "
+                                    "(at its last voice, before the master gain), never after it");
+  g_fakeMasterGain = 1.0f;
 }
 
 void RunAll() {
