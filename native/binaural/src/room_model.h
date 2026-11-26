@@ -354,6 +354,7 @@ void ForceRoomKernels(int which);                            // 0: by the CPU (A
 void ForceBusTaps(int taps48);                               // 0: kRoomBusTaps48; read at SetHrtf
 void ForceTapMinShare(float share);                          // < 0: kRoomTapMinShare; read per AddSource
 void ForceOwnTaps(int voices);                               // < 0: kRoomOwnTaps (0: every voice its own); per block
+void ForceNoZeroSkip(bool off);                              // true: taps run over a silent line too (C19)
 void ForceMatchDb(const float* db);                          // the level match held at db[3]; null: measured
 float HNorm(const Room& r);                                  // early (bus) calibration gain
 float EFront(const Room& r);

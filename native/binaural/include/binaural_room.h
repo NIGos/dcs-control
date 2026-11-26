@@ -120,6 +120,7 @@ struct RoomStats {
     // Render's time per section since Init (microseconds): drain, wall filters, bus HRTF renders, early high-pass,
     // tail, output and level match.
     double sectionUs[kRoomSections];
+    double sectionMaxUs[kRoomSections];  // the longest one block took per section since ResetSectionMax (microseconds)
 };
 
 class Room {
@@ -161,6 +162,7 @@ public:
     // ---- any thread -------------------------------------------------------------------------------------------
     RoomStats GetStats() const;
     void ResetStats();
+    void ResetSectionMax();                      // starts RoomStats::sectionMaxUs's window again
 
 private:
     struct Impl;

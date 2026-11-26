@@ -1614,7 +1614,7 @@ void ControlTick() {
       const uint32_t owned = g_cnt.ownedNow.load(), st = std::min(owned, g_cnt.ownedStereoNow.load());
       // Cockpit space: its level and family, inside, the voices sent to the room in the last block, the early
       // reflections, the room's own p99 and the mean direct-gain compensation (before "; head pose", which ends the line).
-      char space[520] = "Off";
+      char space[720] = "Off";
       if (g_spaceSt.blind) {
         snprintf(space, sizeof(space), "Test");  // a listening test: neither the level nor its room figures
       } else if (g_spaceSt.level > 0) {
@@ -1633,21 +1633,26 @@ void ControlTick() {
                  g_cnt.roomMatchDb[0].load(), g_cnt.roomMatchDb[1].load(), g_cnt.roomMatchDb[2].load());
         size_t used = strlen(space);
         snprintf(space + used, sizeof(space) - used,
-                 ", energy dry %.1f out %.1f -> %.1f dB, renders %llu in mix %llu after %llu (dropped %llu, added %llu), "
-                 "blocks %llu, master %+.1f dB", eDry, eBefore,
+                 ", energy dry %.1f out %.1f -> %.1f dB, renders %llu in mix %llu after %llu (dropped %llu, added %llu, "
+                 "late %llu), blocks %llu, master %+.1f dB", eDry, eBefore,
                  eAfter, static_cast<unsigned long long>(g_cnt.roomRenders.load()),
                  static_cast<unsigned long long>(g_cnt.roomFlushInMix.load()),
                  static_cast<unsigned long long>(g_cnt.roomFlushAfterMix.load()),
                  static_cast<unsigned long long>(g_cnt.roomDropped.load()),
                  static_cast<unsigned long long>(g_cnt.roomAfterWet.load()),
+                 static_cast<unsigned long long>(g_cnt.roomLateCalls.load()),
                  static_cast<unsigned long long>(g_cnt.roomBlocks.load()), g_cnt.masterGainDb.load());
         // Where the room's time goes since the last line, mean per room block (us): the per-voice sends, the wall
         // filters, the bus HRTF renders, the tail, the output with the level match.
         {
           static double prevSec[binaural::kRoomSections] = {}, prevSend = 0;
           static uint64_t prevBlocks = 0;
-          double sec[binaural::kRoomSections] = {};
-          if (audr::Binding* bb = g_binding.load(); bb && bb->room) audr::RoomSectionsUs(bb->room, sec);
+          double sec[binaural::kRoomSections] = {}, mx[binaural::kRoomSections] = {};
+          if (audr::Binding* bb = g_binding.load(); bb && bb->room) {
+            audr::RoomSectionsUs(bb->room, sec, mx);
+            audr::RoomResetSectionMax(bb->room);  // the maxima's window: one running line
+          }
+          const double sendMax = g_cnt.roomSendMaxUs.exchange(0.0), blockMax = g_cnt.roomBlockMaxUs.exchange(0.0);
           const uint64_t blocksNow = g_cnt.roomBlocks.load();
           const double nb = static_cast<double>(blocksNow > prevBlocks ? blocksNow - prevBlocks : 1);
           const double sendNow = g_cnt.roomSendUs.load();
@@ -1660,6 +1665,11 @@ void ControlTick() {
           snprintf(space + used, sizeof(space) - used,
                    ", us per block: sends %.0f walls %.0f buses %.0f early hp %.0f tail %.0f match %.0f", sends, d[1],
                    d[2], d[3], d[4], d[5]);
+          // and the longest block of each since the last line: in the room's sections or outside them
+          used = strlen(space);
+          snprintf(space + used, sizeof(space) - used,
+                   ", us max: sends %.0f drain %.0f walls %.0f buses %.0f early hp %.0f tail %.0f match %.0f room %.0f",
+                   sendMax, mx[0], mx[1], mx[2], mx[3], mx[4], mx[5], blockMax);
         }
       }
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "

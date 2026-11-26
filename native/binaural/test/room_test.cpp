@@ -1338,6 +1338,99 @@ static void TestMatchDynamics(const std::vector<std::uint32_t>& file) {
     CHECK(fin);
 }
 
+// ---- C19: the room's worst blocks (round 5) ---------------------------------------------------------------------------
+// The live flight's room blocks peaked at 0.36-0.40 ms while the medians did not move. The events that could make one
+// block cost more than the others, timed per block (thread CPU, best of 5 runs per block so outside load drops out):
+// 48 voices all ending at once (their reflections drain), all starting again in the reused slots, a parameter change
+// (every voice's taps recomputed for the crossfade), the canopy opening (taps recomputed while it moves), and half the
+// voices playing silence. The silent-tap skip (a voice whose line holds only zeros as far back as the longest tap adds
+// 0 x gain: skipped) must give the same output to the bit as the full work.
+static void RunSpikeScene(const std::vector<std::uint32_t>& file, bool skipOff, std::vector<float>* capture,
+                          std::vector<double>* blockNs) {
+    room_probe::ForceNoZeroSkip(skipOff);
+    RoomRig rig(file, 48000, 64);
+    if (!rig.ok) return;
+    const std::uint32_t frames = 480, voices = 48;
+    const int blocks = 1000;
+    std::vector<Vec> in;
+    for (std::uint32_t s = 0; s < voices; ++s) in.push_back(White(frames * 4, 700 + s, 0.1f));
+    const Vec silence(frames * 4, 0.0f);
+    const Vec direct = White(frames * 2, 699, 0.1f);
+    Vec out(frames * 2);
+    rig.room.SetParams(Params(Family::Generic, 2));
+    const double cpn = CyclesPerNs();
+    if (blockNs) blockNs->assign(blocks, 0.0);
+    for (int b = 0; b < blocks; ++b) {
+        if (b == 400) rig.room.SetParams(Params(Family::Generic, 3));
+        std::fill(out.begin(), out.end(), 0.0f);
+        RoomFrame f{};
+        YawQuat(90.0 * b * 0.01, f.aircraftToHead);
+        f.frameValid = true, f.wet = 1.0f, f.early = true;
+        f.canopyOpen = b >= 500 && b < 700 ? 1.0f : 0.0f;
+        ULONG64 c0, c1;
+        QueryThreadCycleTime(GetCurrentThread(), &c0);
+        rig.room.BeginBlock(frames, f);
+        const bool ended = b >= 200 && b < 300;  // all voices gone (b 200: they drain)
+        for (std::uint32_t s = 0; s < voices && !ended; ++s) {
+            const double az = 360.0 * s / voices, el = 25.0 * std::sin(s * 0.7);
+            const bool inside = s % 2 == 0;
+            const float dist = inside ? 0.35f + 0.1f * (s % 5) : 30.0f;
+            const float x = static_cast<float>(std::cos(el * kPi / 180) * std::cos(az * kPi / 180)), y = static_cast<float>(std::sin(el * kPi / 180)),
+                        z = static_cast<float>(-std::cos(el * kPi / 180) * std::sin(az * kPi / 180));
+            const float send = static_cast<float>(std::pow(10.0, -2.0 * (s % 16) / 20.0));
+            const bool start = b == 0 || b == 300;
+            RoomSource rs{{x * dist, y * dist, z * dist}, send, (inside ? 0u : room_flags::kThroughCanopy) | (start ? room_flags::kReset : 0u), 0.99f};
+            const bool quiet = b >= 800 && s % 2 == 1;  // half the voices playing silence
+            MonoInput mi{(quiet ? silence : in[s]).data() + (b % 3) * frames, nullptr, 1, 1.0f};
+            rig.room.AddSource(s, rs, mi, frames, 1.0f, 1.0f);
+        }
+        rig.room.Render(out.data(), frames, direct.data());
+        rig.room.EndBlock();
+        QueryThreadCycleTime(GetCurrentThread(), &c1);
+        if (blockNs) (*blockNs)[b] = static_cast<double>(c1 - c0) / cpn;
+        if (capture) capture->insert(capture->end(), out.begin(), out.end());
+    }
+    room_probe::ForceNoZeroSkip(false);
+}
+static void TestSpikes(const std::vector<std::uint32_t>& file, const char* label) {
+    std::vector<float> ref, got;
+    RunSpikeScene(file, true, &ref, nullptr);
+    RunSpikeScene(file, false, &got, nullptr);
+    std::size_t diff = 0;
+    for (std::size_t i = 0; i < ref.size() && i < got.size(); ++i) diff += std::memcmp(&ref[i], &got[i], sizeof(float)) != 0;
+    std::printf("C19 %s silent-tap skip: %zu of %zu output samples differ from the full work (bit-exact: %s)\n", label, diff,
+                ref.size(), diff == 0 && ref.size() == got.size() && !ref.empty() ? "yes" : "NO");
+    CHECK(diff == 0 && ref.size() == got.size() && !ref.empty());
+
+    const int oldPriority = GetThreadPriority(GetCurrentThread());
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    for (int off : {1, 0}) {
+        std::vector<double> best;
+        for (int rep = 0; rep < 5; ++rep) {
+            std::vector<double> ns;
+            RunSpikeScene(file, off != 0, nullptr, &ns);
+            if (best.empty()) best = ns;
+            for (std::size_t i = 0; i < ns.size(); ++i) best[i] = std::min(best[i], ns[i]);
+        }
+        auto window = [&](int a, int z, double& mean, double& mx) {
+            mean = 0.0, mx = 0.0;
+            for (int i = a; i < z; ++i) mean += best[i], mx = std::max(mx, best[i]);
+            mean /= (z - a);
+        };
+        std::vector<double> steady(best.begin() + 50, best.begin() + 200);
+        std::sort(steady.begin(), steady.end());
+        double m1, x1, m2, x2, m3, x3, m4, x4, m5, x5;
+        window(200, 203, m1, x1), window(300, 303, m2, x2), window(400, 416, m3, x3), window(500, 700, m4, x4),
+            window(850, 1000, m5, x5);
+        std::printf("C19 %s worst blocks (us, best of 5 per block, 48 voices turning%s): steady p50 %.0f max %.0f; all end "
+                    "(drain) max %.0f; all start in reused slots max %.0f; parameter change mean %.0f max %.0f; canopy "
+                    "opening mean %.0f max %.0f; half silent mean %.0f max %.0f\n",
+                    label, off ? ", silent-tap skip off" : "", steady[steady.size() / 2] / 1e3, steady.back() / 1e3, x1 / 1e3,
+                    x2 / 1e3, m3 / 1e3, x3 / 1e3, m4 / 1e3, x4 / 1e3, m5 / 1e3, x5 / 1e3);
+    }
+    SetThreadPriority(GetCurrentThread(), oldPriority);
+}
+
 // ---- C17: the CPU cuts' trade-offs against the design (round 3) -------------------------------------------------------
 // The early reflections (tail at -40 dB) of the cockpit sources and the flight's engine positions, Normal, bubble:
 // the buses' filters at 32 taps against 64, and the weak taps left out (kRoomTapMinShare) against all eight. Per source
@@ -1494,10 +1587,12 @@ int main(int argc, char** argv) {
         Diag(file);
     } else if (mode == "--cpu") {
         TestCpu(file);
+        TestSpikes(file, "(synthetic)");
         const auto real = ReadFile(std::string(BINAURAL_DATA_DIR) + "/sadie2_ku100.dcshrtf");
         if (!real.empty()) {
             std::printf("---- the same on the bundled SADIE II KU100 set (the live default)\n");
             TestCpu(real);
+            TestSpikes(real, "(KU100)");
         }
     } else if (mode == "--long") {
         TestLongRun(file, 10);
@@ -1528,6 +1623,7 @@ int main(int argc, char** argv) {
         TestHrtfSwap(file, file2);   // C14
         TestDirectState(file, file2);  // C15
         TestCpu(file);               // C9, R8
+        TestSpikes(file, "(synthetic)");  // C19
         TestLongRun(file, 2);        // R10 (10 minutes with --long)
     }
     std::printf("binaural room: %d check(s), %d failure(s)\n", g_checks, g_failures);

@@ -161,10 +161,15 @@ inline void RoomRender(binaural::Room* r, float* out, uint32_t frames, const flo
 inline void RoomEnd(binaural::Room* r) { r->EndBlock(); }
 inline bool RoomIdle(const binaural::Room* r) { return r->Idle(); }
 inline bool RoomReady(const binaural::Room* r) { return r->Ready(); }
-inline void RoomSectionsUs(const binaural::Room* r, double out[binaural::kRoomSections]) {
+inline void RoomSectionsUs(const binaural::Room* r, double out[binaural::kRoomSections],
+                           double maxOut[binaural::kRoomSections] = nullptr) {
   const binaural::RoomStats s = r->GetStats();
-  for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = s.sectionUs[k];
+  for (uint32_t k = 0; k < binaural::kRoomSections; ++k) {
+    out[k] = s.sectionUs[k];
+    if (maxOut) maxOut[k] = s.sectionMaxUs[k];
+  }
 }
+inline void RoomResetSectionMax(binaural::Room* r) { r->ResetSectionMax(); }
 inline void RoomMatchDb(const binaural::Room* r, float out[3]) {
   const binaural::RoomStats s = r->GetStats();
   for (int b = 0; b < 3; ++b) out[b] = s.matchDb[b];
@@ -200,9 +205,11 @@ inline void RoomEnd(binaural::Room*) {}
 inline bool RoomIdle(const binaural::Room*) { return true; }
 inline bool RoomReady(const binaural::Room*) { return false; }
 inline void RoomMatchDb(const binaural::Room*, float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
-inline void RoomSectionsUs(const binaural::Room*, double out[binaural::kRoomSections]) {
-  for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = 0.0;
+inline void RoomSectionsUs(const binaural::Room*, double out[binaural::kRoomSections],
+                           double maxOut[binaural::kRoomSections] = nullptr) {
+  for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = 0.0, (maxOut ? maxOut[k] = 0.0 : 0.0);
 }
+inline void RoomResetSectionMax(binaural::Room*) {}
 inline binaural::RoomDirectState RoomDirectStateOf(const binaural::Room*) { return binaural::RoomDirectState{}; }
 inline float RoomDirect(const binaural::RoomParams&, float, float, float, const float*, uint32_t) { return 1.0f; }
 inline float RoomSendGain(const binaural::RoomParams&, const float*, uint32_t) { return 1.0f; }
@@ -371,6 +378,8 @@ struct Counters {
   std::atomic<uint64_t> roomDropped{0}, roomAfterWet{0}, roomLateCalls{0};
   std::atomic<uint64_t> setsReleasedAfterRebind{0};  // HRTF sets freed once no live binding held them
   std::atomic<double> roomSendUs{0.0};  // the per-voice room work in ProcessVoice (sends, d, send gain), summed
+  // The longest block since the last running line (us): the per-voice room work, and the room's whole share.
+  std::atomic<double> roomSendMaxUs{0.0}, roomBlockMaxUs{0.0};
   std::atomic<float> masterGainDb{0.0f};
   std::atomic<double> roomEDry{0.0}, roomEOutBefore{0.0}, roomEOutAfter{0.0};
   std::atomic<uint64_t> roomEBlocks{0};
@@ -1240,10 +1249,17 @@ inline void RoomBlockEnd(Block& blk, Counters& cnt, int64_t roomTicks, int64_t f
   cnt.roomCanopy.store(b.canopy, std::memory_order_relaxed);
   if (!blk.roomOn) return;
   cnt.roomBlocks.fetch_add(1, std::memory_order_relaxed);
-  if (freq)
-    cnt.roomSendUs.store(cnt.roomSendUs.load(std::memory_order_relaxed) +
-                             static_cast<double>(blk.roomTicks) * 1e6 / static_cast<double>(freq),
-                         std::memory_order_relaxed);
+  if (freq) {
+    const double send = static_cast<double>(blk.roomTicks) * 1e6 / static_cast<double>(freq);
+    const double all = static_cast<double>(roomTicks) * 1e6 / static_cast<double>(freq);
+    cnt.roomSendUs.store(cnt.roomSendUs.load(std::memory_order_relaxed) + send, std::memory_order_relaxed);
+    auto keepMax = [](std::atomic<double>& a, double v) {
+      double cur = a.load(std::memory_order_relaxed);
+      while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+      }
+    };
+    keepMax(cnt.roomSendMaxUs, send), keepMax(cnt.roomBlockMaxUs, all);
+  }
   cnt.roomFrameValid.store(blk.roomFrameValid ? 1u : 0u, std::memory_order_relaxed);
   {
     float m[3];

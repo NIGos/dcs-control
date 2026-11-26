@@ -116,6 +116,7 @@ std::atomic<int> g_forceRoomKernels{0};  // harness: 0 by the CPU, 1 SSE2
 std::atomic<int> g_forceBusTaps{0};
 std::atomic<float> g_forceTapMinShare{-1.0f};
 std::atomic<int> g_forceOwnTaps{-1};
+std::atomic<bool> g_forceNoZeroSkip{false};  // harness: the silent-tap skip off (C19's bit-exactness reference)
 // Harness: the level match's gains held at these (dB) instead of measured; NaN in [0]: measured (C18).
 std::atomic<float> g_forceMatchDb[3] = {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
 
@@ -242,6 +243,9 @@ struct Slot {
     float tapPos[3] = {};
     std::uint32_t tapFlags = 0;
     float tapSd = 1.0f;  // frames of silence still to run after the voice ended (its reflections play out)
+    // The newest samples of the line that are all zero (saturating at the line's size): once they reach past the
+    // longest tap, every tap reads zeros and its work (adding 0 x gain) is skipped, the same output to the bit.
+    std::uint32_t zeroRun = 0;
 };
 
 inline void RotateQ(const float q[4], const float v[3], float out[3]) {
@@ -515,6 +519,7 @@ struct Room::Impl {
     // Time per Render section (TSC cycles, summed since Init; RoomStats::sectionUs, room_probe::Profile): drain, wall
     // filters, bus HRTF renders, early high-pass, tail, output / level match. tscPerUs measured at Init.
     std::atomic<std::uint64_t> prof[kRoomSections] = {};
+    std::atomic<std::uint64_t> profMax[kRoomSections] = {};  // the largest one block took, since ResetSectionMax
     double tscPerUs = 0.0;
 
     float* AccFor(std::uint32_t k, std::uint32_t j) {
@@ -582,6 +587,7 @@ struct Room::Impl {
 
     void ResetSlot(Slot& s) {
         if (s.line) std::memset(s.line, 0, sizeof(float) * lineSize);
+        s.zeroRun = s.line ? lineSize : 0;
         std::memset(s.lp, 0, sizeof(s.lp));
         std::memset(s.hp, 0, sizeof(s.hp));
         std::memset(s.bus, 0, sizeof(s.bus));
@@ -942,6 +948,7 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
     float* lateIn = late.get();
     float* t = tmp.get();
     const std::uint32_t base = s.w;
+    const bool zeroSkip = !g_forceNoZeroSkip.load(std::memory_order_relaxed);
     bool any = false;
     __m128 vEn = _mm_setzero_ps();  // the raw input's energy (the level match's weight)
     float enTail = 0.0f;
@@ -1007,6 +1014,23 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
                 nz |= x != 0.0f ? 1 : 0;
             }
             any = any || nz != 0;
+            // Every sample a tap reads in this chunk (from maxTapDelay before it to its end) zero: skip the taps.
+            const bool silentReads = zeroSkip && !sumTo && nz == 0 && s.zeroRun >= static_cast<std::uint32_t>(maxTapDelay);
+            s.zeroRun = sumTo ? 0u : nz == 0 ? std::min(s.zeroRun + n, lineSize) : 0u;
+            if (silentReads) {
+                const std::uint32_t wpos = (base + o) & mask, first = std::min(n, lineSize - wpos);
+                std::memcpy(line + wpos, v, sizeof(float) * first);
+                if (first < n) std::memcpy(line, v + first, sizeof(float) * (n - first));
+                // The accumulators are still claimed, in the same order: Render runs their wall filters (whose state
+                // still rings) and sums them in claim order, so the output stays the same to the bit.
+                if (early)
+                    for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+                        int nu = 0;
+                        for (std::uint32_t j = 0; j < kRoomBuses && nu < 6; ++j)
+                            if (s.bus[k][j] != 0.0f || busT[k][j] != 0.0f) AccFor(k, j), ++nu;
+                    }
+                continue;
+            }
             if (sumTo) {
                 std::uint32_t q = 0;
                 for (; q + 4 <= n; q += 4) _mm_storeu_ps(sumTo + o + q, _mm_add_ps(_mm_loadu_ps(sumTo + o + q), _mm_loadu_ps(v + q)));
@@ -1351,9 +1375,11 @@ void Room::Render(float* outLR, std::uint32_t frames, const float* directLR) {
     float* wet = m.wetBuf.get();
     std::memset(wet, 0, sizeof(float) * 2 * frames);
     std::uint64_t tsc = __rdtsc();
+    std::uint64_t secBlock[kRoomSections] = {};
     auto lap = [&](int k) {
         const std::uint64_t t = __rdtsc();
         m.prof[k].store(m.prof[k].load(std::memory_order_relaxed) + (t - tsc), std::memory_order_relaxed);
+        secBlock[k] += t - tsc;
         tsc = t;
     };
 
@@ -1596,6 +1622,11 @@ void Room::Render(float* outLR, std::uint32_t frames, const float* directLR) {
         }
     }
     lap(5);
+    for (std::uint32_t k = 0; k < kRoomSections; ++k) {
+        std::uint64_t cur = m.profMax[k].load(std::memory_order_relaxed);
+        while (secBlock[k] > cur && !m.profMax[k].compare_exchange_weak(cur, secBlock[k], std::memory_order_relaxed)) {
+        }
+    }
 }
 
 // The level match (docs/COCKPIT_SPACE.md 6.2). Measured per band (LevelMatch::band, lanes direct L, R, room L, R): the
@@ -1747,6 +1778,9 @@ RoomDirectState Room::DirectState() const {
 }
 
 bool Room::Ready() const { return impl_->Ready(); }
+void Room::ResetSectionMax() {
+    for (auto& a : impl_->profMax) a.store(0, std::memory_order_relaxed);
+}
 
 bool Room::Idle() const {
     const Impl& m = *impl_;
@@ -1771,7 +1805,8 @@ RoomStats Room::GetStats() const {
     s.lastCanopy = m.sCanopy.load(std::memory_order_relaxed);
     for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) s.matchDb[b] = m.sMatch[b].load(std::memory_order_relaxed);
     for (std::uint32_t k = 0; k < kRoomSections; ++k)
-        s.sectionUs[k] = m.tscPerUs > 0 ? static_cast<double>(m.prof[k].load(std::memory_order_relaxed)) / m.tscPerUs : 0.0;
+        s.sectionUs[k] = m.tscPerUs > 0 ? static_cast<double>(m.prof[k].load(std::memory_order_relaxed)) / m.tscPerUs : 0.0,
+        s.sectionMaxUs[k] = m.tscPerUs > 0 ? static_cast<double>(m.profMax[k].load(std::memory_order_relaxed)) / m.tscPerUs : 0.0;
     return s;
 }
 void Room::ResetStats() {
@@ -1850,6 +1885,7 @@ void ForceRoomKernels(int which) { g_forceRoomKernels.store(which); }
 void ForceBusTaps(int taps48) { g_forceBusTaps.store(taps48); }
 void ForceTapMinShare(float share) { g_forceTapMinShare.store(share); }
 void ForceOwnTaps(int voices) { g_forceOwnTaps.store(voices); }
+void ForceNoZeroSkip(bool off) { g_forceNoZeroSkip.store(off); }
 void ForceMatchDb(const float* db) {
     g_forceMatchDb[1].store(db ? db[1] : 0.0f), g_forceMatchDb[2].store(db ? db[2] : 0.0f);
     g_forceMatchDb[0].store(db ? db[0] : std::numeric_limits<float>::quiet_NaN());
