@@ -553,14 +553,14 @@ void Classify(uint32_t i, void* r0, bool sbWrites) {
     ms->a = static_cast<int32_t>(i);
   }
   const bool dxShader = rc.shader && *reinterpret_cast<void**>(rc.shader) == g_shaderVtbl;
-  const uint32_t ntex = *reinterpret_cast<uint32_t*>(rc.mat + 0x2d8);
+  const uint32_t ntex = ngb::TexN(rc.mat);
   // Unset variables (any pass number: every slot 4 call binds every handle).
   if (dxShader) {
     bool unset = sbWrites && !PageBuffer(*reinterpret_cast<uint32_t*>(rc.item + 0xd0));
     if (!unset && ntex) {
       const uint8_t* e = Entries(rc.mat, rc.item);
       for (uint32_t k = 0; k < ntex && k < 256; ++k, e += 0x18)
-        if (*reinterpret_cast<int64_t*>(rc.mat + 0x240 + 8 * k) != -1 && !*reinterpret_cast<void* const*>(e + 8)) unset = true;
+        if (ngb::Tex(rc.mat)[k] != -1 && !*reinterpret_cast<void* const*>(e + 8)) unset = true;
     }
     if (unset) Slot(g_nullBind, 4096, rc.shader, true);
   }
@@ -614,7 +614,7 @@ void Classify(uint32_t i, void* r0, bool sbWrites) {
   const uint8_t* e = ntex ? Entries(rc.mat, rc.item) : nullptr;
   uint64_t vh = 0xcbf29ce484222325ull;
   for (uint32_t k = 0; k < ntex; ++k, e += 0x18) {
-    const int64_t h = *reinterpret_cast<int64_t*>(rc.mat + 0x240 + 8 * k);
+    const int64_t h = ngb::Tex(rc.mat)[k];
     if (h == -1) continue;
     const int32_t type = *reinterpret_cast<const int32_t*>(recs + h * 0x50 + 0xc);
     void* view = nullptr;
@@ -808,7 +808,7 @@ inline bool Skipped(uint32_t i) {
 void* MemberView(uint32_t i, uint32_t k) {
   const Rec& rc = g_rec[i];
   uint32_t v = 0;
-  for (uint32_t j = 0; j < k; ++j) v += *reinterpret_cast<int64_t*>(rc.mat + 0x240 + 8 * j) != -1;
+  for (uint32_t j = 0; j < k; ++j) v += ngb::Tex(rc.mat)[j] != -1;
   return reinterpret_cast<void*>(g_pool[rc.viewOff + v]);
 }
 
@@ -841,10 +841,10 @@ void RestoreRaw() {
         v->b = -1;
       }
     }
-    const uint32_t ntex = *reinterpret_cast<uint32_t*>(rc.mat + 0x2d8);
+    const uint32_t ntex = ngb::TexN(rc.mat);
     const uint8_t* e = ntex ? Entries(rc.mat, rc.item) : nullptr;
     for (uint32_t k = 0; k < ntex && k < 256; ++k, e += 0x18) {
-      const int64_t h = *reinterpret_cast<int64_t*>(rc.mat + 0x240 + 8 * k);
+      const int64_t h = ngb::Tex(rc.mat)[k];
       if (h == -1 || !*reinterpret_cast<void* const*>(e + 8)) continue;
       if (PtrSlot* v = Slot(g_byVar, kTable, VarOf(rc.shader, h), true)) {
         v->a = static_cast<int32_t>(i);
@@ -892,10 +892,10 @@ void ReplayMember(const Rec& rc) {
                             *reinterpret_cast<long long*>(rc.r + 0x78));
   // Slot 26's streaming request per bound texture, with this member's size.
   const uint64_t size = *reinterpret_cast<uint64_t*>(rc.r + 0x6c);
-  const uint32_t ntex = *reinterpret_cast<uint32_t*>(rc.mat + 0x2d8);
+  const uint32_t ntex = ngb::TexN(rc.mat);
   const uint8_t* e = ntex ? Entries(rc.mat, rc.item) : nullptr;
   for (uint32_t k = 0; k < ntex; ++k, e += 0x18) {
-    if (*reinterpret_cast<int64_t*>(rc.mat + 0x240 + 8 * k) == -1) continue;
+    if (ngb::Tex(rc.mat)[k] == -1) continue;
     void* tex = *reinterpret_cast<void* const*>(e + 8);
     if (tex) (*reinterpret_cast<Tex23Fn**>(tex))[23](tex, size);
   }
@@ -909,10 +909,10 @@ bool LeaderCheck(void* arg) {
   const Rec& rc = *static_cast<const Rec*>(arg);
   bool ok = true;
   __try {
-    const uint32_t ntex = *reinterpret_cast<uint32_t*>(rc.mat + 0x2d8);
+    const uint32_t ntex = ngb::TexN(rc.mat);
     uint32_t v = 0;
     for (uint32_t k = 0; k < ntex && ok; ++k) {
-      const int64_t h = *reinterpret_cast<int64_t*>(rc.mat + 0x240 + 8 * k);
+      const int64_t h = ngb::Tex(rc.mat)[k];
       if (h == -1) continue;
       uint8_t* var = VarOf(rc.shader, h);
       ok = var && (*reinterpret_cast<void***>(var))[31] == g_setResource &&
@@ -1085,13 +1085,13 @@ void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
 // ---- Install ----
 const char* VerifyBuild(uint8_t* ng, uint8_t* dx, uint8_t* md) {
   if (const char* why = shadowtex::VerifyBuild(ng, dx)) return why;  // slot 26, getDesc, compat, getSRV, texture classes
-  auto** matVt = reinterpret_cast<void**>(ng + kModelMatVtbl);
-  if (reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) != ng + kModelDraw)
+  auto** matVt = reinterpret_cast<void**>(ng + ngb::At(ng, kModelMatVtbl));  // 2.9.31 RVAs mapped (ng_build.h)
+  if (reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) != ng + ngb::At(ng, kModelDraw))
     return "g-buffer batching: ModelMaterialMT vt[4] does not match this build";
   for (const gbpass::Code& c : kNgCode)
-    if (!shadowtex::CodeIs(ng, c.begin, c.end, c.hash)) return "g-buffer batching: NGModel draw code does not match this build";
+    if (!ngb::CodeIs(ng, c.begin, c.end, c.hash)) return "g-buffer batching: NGModel draw code does not match this build";
   uint8_t tri[8];
-  if (!allocslab::ReadBytes(ng + kTriSite, tri, 8) || (tri[0] != 0xF0 && tri[0] != 0x3E) ||
+  if (!allocslab::ReadBytes(ng + ngb::At(ng, kTriSite), tri, 8) || (tri[0] != 0xF0 && tri[0] != 0x3E) ||
       memcmp(tri + 1, tricount::kLocked + 1, 7) != 0)
     return "g-buffer batching: NGModel triangle counter does not match this build";
   auto** shVt = reinterpret_cast<void**>(dx + shadowtex::kShaderVtbl);
@@ -1112,8 +1112,8 @@ const char* VerifyBuild(uint8_t* ng, uint8_t* dx, uint8_t* md) {
 void SetupEnv(uint8_t* ng, uint8_t* dx, uint8_t* md) {
   g_ng = ng;
   g_dx = dx;
-  g_srVtbl = ng + kSrVtbl;
-  g_modelMatVtbl = ng + kModelMatVtbl;
+  g_srVtbl = ng + ngb::At(ng, kSrVtbl);
+  g_modelMatVtbl = ng + ngb::At(ng, kModelMatVtbl);
   g_shaderVtbl = dx + shadowtex::kShaderVtbl;
   g_setResource = dx + kSetResource;
   g_evalAnim = reinterpret_cast<EvalAnimFn>(ng + kEvalAnim);

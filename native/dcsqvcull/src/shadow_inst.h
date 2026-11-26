@@ -4144,14 +4144,23 @@ constexpr uint64_t kSceneRenderableHash = 0x48801b542c9549beull;
 // above then never matched in a flight and the selection mirror stayed off (round-2 log sweep: "failed: SceneRenderable
 // code hash" in every flight since the counter went on). The prefix byte is read as the analysed F0 for the check.
 constexpr uint32_t kSceneRenderableTriPrefix = 0x44371;
-inline bool SceneRenderableBytesMatch(uint8_t* buf) {  // buf: kSceneRenderableEnd - kSceneRenderable bytes, changed
-  uint8_t& prefix = buf[kSceneRenderableTriPrefix - kSceneRenderable];
-  if (prefix == 0x3E) prefix = 0xF0;
-  return shadowtex::Fnv(buf, kSceneRenderableEnd - kSceneRenderable) == kSceneRenderableHash;
+inline ngb::Code SceneRenderableRange(const uint8_t* ng) {
+  return ngb::Range(ng, kSceneRenderable, kSceneRenderableEnd, kSceneRenderableHash);
+}
+inline bool SceneRenderableBytesMatch(uint8_t (&copy)[kSceneRenderableEnd - kSceneRenderable],
+                                      const ngb::Code& range) {
+  if (range.end32 - range.begin32 != sizeof(copy)) return false;
+  uint8_t& prefix = copy[kSceneRenderableTriPrefix - kSceneRenderable];
+  if (prefix != 0xF0 && prefix != 0x3E) return false;
+  prefix = 0xF0;
+  return shadowtex::Fnv(copy, sizeof(copy)) == range.hash32;
 }
 inline bool SceneRenderableIs(uint8_t* ng) {
-  uint8_t buf[kSceneRenderableEnd - kSceneRenderable];
-  return allocslab::ReadBytes(ng + kSceneRenderable, buf, sizeof(buf)) && SceneRenderableBytesMatch(buf);
+  if (!ng) return false;
+  const auto range = SceneRenderableRange(ng);
+  uint8_t copy[kSceneRenderableEnd - kSceneRenderable];
+  return range.end32 - range.begin32 == sizeof(copy) &&
+         allocslab::ReadBytes(ng + range.begin32, copy, sizeof(copy)) && SceneRenderableBytesMatch(copy, range);
 }
 constexpr uint32_t kModelDraw = 0x16140;  // ModelMaterialMT vt[4]
 constexpr uint32_t kSelCode = 0x15fd1, kSelCodeEnd = 0x16134;  // 0x15e20's selection + its jump table
@@ -4161,7 +4170,8 @@ constexpr uint64_t kDrawDispatchHash = 0xeb2115bc10a89889ull;
 constexpr uint32_t kDrawTable = 0x1647c, kDrawTableEnd = 0x164a4;
 constexpr uint64_t kDrawTableHash = 0x24760084557e75b3ull;
 constexpr uint32_t kFlirThreshold = 0x57df8;  // float (1.0)
-constexpr int kSelSlots = 14;                 // technique slots 0..12, 13 = no draw
+constexpr int kNoDraw = 13, kWaterMask = 14;  // report indices; keep the original no-draw counter
+constexpr int kSelSlots = kWaterMask + 1;
 constexpr int kSelPassIdx = 17;               // pass index 0..15, 16 = every pass (radar)
 constexpr int kSelModelPasses = 16;
 constexpr const char* kTechSlotName[kSelSlots] = {"normal",
@@ -4177,7 +4187,8 @@ constexpr const char* kTechSlotName[kSelSlots] = {"normal",
                                                   "impostor",
                                                   "cockpit_glass_uv",
                                                   "cockpit_cubemap",
-                                                  "(no draw)"};
+                                                  "(no draw)",
+                                                  "water_mask"};
 
 struct Selection {
   int slot, pass;
@@ -4217,8 +4228,13 @@ std::atomic<uint64_t> g_selOther{0};
 bool g_selOk = false;  // the mirrored code matched its hashes
 float g_flirThreshold = 1.0f;
 
-Selection SelectionOf(uint8_t* r, uint8_t* item, uint8_t* mat) {
+Selection SelectionOf(uint8_t* r, uint8_t* item, uint8_t* mat,
+                      int build = ngb::g_build.load(std::memory_order_relaxed)) {
   const uint32_t pass = *reinterpret_cast<uint32_t*>(r + 0x60);
+  if (pass == 14 && build == ngb::k2932) {
+    const int64_t waterMask = *reinterpret_cast<const int64_t*>(mat + 0x240);
+    return waterMask == -1 ? Selection{kNoDraw, 0} : Selection{kWaterMask, 16};
+  }
   const uint8_t* props = *reinterpret_cast<uint8_t**>(mat + 0x28);
   float flir = 0;
   if (pass == 8) {
@@ -4310,9 +4326,9 @@ int ReadTexCountDrawRaw(uint8_t* r, TexCountDraw& d) {
   d.dx = d.shader && *reinterpret_cast<void**>(d.shader) == g_shaderVtbl;
   d.tech = *reinterpret_cast<uint64_t*>(mat + 0x1d8);
   d.n = d.extra = 0;
-  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t n = ngb::TexN(mat);
   for (uint32_t i = 0; i < n; ++i) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * static_cast<uint64_t>(i));
+    const int64_t h = ngb::Tex(mat)[i];
     if (h == -1) continue;
     if (d.n < kTexCountMaxHandles)
       d.h[d.n++] = h;
@@ -4669,6 +4685,16 @@ std::string SelFailText(uint32_t failed) {
   return s.empty() ? "none" : s;
 }
 
+inline uint32_t SelectionFailures(uint8_t* ng, void** matVt) {
+  uint32_t selFailed = 0;
+  if (reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) != ng + ngb::At(ng, kModelDraw)) selFailed |= kSelSlot;
+  if (!SceneRenderableIs(ng)) selFailed |= kSelSceneRenderable;
+  if (!ngb::CodeIs(ng, kSelCode, kSelCodeEnd, kSelCodeHash)) selFailed |= kSelCodeBits;
+  if (!ngb::CodeIs(ng, kDrawDispatch, kDrawDispatchEnd, kDrawDispatchHash)) selFailed |= kSelDrawDispatch;
+  if (!ngb::CodeIs(ng, kDrawTable, kDrawTableEnd, kDrawTableHash)) selFailed |= kSelDrawTable;
+  return selFailed;
+}
+
 // G-buffer part: the shared pipeline plus gb_count.h's SceneRenderable hook
 // with our observer (one HookSlot for both). The selection mirror is enabled
 // only when the mirrored NGModel code matches its hashes.
@@ -4680,12 +4706,7 @@ bool InstallGb() {
     return false;
   }
   auto** matVt = reinterpret_cast<void**>(g_ng + g_at.model);
-  uint32_t selFailed = 0;
-  if (reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) != g_ng + kModelDraw) selFailed |= kSelSlot;
-  if (!SceneRenderableIs(g_ng)) selFailed |= kSelSceneRenderable;
-  if (!shadowtex::CodeIs(g_ng, kSelCode, kSelCodeEnd, kSelCodeHash)) selFailed |= kSelCodeBits;
-  if (!shadowtex::CodeIs(g_ng, kDrawDispatch, kDrawDispatchEnd, kDrawDispatchHash)) selFailed |= kSelDrawDispatch;
-  if (!shadowtex::CodeIs(g_ng, kDrawTable, kDrawTableEnd, kDrawTableHash)) selFailed |= kSelDrawTable;
+  const uint32_t selFailed = SelectionFailures(g_ng, matVt);
   g_selOk = selFailed == 0;
   if (g_selOk) memcpy(&g_flirThreshold, g_ng + kFlirThreshold, 4);
   if (!g_selOk)

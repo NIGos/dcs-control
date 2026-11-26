@@ -6,6 +6,7 @@
 #include "d3dstate.h"
 #include "collect_timing.h"
 #include "task_timing.h"
+#include "ng_build.h"  // NGModel.dll builds beyond the analysed one (2.9.32: moved RVAs, material layout)
 #include "model_timing.h"
 #include "shadow_pass.h"
 // Quad-view frames (UpdateGazeAndCheckHold below), declared ahead of pass_timing.h: its top-level frame id.

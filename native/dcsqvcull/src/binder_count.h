@@ -234,12 +234,13 @@ bool Install() {
   if (g_origGlass) return true;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!base) return false;
-  auto** glass = reinterpret_cast<void**>(base + 0x590d8);
-  auto** model = reinterpret_cast<void**>(base + 0x592f0);
+  // NGModel 2.9.31 RVAs, mapped to this build (ng_build.h: 2.9.32 moved ModelMaterialMT and both slot targets).
+  auto** glass = reinterpret_cast<void**>(base + ngb::At(base, 0x590d8));
+  auto** model = reinterpret_cast<void**>(base + ngb::At(base, 0x592f0));
   if (!allocslab::RttiIs(base, glass, ".?AVGlassMaterialMT@model@@") ||
       !allocslab::RttiIs(base, model, ".?AVModelMaterialMT@model@@") ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&glass[5])) != base + 0x14980 ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&model[5])) != base + 0x17750) {
+      reinterpret_cast<uint8_t*>(SlotOriginal(&glass[5])) != base + ngb::At(base, 0x14980) ||
+      reinterpret_cast<uint8_t*>(SlotOriginal(&model[5])) != base + ngb::At(base, 0x17750)) {
     Log("shadow caster counter: NGModel vtables do not match this build; skipped");
     return false;
   }

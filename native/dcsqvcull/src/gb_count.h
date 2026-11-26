@@ -17,7 +17,8 @@
 
 namespace gbcount {
 
-constexpr uint32_t kVtableRva = 0x59810;
+constexpr uint32_t kVtableRva = 0x59810;  // 2.9.31; SrVtblRva: this build's
+inline uint32_t SrVtblRva(const uint8_t* ng) { return ngb::At(ng, kVtableRva); }
 using Fn = uint64_t(__fastcall*)(void* self, void* ctx);
 Fn g_orig = nullptr;
 std::atomic<bool> g_on{false};
@@ -107,7 +108,7 @@ void Note(void* self, void* ctx) {
   auto* arr = *reinterpret_cast<uint8_t***>(item + 0x18);
   if (props && arr && *arr) {
     const uint8_t* e = *arr + static_cast<size_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 0x18;
-    const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+    const uint32_t n = ngb::TexN(mat);
     tex = Fnv(e, static_cast<size_t>(n < 32 ? n : 32) * 0x18);
   }
   // CB bytes 0x90..0x1c0 without posStructOffset (0x18c..0x18f).
@@ -131,9 +132,9 @@ void Note(void* self, void* ctx) {
   uint64_t srvs = 0xcbf29ce484222325ull;
   if (auto* shader = *reinterpret_cast<uint8_t**>(mat + 0x30)) {
     auto* recs = *reinterpret_cast<uint8_t**>(shader + 0xc8);
-    const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+    const uint32_t n = ngb::TexN(mat);
     for (uint32_t i = 0; recs && i < n && i < 32; ++i) {
-      const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+      const int64_t h = ngb::Tex(mat)[i];
       if (h == -1) continue;
       auto* var = *reinterpret_cast<uint8_t**>(recs + h * 0x50 + 0x40);
       const uint64_t srv = var ? **reinterpret_cast<uint64_t**>(var + 8) : 0;
@@ -172,13 +173,13 @@ bool Install() {
   if (g_orig) return true;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!base) return false;
-  auto** vtbl = reinterpret_cast<void**>(base + kVtableRva);
+  auto** vtbl = reinterpret_cast<void**>(base + SrVtblRva(base));
   if (!allocslab::RttiIs(base, vtbl, ".?AVSceneRenderable@model@@") ||
-      reinterpret_cast<uint8_t*>(SlotOriginal(&vtbl[1])) != base + 0x44350) {
+      reinterpret_cast<uint8_t*>(SlotOriginal(&vtbl[1])) != base + ngb::At(base, 0x44350)) {
     Log("g-buffer counter: SceneRenderable vtable does not match this build; skipped");
     return false;
   }
-  g_modelMatVtbl = base + 0x592f0;
+  g_modelMatVtbl = base + ngb::At(base, 0x592f0);
   g_orig = reinterpret_cast<Fn>(SlotOriginal(&vtbl[1]));
   return HookSlot(&vtbl[1], reinterpret_cast<void*>(&Hook), nullptr);
 }

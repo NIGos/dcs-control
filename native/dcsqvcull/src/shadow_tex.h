@@ -718,8 +718,8 @@ uint32_t ReplayMemberSkippedSets(uint8_t* mat, uint8_t* item, const MaskEntry* e
   uint64_t size = ~0ull;  // Vec2i(-1, -1), as slot 5
   uint8_t* entry = *arr + static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 24;
   uint32_t n = 0;
-  for (uint64_t i = 0; i < *reinterpret_cast<uint32_t*>(mat + 0x2d8); ++i, entry += 24) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + i * 8);
+  for (uint64_t i = 0; i < ngb::TexN(mat); ++i, entry += 24) {
+    const int64_t h = ngb::Tex(mat)[i];
     if (h == -1 || !Skippable(*e, h)) continue;
     SkipSet(shader, h, *reinterpret_cast<void**>(entry + 8), *reinterpret_cast<void**>(entry), &size, c);
     ++n;
@@ -750,8 +750,8 @@ uint64_t Draw(uint8_t* mat, uint8_t* item, void* a3, uint8_t* shader, const Mask
     uint64_t size = ~0ull;  // Vec2i(-1, -1)
     uint8_t* entry = **reinterpret_cast<uint8_t***>(item + 0x18) +
                      static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 24;
-    for (uint64_t i = 0; i < *reinterpret_cast<uint32_t*>(mat + 0x2d8); ++i, entry += 24) {
-      const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + i * 8);
+    for (uint64_t i = 0; i < ngb::TexN(mat); ++i, entry += 24) {
+      const int64_t h = ngb::Tex(mat)[i];
       if (h == -1) continue;
       void* s = *reinterpret_cast<void**>(mat + 0x30);
       void* tex = *reinterpret_cast<void**>(entry + 8);

@@ -302,8 +302,8 @@ void OnBoundary(void* pass, bool begin, int depth) {
 
 constexpr int kXrBeginSlot = 9;
 // Per analysed Visualizer build (PE timestamp): DCS 2.9.30, 2.9.31.
-constexpr uint32_t kXrBeginStamps[] = {0x6ac12454u, 0x6ad87745u};
-constexpr uint32_t kXrBeginRvas[] = {0x1244c0, 0x150c50};
+constexpr uint32_t kXrBeginStamps[] = {0x6ac12454u, 0x6ad87745u, 0x6afec037u};
+constexpr uint32_t kXrBeginRvas[] = {0x1244c0, 0x150c50, 0x150fc0};  // 2.9.32: vt[9] at .rdata 0x23f910, same prologue
 const uint8_t kXrBeginPrologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83,
                                     0xec, 0x50, 0x48, 0x8b, 0xda, 0x48, 0x8b, 0xf9};
 using XrFn = uint64_t(__fastcall*)(void*, void*, void*, void*);

@@ -258,6 +258,16 @@ void Selection() {
       ++bad;
     }
   }
+  alignas(8) uint8_t material[0x248]{}, renderable[0x70]{}, props[0x130]{};
+  *reinterpret_cast<uint8_t**>(material + 0x28) = props;
+  *reinterpret_cast<uint32_t*>(renderable + 0x60) = 14;
+  const auto legacy = SelectionOf(renderable, nullptr, material, ngb::k2931);
+  const auto water = SelectionOf(renderable, nullptr, material, ngb::k2932);
+  *reinterpret_cast<int64_t*>(material + 0x240) = -1;
+  const auto missing = SelectionOf(renderable, nullptr, material, ngb::k2932);
+  Check(legacy.slot == 0 && legacy.pass == 1 && water.slot == kWaterMask && water.pass == 16 &&
+            missing.slot == kNoDraw && missing.pass == 0,
+        "gbuffer inst: model pass 14 uses the legacy selection or the available water_mask technique on 2.9.32");
   Check(bad == 0, "gbuffer inst: technique/pass selection mirror of 0x16140 / 0x15e20 (27 cases)");
 }
 
@@ -622,10 +632,10 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
     }
     *reinterpret_cast<uint8_t**>(f->sh + 0xc8) = recs.data();
     *reinterpret_cast<uint8_t**>(f->sh + 0xd0) = recs.data() + 0x50 * vars.size();
-    *reinterpret_cast<int64_t*>(f->mat + 0x240) = readIdx;
-    *reinterpret_cast<int64_t*>(f->mat + 0x248) = unreadIdx;
-    *reinterpret_cast<int64_t*>(f->mat + 0x250) = -1;
-    *reinterpret_cast<uint32_t*>(f->mat + 0x2d8) = 3;
+    ngb::Tex(f->mat)[0] = readIdx;
+    ngb::Tex(f->mat)[1] = unreadIdx;
+    ngb::Tex(f->mat)[2] = -1;
+    *reinterpret_cast<uint32_t*>(f->mat + 0x2d8 + ngb::TextureFieldShift()) = 3;
     f->Pass(1);
     TexCountClear();
     TexCountNote(f->r);
@@ -653,8 +663,8 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
     // A shader without a published entry: its sets are unknown.
     auto* f2 = new Fake;
     f2->Init(im, k);
-    *reinterpret_cast<int64_t*>(f2->mat + 0x240) = 0;
-    *reinterpret_cast<uint32_t*>(f2->mat + 0x2d8) = 1;
+    ngb::Tex(f2->mat)[0] = 0;
+    *reinterpret_cast<uint32_t*>(f2->mat + 0x2d8 + ngb::TextureFieldShift()) = 1;
     f2->Pass(1);
     TexCountNote(f2->r);
     // A live record that is not a variable of (a): the mask is unknown.
@@ -670,7 +680,7 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
     TexCountClear();
     *reinterpret_cast<uint8_t**>(f->sh + 0xc8) = nullptr;
     *reinterpret_cast<uint8_t**>(f->sh + 0xd0) = nullptr;
-    *reinterpret_cast<uint32_t*>(f->mat + 0x2d8) = 0;
+    *reinterpret_cast<uint32_t*>(f->mat + 0x2d8 + ngb::TextureFieldShift()) = 0;
     delete f2;
     g_state = savedState;
     g_selOk = savedSelOk;
@@ -798,21 +808,20 @@ void Run() {
     } else if (!ng) {
       QvSkip("gbuffer inst: NGModel.dll not found\n");
     } else {
-      auto** matVt = reinterpret_cast<void**>(ng + kModelMatVtbl);
+      auto** matVt = reinterpret_cast<void**>(ng + ngb::At(ng, kModelMatVtbl));
       float thr = 0;
       memcpy(&thr, ng + kFlirThreshold, 4);
-      Check(reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) == ng + kModelDraw &&
-                shadowtex::CodeIs(ng, kSceneRenderable, kSceneRenderableEnd, kSceneRenderableHash) &&
-                shadowtex::CodeIs(ng, kSelCode, kSelCodeEnd, kSelCodeHash) &&
-                shadowtex::CodeIs(ng, kDrawDispatch, kDrawDispatchEnd, kDrawDispatchHash) &&
-                shadowtex::CodeIs(ng, kDrawTable, kDrawTableEnd, kDrawTableHash) && thr == 1.0f,
+      const uint32_t failed = SelectionFailures(ng, matVt);
+      if (failed) printf("     selection: %s\n", SelFailText(failed).c_str());
+      Check(!failed && thr == 1.0f,
             "gbuffer inst: build checks pass (ModelMaterialMT vt[4], SceneRenderable vt[1], selection code, jump "
             "table, FLIR threshold)");
       // In a flight [Model] PlainTriangleCounter has already turned the counter add's LOCK prefix (0x44371) into 3E
       // when the G-buffer part installs: the check must still pass (it failed in every flight), and any other byte
       // must still fail it.
       uint8_t code[kSceneRenderableEnd - kSceneRenderable];
-      memcpy(code, ng + kSceneRenderable, sizeof(code));
+      const auto range = SceneRenderableRange(ng);
+      memcpy(code, ng + range.begin32, sizeof(code));
       const size_t at = kSceneRenderableTriPrefix - kSceneRenderable;
       Check(code[at] == 0xF0, "gbuffer inst: the analysed SceneRenderable code holds the counter's LOCK prefix");
       uint8_t plain[sizeof(code)], other[sizeof(code)], wrongPrefix[sizeof(code)];
@@ -822,9 +831,9 @@ void Run() {
       other[at + 2] ^= 0x01;
       memcpy(wrongPrefix, code, sizeof(code));
       wrongPrefix[at] = 0x90;
-      Check(shadowtex::Fnv(plain, sizeof(plain)) != kSceneRenderableHash && SceneRenderableBytesMatch(plain),
+      Check(shadowtex::Fnv(plain, sizeof(plain)) != range.hash32 && SceneRenderableBytesMatch(plain, range),
             "gbuffer inst: SceneRenderable check passes with the plain triangle counter applied (prefix 3E)");
-      Check(!SceneRenderableBytesMatch(other) && !SceneRenderableBytesMatch(wrongPrefix),
+      Check(!SceneRenderableBytesMatch(other, range) && !SceneRenderableBytesMatch(wrongPrefix, range),
             "gbuffer inst: SceneRenderable check still fails on any other byte change");
       Check(SceneRenderableIs(ng), "gbuffer inst: SceneRenderable check passes on the analysed image");
     }

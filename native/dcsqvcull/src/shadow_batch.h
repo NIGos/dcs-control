@@ -326,9 +326,9 @@ uint64_t MaskedTextureKey(uint8_t* mat, uint8_t* item, const shadowtex::MaskEntr
   if (!props || !arr || !*arr) return 1;
   const uint8_t* en = *arr + static_cast<size_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 0x18;
   uint64_t h = 0xcbf29ce484222325ull ^ 0x5a5a;
-  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t n = ngb::TexN(mat);
   for (uint32_t i = 0; i < n && i < 32; ++i, en += 0x18) {
-    const int64_t hd = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+    const int64_t hd = ngb::Tex(mat)[i];
     if (hd == -1 || shadowtex::Skippable(e, hd)) continue;
     h = (h ^ *reinterpret_cast<const uint64_t*>(en)) * 0x100000001b3ull;
     h = (h ^ *reinterpret_cast<const uint64_t*>(en + 8)) * 0x100000001b3ull;
@@ -417,7 +417,7 @@ int BuildCore(Plan& p, void* const* c, size_t n, bool renderThread, int texMode)
     }
     if (ml->eligible < 0) {
       void* shader = *reinterpret_cast<void**>(mat + 0x30);
-      ml->eligible = shader && *reinterpret_cast<uint32_t*>(mat + 0x2d8) <= 32 &&
+      ml->eligible = shader && ngb::TexN(mat) <= 32 &&
                              shadowinst::FindVs(shader, TechOf(mat), 0) != nullptr
                          ? 1
                          : 0;

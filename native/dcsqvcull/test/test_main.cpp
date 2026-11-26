@@ -222,8 +222,8 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
   *reinterpret_cast<uint64_t*>(s.mat + 0x68) = 0x6868;
   *reinterpret_cast<uint64_t*>(s.mat + 0x210) = 7;
   *reinterpret_cast<uint64_t*>(s.mat + 0x218) = 8;
-  *reinterpret_cast<uint32_t*>(s.mat + 0x2d8) = static_cast<uint32_t>(count);
-  for (int i = 0; i < count; ++i) *reinterpret_cast<int64_t*>(s.mat + 0x240 + i * 8) = handles[i];
+  *reinterpret_cast<uint32_t*>(s.mat + 0x2d8 + ngb::TextureFieldShift()) = static_cast<uint32_t>(count);
+  for (int i = 0; i < count; ++i) ngb::Tex(s.mat)[i] = handles[i];
   *reinterpret_cast<int32_t*>(s.props + 8) = props8;
   s.props[0x33] = static_cast<uint8_t>(transp);
   *reinterpret_cast<uint32_t*>(s.props + 0x26c) = static_cast<uint32_t>(baseIdx);
@@ -1750,12 +1750,15 @@ int main() {
       dcsinstall::Skip("shadow tex");
     } else if (!ngm || !dxm) {
       QvSkip("shadow tex: DCS binaries not found\n");
+    } else if (const char* why = VerifyBuild(reinterpret_cast<uint8_t*>(ngm), reinterpret_cast<uint8_t*>(dxm))) {
+      Check(false, "shadow tex: installed NGModel/dx11backend passes compatibility checks");
+      printf("     %s\n", why);
+    } else if (!reloc::IsAnalysedBuild(reinterpret_cast<const uint8_t*>(ngm),
+                                       hooksig::kLocs[hooksig::NG_ModelMaterialMT_vtbl].module)) {
+      // The execution fixture constructs materials and substitutes functions at original-build offsets.
+      QvSkip("shadow tex: original-image execution fixture does not cover this layout\n");
     } else {
       auto* ng = reinterpret_cast<uint8_t*>(ngm);
-      auto* dx = reinterpret_cast<uint8_t*>(dxm);
-      const char* why = VerifyBuild(ng, dx);
-      Check(!why, "shadow tex: build checks pass on the analysed NGModel/dx11backend");
-      if (why) printf("     %s\n", why);
       // Redirect what slot 5 reaches outside itself.
       void* redirect = reinterpret_cast<void*>(&FakeGetTexture);
       WriteCode(ng + kIatGetTexture, &redirect, 8);

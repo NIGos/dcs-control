@@ -119,9 +119,9 @@ uint64_t TextureEntriesKey(uint8_t* mat, uint8_t* item) {
   if (!props || !arr || !*arr) return 1;
   const uint8_t* e = *arr + static_cast<size_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 0x18;
   uint64_t h = 0xcbf29ce484222325ull;
-  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t n = ngb::TexN(mat);
   for (uint32_t i = 0; i < n && i < 32; ++i, e += 0x18) {
-    if (*reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i) == -1) continue;
+    if (ngb::Tex(mat)[i] == -1) continue;
     h = (h ^ *reinterpret_cast<const uint64_t*>(e)) * 0x100000001b3ull;
     h = (h ^ *reinterpret_cast<const uint64_t*>(e + 8)) * 0x100000001b3ull;
   }

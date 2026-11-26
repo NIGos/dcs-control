@@ -54,9 +54,9 @@ struct World {
       *reinterpret_cast<uint8_t**>(mt + 0x30) = m == 5 ? nullptr : sh[m % kSh].data();  // 5: no shader
       *reinterpret_cast<uint64_t*>(mt + 0x210) = 1;
       *reinterpret_cast<uint64_t*>(mt + 0x218) = 2;
-      *reinterpret_cast<uint32_t*>(mt + 0x2d8) = m == 7 ? 40 : 2;  // 7: too many textures
-      *reinterpret_cast<int64_t*>(mt + 0x240) = 0;
-      *reinterpret_cast<int64_t*>(mt + 0x248) = 1;
+      *reinterpret_cast<uint32_t*>(mt + 0x2d8 + ngb::TextureFieldShift()) = m == 7 ? 40 : 2;  // 7: too many textures
+      ngb::Tex(mt)[0] = 0;
+      ngb::Tex(mt)[1] = 1;
       props[m][0x33] = m % 4 == 0 ? 1 : 0;                          // technique from mat+0x218
       *reinterpret_cast<uint32_t*>(props[m].data() + 8) = m % 3 == 0 ? 1 : 0;  // textured
     }

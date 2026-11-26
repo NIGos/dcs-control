@@ -222,7 +222,7 @@ inline bool TvRightMvUnproven(bool engaged) {
   --g_tvMvHold;
   return true;
 }
-// R70: the live checks (R70 §10): T1 (still frames, DLSS jitter 0.3-0.95 px between frames): DCS's MVs are 0 +- 0.001
+// R70: the live checks (R70 ï¿½10): T1 (still frames, DLSS jitter 0.3-0.95 px between frames): DCS's MVs are 0 +- 0.001
 // px, i.e. JITTER-FREE (includes_jitter is never set; jitter_free is); T2 (synthetic yaw turns): every terrain / sky /
 // model texel's MV equals the head rotation's motion at infinity within 0.016 px (p99.9 at 20 deg/s), the sky included.
 constexpr bool kMvIncludesJitter = false;
@@ -3911,7 +3911,7 @@ void OnEndFrame() {
 using XrEndFn = int32_t(__stdcall*)(void*, const void*);
 constexpr int kXeSlot = 35;  // XrGeneratedDispatchTable: ... xrWaitFrame 33, xrBeginFrame 34, xrEndFrame 35
 // Visualizer: mov r8, [rax+48h]; mov rax, [r8+118h], per fstart::kVisBuilds build (2.9.30, 2.9.31: R147, .text +0x2c790)
-constexpr uint32_t kXeTrampRva[fstart::kVisBuildCount] = {0x1b6abf, 0x1e324f};
+constexpr uint32_t kXeTrampRva[fstart::kVisBuildCount] = {0x1b6abf, 0x1e324f, 0x1e324f};  // 2.9.32: as 2.9.31
 const uint8_t kXeTramp[] = {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x18, 0x01, 0x00, 0x00};
 XrEndFn g_xeOrig = nullptr;  // kept after the unhook (a call in flight still forwards through it)
 void** g_xeSlot = nullptr;

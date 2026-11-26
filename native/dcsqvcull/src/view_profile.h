@@ -207,7 +207,7 @@ void* const* g_pacerObj = nullptr;
 struct PacerBuild {
   uint32_t stamp, objRva;
 };
-constexpr PacerBuild kPacerBuilds[] = {{0x6ac12454u, 0x2c1538}, {0x6ad87745u, 0x2ef548}};
+constexpr PacerBuild kPacerBuilds[] = {{0x6ac12454u, 0x2c1538}, {0x6ad87745u, 0x2ef548}, {0x6afec037u, 0x2ef508}};
 
 void InitPacer() {
   if (g_pacerObj) return;

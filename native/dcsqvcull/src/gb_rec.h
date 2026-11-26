@@ -1809,12 +1809,12 @@ void PreOne(Job& j, int t, size_t i) {
   p.pageIdx = page;
   p.pageOk = PageBuffer(env, page) ? 1 : 0;
   const ReadsEntry* rd = PmReads(pm, ck);
-  const uint32_t ntex = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t ntex = ngb::TexN(mat);
   const uint8_t* en = ntex ? EntriesOf(mat, item) : nullptr;
   if (rd && rd->state > 0) {
     uint64_t set[kRecWords] = {};
     for (uint32_t k = 0; k < ntex && k < kMaxTex && en; ++k) {
-      const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * k);
+      const int64_t h = ngb::Tex(mat)[k];
       if (h < 0 || h >= static_cast<int64_t>(kMaxRecords)) continue;
       if (*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) set[h >> 6] |= 1ull << (h & 63);
     }
@@ -1856,7 +1856,7 @@ void PreOne(Job& j, int t, size_t i) {
   uint32_t found = 0;
   int why = kRecorded;
   for (uint32_t k = 0; k < ntex && en; ++k) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * k);
+    const int64_t h = ngb::Tex(mat)[k];
     if (h == -1) continue;
     auto* tex = *reinterpret_cast<uint8_t* const*>(en + k * 0x18 + 8);
     if (!tex) continue;  // slot 26 returns at once: nothing set (an unread record: the inheritance check covers the read ones)
@@ -2237,10 +2237,10 @@ int FinishBuild(Job& j) {
       if (!note(VarOf(m.shader, hsb), recorded ? static_cast<void*>(cd->page) : nullptr))
         return j.result = kBuildVarClass;
     }
-    const uint32_t ntex = *reinterpret_cast<uint32_t*>(m.mat + 0x2d8);
+    const uint32_t ntex = ngb::TexN(m.mat);
     const uint8_t* en = ntex ? EntriesOf(m.mat, item) : nullptr;
     for (uint32_t k = 0; k < ntex && k < kMaxTex && en; ++k) {
-      const int64_t h = *reinterpret_cast<int64_t*>(m.mat + 0x240 + 8 * k);
+      const int64_t h = ngb::Tex(m.mat)[k];
       if (h == -1 || !*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) continue;
       void* value = nullptr;
       const TexEntry* te = nullptr;
@@ -3244,10 +3244,10 @@ void ReadSetsRaw(const ProbeIn& in, const ReadsEntry& rd, Facts& f) {
   f.readCount = 0;
   f.readOk = true;
   uint64_t seen[kRecWords] = {};
-  const uint32_t ntex = *reinterpret_cast<uint32_t*>(in.mat + 0x2d8);
+  const uint32_t ntex = ngb::TexN(in.mat);
   const uint8_t* en = ntex ? EntriesOf(in.mat, in.item) : nullptr;
   for (uint32_t k = 0; k < ntex && k < kMaxTex && en; ++k) {
-    const int64_t h = *reinterpret_cast<int64_t*>(in.mat + 0x240 + 8 * k);
+    const int64_t h = ngb::Tex(in.mat)[k];
     if (h < 0 || h >= static_cast<int64_t>(kMaxRecords) || !((rd.mask[h >> 6] >> (h & 63)) & 1)) continue;
     if (!*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) {
       f.readOk = false;  // inherits: not this draw's to map
@@ -6030,7 +6030,7 @@ bool Install() {
   if (!gbbatch::g_ctx) dev->GetImmediateContext(&gbbatch::g_ctx);  // the verifier's context (released by gb_batch)
   if (!AllocTables(g_tab) || !AllocTex(g_tex, 1u << 14)) return fail("no memory for the tables");
   if (!EnsureSlots()) return fail("no memory for the jobs");
-  g_env.srVt = ng + gbcount::kVtableRva;
+  g_env.srVt = ng + gbcount::SrVtblRva(ng);
   g_env.modelVt = gbcount::g_modelMatVtbl;
   g_env.shaderVt = dx + shadowtex::g_at.shader;
   g_env.globals = reinterpret_cast<uint8_t* const*>(ng + shadowtex::g_at.globals);

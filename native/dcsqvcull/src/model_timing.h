@@ -128,7 +128,7 @@ void __fastcall Hook(void* self, void* inst, uint32_t count, void** infos, const
 void Install() {
   HMODULE ng = GetModuleHandleW(L"NGModel.dll");
   if (!ng) return;
-  auto vtbl = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(ng) + kVtableRva);
+  auto vtbl = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(ng) + ngb::At(reinterpret_cast<uint8_t*>(ng), kVtableRva));
   void* parse = reinterpret_cast<void*>(GetProcAddress(ng, kParseExport));
   if (!parse || SlotOriginal(&vtbl[kParseSlot]) != parse) {
     Log("model timing: NGModelLodsMT vtable does not match this NGModel.dll build; skipped");

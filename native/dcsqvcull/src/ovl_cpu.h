@@ -169,6 +169,33 @@ constexpr CodeSig kCode2931[] = {
     {kModCockpit, 0x4b477f, 0x4b478f, 0x8c05c1b4c9fee402ull},  // RenderObject at rsp+0x70 constructed (IAT displaced)
     {kModCockpit, 0x4b4aa6, 0x4b4ae1, 0x40c037b526c9d93dull},  // RenderObject +0x78 = record+0x40, +0x60/+0x68 ptrs
 };
+// DCS 2.9.32.30490 (CockpitBase PE 0x6afec04f, Visualizer 0x6afec037): the same ranges in the same order, CockpitBase
+// .text +0x890 and Visualizer .text +0xd0 from 2.9.31; GraphicsCore and GraphicsVista unchanged. The ranges without a
+// displacement hash as in 2.9.31; the four with one were proven by rewriting each displacement back to its 2.9.31
+// target (cookie +0, composite vtable +0x1c8, recorder globals -0x10, the import slots +0: 0x537530 is still
+// RenderObject::render), the 2.9.31 hash then matches. Re-derived offline from the installed binaries.
+constexpr CodeSig kCode2932[] = {
+    {kModCockpit, 0x4b5890, 0x4b5900, 0xf9bd328328519e9full},  // the replay (cookie, composite vtable displaced)
+    {kModCockpit, 0x4b4f70, 0x4b4fa7, 0x6e64c89a3b51438bull},  // per record: _Impl+0x38, vt[+0x10](&c8, &c9)
+    {kModCockpit, 0x4b3100, 0x4b313f, 0x92531274d9d9e4d5ull},  // composite filter: the inner filter first
+    {kModCockpit, 0x4b5371, 0x4b5397, 0xd83c2aadfe2fe1f1ull},  // per record: getCurrentContext, render (IAT displaced)
+    {kModCockpit, 0x4b5987, 0x4b59d0, 0xf507ecc6487779c5ull},  // range: lo16 / hi16 records of handler+0x20
+    {kModCockpit, 0x4b5aaf, 0x4b5abe, 0xf56241eb839403f5ull},  // {first record, count} handed to 0x4b4ef0
+    {kModCockpit, 0x4b4f41, 0x4b4f58, 0x683c382924a86118ull},  // 0x4b4ef0: rbx = first, end = first + n * 0xd0
+    {kModCockpit, 0x4b4fa7, 0x4b4fb4, 0x932b794bdb3beed1ull},  // a record with +8 and +0 null: a state record
+    {kModCockpit, 0x4b5397, 0x4b53a7, 0x48f99d266883161eull},  // every record in order, 0xd0 apart
+    {kModCockpit, 0x4b6090, 0x4b60be, 0xd77f79ace5700cd3ull},  // the recorder (c8 / c9 globals displaced)
+    {kModVis, 0x18cf70, 0x18cf7e, 0x5120b1051f19c035ull},      // overlay lambda: bt mask, c9
+    {kModGc, 0x1d70, 0x1d78, 0x1866e6365dc61adbull},           // GraphicsCore, GraphicsVista: unchanged
+    {kModGc, 0x18ce6, 0x18cf4, 0x0b499d763064535cull},
+    {kModGv, 0x1f700, 0x1f70b, 0x531431716b974be7ull},
+    {kModGv, 0x18906, 0x18953, 0xe8bae405aa31f6c1ull},
+    {kModGv, 0x13e92, 0x13e99, 0x0c04099b488b96adull},
+    {kModGv, 0x18d6a, 0x18d71, 0x0c04099b488b96adull},
+    {kModGv, 0x1a85a, 0x1a861, 0x0c04099b488b96adull},
+    {kModCockpit, 0x4b500f, 0x4b501f, 0x4945060eeb6aa1caull},  // RenderObject at rsp+0x70 constructed (IAT displaced)
+    {kModCockpit, 0x4b5336, 0x4b5371, 0x40c037b526c9d93dull},  // RenderObject +0x78 = record+0x40, +0x60/+0x68 ptrs
+};
 // The render point (R32 r4): CockpitBase's only record-loop call of Graphics::RenderObject::render goes through its
 // import slot (0x3c6065, returning to 0x3c606b) with rcx = the record's RenderObject, which carries the record
 // (+0x78 = record + 0x40, +0x60 / +0x68 = the record's +8 / +0 object pointers). Every drawing record reaches it,
@@ -213,9 +240,20 @@ constexpr Build kBuilds[] = {
      },
      0x537530,
      0x4b4afb},
+    {"2.9.32",  // the same RTTI classes and slots; the import slot unchanged, the record loop's return +0x890
+     kCode2932,
+     sizeof(kCode2932) / sizeof(kCode2932[0]),
+     {
+         {kModCockpit, 0x55ead0, 3, 0x4b5890},
+         {kModCockpit, 0x55eb58, 2, 0x4b3100},
+         {kModVis, 0x243ee8, 2, 0x18cf70},
+     },
+     0x537530,
+     0x4b538b},
 };
 constexpr int kBuildCount = static_cast<int>(sizeof(kBuilds) / sizeof(kBuilds[0]));
-static_assert(sizeof(kCode2930) == sizeof(kCode2931), "one range per site in every build");
+static_assert(sizeof(kCode2930) == sizeof(kCode2931) && sizeof(kCode2930) == sizeof(kCode2932),
+              "one range per site in every build");
 constexpr uint32_t kCurCtxRva = 0x11d510;  // GraphicsCore ContextBase::currentContext (exported)
 const char kCurCtxExport[] = "?currentContext@ContextBase@GraphicsCore@@1PEAV12@EA";
 constexpr uint32_t kCtxVP = 0x1b4, kCtxProj = 0x134;  // ContextBase: viewProj, proj (row vectors; see LoadCtxVp)

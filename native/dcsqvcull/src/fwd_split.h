@@ -508,7 +508,7 @@ int Install(double tscHz) {
     Log("fwd split: SceneRenderable hook unavailable (this build); off");
     return -1;
   }
-  g_srVt = ng + gbcount::kVtableRva;
+  g_srVt = ng + gbcount::SrVtblRva(ng);
   g_modelMatVt = gbcount::g_modelMatVtbl;
   g_staleCyc = static_cast<uint64_t>(tscHz * 2.0);
   g_ownRenderHook = false;

@@ -1993,7 +1993,7 @@ int PreTextures(Job& j, int t, Pre& p, const PreMat& pm) {
     g_classNoSets++;
     return kRTexClass;
   }
-  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t n = ngb::TexN(mat);
   if (n > 32) return kRTooMany;
   const uint8_t* recs = *reinterpret_cast<uint8_t**>(pm.shader + 0xc8);
   const uint8_t* recEnd = *reinterpret_cast<uint8_t**>(pm.shader + 0xd0);
@@ -2002,7 +2002,7 @@ int PreTextures(Job& j, int t, Pre& p, const PreMat& pm) {
   p.setFirst = j.preSetCount[t];
   p.setCount = 0;
   for (uint32_t i = 0; i < n; ++i, en += 0x18) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+    const int64_t h = ngb::Tex(mat)[i];
     if (h == -1) continue;
     auto* tex = *reinterpret_cast<uint8_t* const*>(en + 8);
     const int64_t aux = *reinterpret_cast<const int64_t*>(en);
@@ -3679,13 +3679,13 @@ void ReadSetsRaw(const gbbatch::TexEnv& env, const ProbeIn& in, const shadowtex:
   auto* props = *reinterpret_cast<uint8_t**>(in.mat + 0x28);
   auto* arr = *reinterpret_cast<uint8_t***>(in.item + 0x18);
   if (!props || !arr || !*arr) return;
-  const uint32_t n = *reinterpret_cast<uint32_t*>(in.mat + 0x2d8);
+  const uint32_t n = ngb::TexN(in.mat);
   const uint8_t* recs = *reinterpret_cast<uint8_t**>(in.shader + 0xc8);
   const uint8_t* recEnd = *reinterpret_cast<uint8_t**>(in.shader + 0xd0);
   const int64_t nrec = recs && recEnd > recs ? (recEnd - recs) / 0x50 : 0;
   const uint8_t* en = *arr + static_cast<size_t>(*reinterpret_cast<uint32_t*>(props + 0x26c)) * 0x18;
   for (uint32_t i = 0; i < n && i < 32; ++i, en += 0x18) {
-    const int64_t h = *reinterpret_cast<int64_t*>(in.mat + 0x240 + 8 * i);
+    const int64_t h = ngb::Tex(in.mat)[i];
     if (h == -1 || shadowtex::Skippable(mask, h)) continue;
     auto* tex = *reinterpret_cast<uint8_t* const*>(en + 8);
     if (!tex || h < 0 || h >= nrec || f.readCount == kMaxPsTex) {
@@ -4356,9 +4356,9 @@ bool NameIsMaterialTexture(uint8_t* mat, uint8_t* shader, const char* name) {
   const uint8_t* recs = *reinterpret_cast<uint8_t**>(shader + 0xc8);
   const uint8_t* recEnd = *reinterpret_cast<uint8_t**>(shader + 0xd0);
   const int64_t nrec = recs && recEnd > recs ? (recEnd - recs) / 0x50 : 0;
-  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t n = ngb::TexN(mat);
   for (uint32_t i = 0; i < n && i < 32; ++i) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+    const int64_t h = ngb::Tex(mat)[i];
     if (h < 0 || h >= nrec) continue;
     const char* rn = *reinterpret_cast<const char* const*>(recs + h * 0x50 + 0x30);
     if (rn && shadowtex::NameRefers(rn, name)) return true;

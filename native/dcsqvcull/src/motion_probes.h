@@ -15,7 +15,7 @@ struct Probe {
   uint32_t vtRva;
   int slot;
   const char* rttiPart;  // substring of the class name
-  uint32_t vtRvaAlt;     // another analysed build's vtable RVA (0: none); the one whose class name matches is hooked
+  uint32_t vtRvaAlt[2];  // other analysed builds' vtable RVAs (0: none); the first whose class name matches is hooked
   Fn orig = nullptr;
   std::atomic<uint64_t> calls{0}, cycles{0};
 };
@@ -23,11 +23,11 @@ struct Probe {
 // Only std::function _Do_call slots (known arity: this + up to 3 arguments
 // in registers); functions with unknown signatures are not wrapped.
 Probe g_probes[] = {
-    // DCS 2.9.30 0x215698; 2.9.31 0x243da8 (R147: the same RTTI class, RenderThreadHandler's lambda_1).
-    {"frame-start task drain", L"Visualizer.dll", 0x215698, 2, "_Func_impl_no_alloc@V<lambda_1>@?1???R1?1??RenderThreadHandler@", 0x243da8},
-    {"texture mip finalize", L"dx11backend.dll", 0xc0638, 2, "_Func_impl", 0},
-    {"terrain build spatial", L"edterrainGraphics41.dll", 0x155290, 2, "_Func_impl", 0},
-    {"terrain build objects", L"edterrainGraphics41.dll", 0x155300, 2, "_Func_impl", 0},
+    // DCS 2.9.30 0x215698; 2.9.31 0x243da8 (R147: the same RTTI class, RenderThreadHandler's lambda_1); 2.9.32 0x243e08.
+    {"frame-start task drain", L"Visualizer.dll", 0x215698, 2, "_Func_impl_no_alloc@V<lambda_1>@?1???R1?1??RenderThreadHandler@", {0x243da8, 0x243e08}},
+    {"texture mip finalize", L"dx11backend.dll", 0xc0638, 2, "_Func_impl", {0, 0}},
+    {"terrain build spatial", L"edterrainGraphics41.dll", 0x155290, 2, "_Func_impl", {0, 0}},
+    {"terrain build objects", L"edterrainGraphics41.dll", 0x155300, 2, "_Func_impl", {0, 0}},
 };
 constexpr int kProbes = sizeof(g_probes) / sizeof(g_probes[0]);
 
@@ -68,10 +68,11 @@ void Install() {
     if (!base) continue;
     auto** vtbl = reinterpret_cast<void**>(base + p.vtRva);
     std::string name = RttiName(base, vtbl);
-    if (p.vtRvaAlt && (name.empty() || name.find(p.rttiPart) == std::string::npos)) {
-      vtbl = reinterpret_cast<void**>(base + p.vtRvaAlt);
-      name = RttiName(base, vtbl);
-    }
+    for (uint32_t alt : p.vtRvaAlt)
+      if (alt && (name.empty() || name.find(p.rttiPart) == std::string::npos)) {
+        vtbl = reinterpret_cast<void**>(base + alt);
+        name = RttiName(base, vtbl);
+      }
     if (name.empty() || (p.rttiPart[0] && name.find(p.rttiPart) == std::string::npos)) {
       Log("motion probe %s: vtable class '%s' unexpected; skipped", p.name, name.c_str());
       continue;

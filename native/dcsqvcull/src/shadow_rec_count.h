@@ -390,7 +390,7 @@ void CheckTextures(uint8_t* mat, uint8_t* item, SlotStat& st) {
     st.texNoEntries++;
     return;
   }
-  const uint32_t n = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t n = ngb::TexN(mat);
   if (n > 32) {
     st.texTooMany++;
     return;
@@ -401,7 +401,7 @@ void CheckTextures(uint8_t* mat, uint8_t* item, SlotStat& st) {
   const int64_t nrec = recs && recEnd > recs ? (recEnd - recs) / 0x50 : 0;
   bool ok = true;
   for (uint32_t i = 0; i < n; ++i, en += 0x18) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+    const int64_t h = ngb::Tex(mat)[i];
     if (h == -1) continue;
     if (m && shadowtex::Skippable(*m, h)) {
       st.texMaskSkipped++;

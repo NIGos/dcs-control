@@ -140,9 +140,9 @@ struct World {
       *reinterpret_cast<float*>(mt + kCbOff + 0xc0) = 0.6f + 0.1f * m;  // "scale", read by the test VS
       *reinterpret_cast<int32_t*>(props[m] + 8) = m == kTexturedMat ? 1 : 0;
       props[m][0x33] = 0;
-      *reinterpret_cast<uint32_t*>(mt + 0x2d8) = 2;   // two texture handles: Diffuse (0), Specular (1)
-      *reinterpret_cast<int64_t*>(mt + 0x240) = 0;
-      *reinterpret_cast<int64_t*>(mt + 0x248) = 1;
+      *reinterpret_cast<uint32_t*>(mt + 0x2d8 + ngb::TextureFieldShift()) = 2;   // two texture handles: Diffuse (0), Specular (1)
+      ngb::Tex(mt)[0] = 0;
+      ngb::Tex(mt)[1] = 1;
       *reinterpret_cast<uint32_t*>(props[m] + 0x26c) = 0;
     }
     for (int k = 0; k < kMeshes; ++k) {

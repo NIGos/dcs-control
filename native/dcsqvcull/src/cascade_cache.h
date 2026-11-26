@@ -1048,7 +1048,7 @@ bool Install() {
   if (!shadowpass::g_orig) return false;  // retried
   InitSteps();
   ModuleRange(L"edterrainGraphics41.dll", &g_staticLo, &g_staticHi);
-  if (HMODULE ng = GetModuleHandleW(L"NGModel.dll")) g_smrVtbl = reinterpret_cast<uint8_t*>(ng) + kSmrVtblRva;
+  if (HMODULE ng = GetModuleHandleW(L"NGModel.dll")) g_smrVtbl = reinterpret_cast<uint8_t*>(ng) + ngb::At(reinterpret_cast<uint8_t*>(ng), kSmrVtblRva);
   LARGE_INTEGER f;
   QueryPerformanceFrequency(&f);
   g_gapQpc = f.QuadPart / 4;

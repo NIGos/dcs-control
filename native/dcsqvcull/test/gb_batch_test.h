@@ -418,9 +418,9 @@ struct World {
       *reinterpret_cast<uint8_t**>(mat[m] + 0x30) = sh[shOf[m]];
       *reinterpret_cast<int64_t*>(mat[m] + 0x68) = 2;  // sbPositions handle
       *reinterpret_cast<uint64_t*>(mat[m] + 0x1d8) = 1;
-      *reinterpret_cast<int64_t*>(mat[m] + 0x240) = 0;
-      *reinterpret_cast<int64_t*>(mat[m] + 0x248) = 1;
-      *reinterpret_cast<uint32_t*>(mat[m] + 0x2d8) = 2;
+      ngb::Tex(mat[m])[0] = 0;
+      ngb::Tex(mat[m])[1] = 1;
+      *reinterpret_cast<uint32_t*>(mat[m] + 0x2d8 + ngb::TextureFieldShift()) = 2;
       *reinterpret_cast<uint32_t*>(props[m] + 0x26c) = m == 2 ? 2 : 0;  // each material's entry range of an object
       // One ArgumentProperty: mat+0x100 = args[0].
       *reinterpret_cast<uint8_t**>(animVec[m]) = mat[m] + 0x100;

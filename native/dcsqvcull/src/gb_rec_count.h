@@ -776,7 +776,7 @@ void ModelItem(size_t k, uint8_t* r, uint8_t* item, uint8_t* mat, SlotStat& st) 
     st.matsNoEntry++;
   }
   // Textures: handles, entries, prediction, uniqueness.
-  const uint32_t ntex = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t ntex = ngb::TexN(mat);
   uint64_t boundRec[kMaxRecords / 64] = {};
   bool anyTex = false, nullEntry = false;
   const uint8_t* recs = dxShader ? *reinterpret_cast<uint8_t**>(sh + 0xc8) : nullptr;
@@ -785,7 +785,7 @@ void ModelItem(size_t k, uint8_t* r, uint8_t* item, uint8_t* mat, SlotStat& st) 
   const uint8_t* en = ntex ? EntriesOf(mat, item) : nullptr;
   const uint64_t size = *reinterpret_cast<uint64_t*>(r + 0x6c);
   for (uint32_t i = 0; i < ntex && i < 32; ++i) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+    const int64_t h = ngb::Tex(mat)[i];
     if (h == -1) continue;
     anyTex = true;
     uint8_t* tex = en ? *reinterpret_cast<uint8_t* const*>(en + i * 0x18 + 8) : nullptr;
@@ -1723,7 +1723,7 @@ void Measure(int ms, std::atomic<uint64_t>& frames, double tscHz, const std::ato
     Log("  gbuffer rec counter: G-buffer pass execute not hooked (GraphicsCore build); skipped");
     return;
   }
-  g_srVt = ng + gbcount::kVtableRva;
+  g_srVt = ng + gbcount::SrVtblRva(ng);
   g_modelMatVt = gbcount::g_modelMatVtbl;
   g_texOk = shadowtex::VerifyBuild(ng, dx) == nullptr;
   g_shaderVt = dx + shadowtex::g_at.shader;

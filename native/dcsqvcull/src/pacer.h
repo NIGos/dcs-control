@@ -21,7 +21,7 @@ namespace pacer {
 
 // The site per analysed Visualizer.dll build (DCS 2.9.30, 2.9.31: R147, the same loop bytes at .text +0x2c790); the
 // first one whose surrounding bytes match is used.
-constexpr uint32_t kSiteRvas[] = {0x8de5e, 0xba5ee};
+constexpr uint32_t kSiteRvas[] = {0x8de5e, 0xba5ee, 0xba95e};  // 2.9.32: the same loop bytes
 const uint8_t kPauses[8] = {0xF3, 0x90, 0xF3, 0x90, 0xF3, 0x90, 0xF3, 0x90};
 // Bytes around the site that must match this Visualizer.dll build.
 const uint8_t kBefore[8] = {0x0F, 0xB6, 0x46, 0x0C, 0x90, 0x84, 0xC0, 0x75};  // at site - 9

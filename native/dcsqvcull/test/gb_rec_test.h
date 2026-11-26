@@ -202,8 +202,8 @@ struct World {
       *reinterpret_cast<int64_t*>(mt + 0x68) = kSbRec;
       *reinterpret_cast<uint64_t*>(mt + 0x1d8) = 1;
       for (uint32_t b = 0; b < kCbLen; b += 4) *reinterpret_cast<uint32_t*>(mt + kCbOff + b) = rnd() & 0x3f7fffff;
-      *reinterpret_cast<uint32_t*>(mt + 0x2d8) = kHandles;
-      for (int k = 0; k < kHandles; ++k) *reinterpret_cast<int64_t*>(mt + 0x240 + 8 * k) = k;
+      *reinterpret_cast<uint32_t*>(mt + 0x2d8 + ngb::TextureFieldShift()) = kHandles;
+      for (int k = 0; k < kHandles; ++k) ngb::Tex(mt)[k] = k;
       *reinterpret_cast<uint32_t*>(props[m] + 0x26c) = 0;
       // One animated property: CB +0xc0 (mat+0x150) = args[1] * 0.5 + 1.
       *reinterpret_cast<void**>(prop[m]) = g_propVt;

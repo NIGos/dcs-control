@@ -829,7 +829,7 @@ void ModelItem(size_t k, uint8_t* r, uint8_t* item, uint8_t* mat, SlotStat& st) 
     if (shrec::ReadMesh(*reinterpret_cast<uint8_t**>(item + 0xc0), ml)) why = kWMesh;
   }
   // Textures: handles, entries, prediction; read records set by the draw.
-  const uint32_t ntex = *reinterpret_cast<uint32_t*>(mat + 0x2d8);
+  const uint32_t ntex = ngb::TexN(mat);
   uint64_t boundRec[kMaxRecords / 64] = {};
   const uint8_t* recs = dxShader ? *reinterpret_cast<uint8_t**>(sh + 0xc8) : nullptr;
   const uint8_t* recEnd = dxShader ? *reinterpret_cast<uint8_t**>(sh + 0xd0) : nullptr;
@@ -838,7 +838,7 @@ void ModelItem(size_t k, uint8_t* r, uint8_t* item, uint8_t* mat, SlotStat& st) 
   const uint64_t size = *reinterpret_cast<uint64_t*>(r + 0x6c);
   bool texBad = false, anyTex = false;
   for (uint32_t i = 0; i < ntex && i < 32 && dxShader; ++i) {
-    const int64_t h = *reinterpret_cast<int64_t*>(mat + 0x240 + 8 * i);
+    const int64_t h = ngb::Tex(mat)[i];
     if (h == -1) continue;
     uint8_t* tex = en ? *reinterpret_cast<uint8_t* const*>(en + i * 0x18 + 8) : nullptr;
     if (!tex) continue;  // nothing set: the inheritance check covers read records
@@ -1844,7 +1844,7 @@ void Measure(int ms, std::atomic<uint64_t>& frames, double tscHz, const std::ato
     Log("  forward rec counter: SceneRenderable hook unavailable (this build); skipped");
     return;
   }
-  g_srVt = ng + gbcount::kVtableRva;
+  g_srVt = ng + gbcount::SrVtblRva(ng);
   g_modelMatVt = gbcount::g_modelMatVtbl;
   g_texOk = shadowtex::VerifyBuild(ng, dx) == nullptr;
   g_shaderVt = dx + shadowtex::g_at.shader;

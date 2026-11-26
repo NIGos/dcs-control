@@ -31,7 +31,7 @@ namespace ctime {
 constexpr int kRing = 32;
 constexpr int kLvSlot = 36;                    // XrGeneratedDispatchTable: xrLocateViews
 // Visualizer: mov r10, [rax+48h]; mov rax, [r10+120h], per fstart::kVisBuilds build (2.9.30; 2.9.31: R147, +0x2c790)
-constexpr uint32_t kLvTrampRva[fstart::kVisBuildCount] = {0x1b7409, 0x1e3b99};
+constexpr uint32_t kLvTrampRva[fstart::kVisBuildCount] = {0x1b7409, 0x1e3b99, 0x1e3b99};  // 2.9.32: as 2.9.31
 const uint8_t kLvTramp[] = {0x4c, 0x8b, 0x50, 0x48, 0x49, 0x8b, 0x82, 0x20, 0x01, 0x00, 0x00};
 constexpr const char* kModelTimeExport = "?modelTime@wTime@@0NA";  // World.dll: static double wTime::modelTime
 // Not proven (R74 doc §4): simTime advances once per rendered frame, but no live oracle tied its steps to the frame's
