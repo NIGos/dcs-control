@@ -93,6 +93,14 @@
 //    the writer has proven live that simTime is tied 1:1 to the rendered frame AND it advanced since the previous
 //    committed frame consistently with the pose clock; without it use poseQpc for world motion too.
 //
+// Per-pixel depth (revision 3, additive: one header flag, no field, size or version change). This block keeps its
+// block min/max grid (the mask's divisor). The per-pixel linear depth of every view (divisor 1, render resolution, the
+// same metres along the view axis, 65504 for the sky) is published as the depth plane of the motion companion
+// (dcsvr_motion.h revision 4, header_flags::depth_plane, [Perception] CockpitMotionDepth=1): on the MV grid, at the MV
+// sample point, in the motion slot of the same index and seq, so MV, class and depth of a texel describe one surface.
+// header_flags::per_pixel_in_motion here: the writer publishes that plane this session (a hint for a reader that pairs
+// this block; the motion block's own flags and view_flags::depth_plane decide per slot and view).
+//
 // Self-contained: <atomic>, <cmath>, <cstddef>, <cstdint>, <cstring>. #pragma pack(8), little-endian. The name takes
 // the optional suffix of the environment variable DCSVR_PERCEPTION_SHM_SUFFIX (as the mask; tests use it).
 #pragma once
@@ -109,7 +117,8 @@ constexpr const wchar_t* block_name = L"Local\\DcsVrCockpitDepth_v1";
 constexpr const char* name_suffix_variable = "DCSVR_PERCEPTION_SHM_SUFFIX";
 constexpr std::uint32_t block_magic = 0x50444344u;  // "DCDP"
 constexpr std::uint32_t block_version = 1;
-constexpr std::uint32_t contract_revision = 2;      // 1 R69: the first published contract; 2 R74a: slotTime
+constexpr std::uint32_t contract_revision = 3;      // 1 R69: the first published contract; 2 R74a: slotTime;
+                                                    // 3 (Q2): header_flags::per_pixel_in_motion
 constexpr int max_views = 4;
 constexpr int slot_count = 3;
 constexpr std::uint32_t format_r16g16_float = 34;   // DXGI_FORMAT_R16G16_FLOAT
@@ -220,6 +229,7 @@ constexpr std::uint32_t reader_heartbeat = 8u;   // the writer honours readerHea
 constexpr std::uint32_t idle = 16u;              // no fresh heartbeat (this block's or the mask's): no new slots
 constexpr std::uint32_t shares_mask_fence = 32u; // fenceHandle is the mask block's fence; values = its maskSeq
 constexpr std::uint32_t slot_time = 64u;         // R74a: the writer fills slotTime (revision >= 2)
+constexpr std::uint32_t per_pixel_in_motion = 128u; // revision 3: per-pixel depth is in the motion block's depth plane
 }  // namespace header_flags
 namespace time_flags {                           // R74a: SlotTime::flags (the same bits in dcsvr_motion.h)
 constexpr std::uint32_t pose_observed = 1u;      // poseQpc / poseReturnQpc / poseDisplayTime hold the rendered pose's call

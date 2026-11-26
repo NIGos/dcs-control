@@ -37,6 +37,10 @@ target_compile_options(DcsQvBinauralCore PRIVATE /W4 /O2 /fp:precise /EHsc /perm
 target_compile_definitions(DcsQvBinauralCore PRIVATE ${DCSQV_DEFS})
 # kernels_avx2.cpp is the only file built with /arch:AVX2; it runs only when the CPU reports AVX2 and FMA.
 set_source_files_properties(${DCSQV_BINAURAL_DIR}/src/kernels_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+# Cockpit space (docs/COCKPIT_SPACE.md): the core's Room (native/binaural/src/room.cpp, include/binaural_room.h and
+# cockpit_space.h). The payload and the end-to-end test link it (DCSQV_HAVE_ROOM=1); DcsQvCullTests links the recording
+# fake Room of test/audio_fake_core.cpp instead.
+target_sources(DcsQvBinauralCore PRIVATE ${DCSQV_BINAURAL_DIR}/src/room.cpp)
 
 # Measurements and optimizations; can be replaced while DCS runs.
 set(DCSQV_PAYLOAD_SOURCES src/main.cpp src/d3d_vtbl.c)
@@ -54,7 +58,7 @@ target_compile_definitions(DcsQvCullPayload PRIVATE ${DCSQV_DEFS})
 target_include_directories(DcsQvCullPayload PRIVATE ${DCSQV_BINAURAL_INCLUDE})
 target_link_libraries(DcsQvCullPayload PRIVATE DcsQvBinauralCore)
 target_link_options(DcsQvCullPayload PRIVATE /Brepro)
-target_compile_definitions(DcsQvCullPayload PRIVATE DCSQV_HAVE_BINAURAL_CORE=1)
+target_compile_definitions(DcsQvCullPayload PRIVATE DCSQV_HAVE_BINAURAL_CORE=1 DCSQV_HAVE_ROOM=1)
 
 # Offline checks (frustum decoding, Scene.dll export lookup, timer cache, partition boost, kill switch, suite report).
 # The audio module's scenarios link a stand-in BinauralCore (test/audio_fake_core.cpp: a core whose output and refusals
@@ -63,7 +67,7 @@ target_compile_definitions(DcsQvCullPayload PRIVATE DCSQV_HAVE_BINAURAL_CORE=1)
 enable_testing()
 add_executable(DcsQvCullTests test/test_main.cpp src/d3d_vtbl.c test/audio_fake_core.cpp test/audio_rt_alloc.cpp)
 target_compile_options(DcsQvCullTests PRIVATE /W4 /O2 /wd4201 /bigobj $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
-target_compile_definitions(DcsQvCullTests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1)
+target_compile_definitions(DcsQvCullTests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1 DCSQV_HAVE_ROOM=1)
 target_include_directories(DcsQvCullTests PRIVATE ${DCSQV_BINAURAL_INCLUDE})
 target_link_libraries(DcsQvCullTests PRIVATE user32 kernel32)
 # The profiler check looks for its own module name in the samples.
@@ -90,7 +94,7 @@ set_tests_properties(DcsQvCullTests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 fail
 # radio centred, no allocation on the audio threads.
 add_executable(DcsQvCullAudioE2ETests test/audio_e2e_test.cpp src/d3d_vtbl.c test/audio_rt_alloc.cpp)
 target_compile_options(DcsQvCullAudioE2ETests PRIVATE /W4 /O2 /wd4201 /bigobj $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
-target_compile_definitions(DcsQvCullAudioE2ETests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1)
+target_compile_definitions(DcsQvCullAudioE2ETests PRIVATE UNICODE _UNICODE NOMINMAX DCSQV_HAVE_BINAURAL_CORE=1 DCSQV_HAVE_ROOM=1)
 target_include_directories(DcsQvCullAudioE2ETests PRIVATE ${DCSQV_BINAURAL_DIR}/test ${DCSQV_BINAURAL_DIR}/src)
 target_link_libraries(DcsQvCullAudioE2ETests PRIVATE DcsQvBinauralCore user32 kernel32)
 set_target_properties(DcsQvCullAudioE2ETests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test)
@@ -102,6 +106,14 @@ set_tests_properties(DcsQvCullAudioE2ETests PROPERTIES PASS_REGULAR_EXPRESSION "
 add_test(NAME DcsQvBinauralCoreAvx2Object
     COMMAND pwsh -NoProfile -File ${DCSQV_BINAURAL_DIR}/test/check_avx2_object.ps1 "$<TARGET_OBJECTS:DcsQvBinauralCore>")
 set_tests_properties(DcsQvBinauralCoreAvx2Object PROPERTIES PASS_REGULAR_EXPRESSION " 0 failure\\(s\\)")
+
+# Motion contract revision 4 (docs/FOCUS_MOTION.md): the vendored header compiles on its own, keeps the revision 3
+# layout for older readers, and its reader helpers (focus views, depth plane, previous slot) behave as documented.
+add_executable(DcsQvMotionContractTests test/motion_contract_test.cpp)
+target_compile_options(DcsQvMotionContractTests PRIVATE /W4 /WX /O2 /EHsc)
+target_compile_definitions(DcsQvMotionContractTests PRIVATE NOMINMAX)
+add_test(NAME DcsQvMotionContractTests COMMAND DcsQvMotionContractTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
+set_tests_properties(DcsQvMotionContractTests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 failure\\(s\\)" TIMEOUT 60)
 
 # The detour stub's code and pointer pages: a hot reload must never leave the stub without execute rights.
 add_executable(DcsQvCullDetourTests test/detour_test.cpp)

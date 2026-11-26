@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "audio_render.h"
+#include "audio_space.h"
 #include "audio_voice.h"
 
 namespace audsim {
@@ -41,6 +42,8 @@ struct Sim {
   MetaTable* meta = nullptr;
   audr::Counters* cnt = nullptr;
   audr::EvRing* ev = nullptr;
+  audspace::SpaceSlot* spaceOut = nullptr;  // cockpit space: published once per frame (null: not published)
+  audspace::SimSpace space;
   MetaData last[kSlots] = {};
   uint32_t prevFrame = 0;
   bool havePrev = false;
@@ -79,6 +82,7 @@ struct Sim {
 
   void Reset() {
     own.Reset();
+    space.Reset();
     memset(last, 0, sizeof(last));
     havePrev = false;
     winStart = 0;
@@ -166,6 +170,11 @@ inline void ReleaseAll(Sim& s, int64_t now) {
 //   epochReset: the render binding changed: every slot is dropped at once (the old render state is gone).
 inline void BeginFrame(Sim& s, const Cfg& cfg, const Env& e, uint32_t frame, bool epochReset) {
   Owner& o = s.own;
+  if (s.spaceOut) {  // cockpit space: the finished frame's inside flag, cockpit vote and aircraft frame
+    audspace::SpaceData sd;
+    audspace::BeginFrame(s.space, e.ctxArray, e.ctxCount, frame, e.now, e.freq, e.poseValid, e.q, e.poseBase, &sd);
+    audspace::SpaceWrite(*s.spaceOut, sd);
+  }
   if (o.haveFrame) {
     s.prevFrame = o.frame;
     s.havePrev = true;
@@ -327,6 +336,13 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   // both the same gains, its stereo kernels apply a to the left channel and b to the right).
   const uint32_t chans = Rd<uint32_t>(voice, off::kVChannels);
   const bool is3d = sound && Rd<uint64_t>(sound, off::kSndIs3D) != 0 && Rd<uint8_t>(voice, off::kVCtx2d) == 0;
+  // Cockpit space: every 3D sound of a 3D context votes for the cockpit context and carries the aircraft frame.
+  if (is3d && (s.space.gainReads || s.space.orientReads)) {
+    const void* sctx = Rd<void*>(sound, off::kSndCtx);
+    const uint32_t cid = CtxId(e, sctx);
+    if (cid < 8 && Rd<uint8_t>(sctx, off::kCtxIs2D) == 0)
+      audspace::Accumulate(s.space, cid, sound, Rd<double>(sound, off::kSndDist));
+  }
   bool q = cfg.on && e.boundRenderer && is3d && Rd<void*>(voice, off::kVRenderer) == e.boundRenderer &&
            e.engineState != off::kStateOffline && (chans == 1 || chans == 2);
   // Why not (the "audio: idle" line): counted only, the decision above is unchanged. A 2D sound (or a voice of a 2D
@@ -419,13 +435,17 @@ inline void PanVoice(Sim& s, const Cfg& cfg, const Env& e, void* voice, bool ini
   float tag[6];
   MakeTag(mt, tag);
   memcpy(static_cast<uint8_t*>(voice) + off::kVPendGain, tag, off::kTagBytes);
+  float cockpitGain = 1.0f;
+  const bool through = audspace::ThroughCanopy(s.space, Rd<void*>(sound, off::kSndCtx), sound, &cockpitGain);
   MetaData d = s.last[r->slot];
   d.voice = voice;
   d.gen = o.slotGen[r->slot];
   d.flags = meta_flags::kOwned | (r->initialOwned ? meta_flags::kInitial : 0u) |
             (e.poseValid ? meta_flags::kPoseValid : 0u) | (e.poseValid && e.posValid ? meta_flags::kPosValid : 0u) |
             (r->nearState == 2 ? meta_flags::kNear : 0u) | (stereo ? meta_flags::kStereo : 0u) |
-            (stereo && r->wide ? meta_flags::kWide : 0u);
+            (stereo && r->wide ? meta_flags::kWide : 0u) | (through ? meta_flags::kThroughCanopy : 0u) |
+            (ctxId == s.space.cockpitCtx ? meta_flags::kCockpitCtx : 0u);
+  d.cockpitGain = cockpitGain;
   d.frame = o.frame;
   d.ctx = ctxId;
   double p[3];

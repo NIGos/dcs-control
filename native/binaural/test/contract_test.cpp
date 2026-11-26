@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -10,6 +11,8 @@
 
 #include "binaural_config.h"
 #include "binaural_core.h"
+#include "binaural_room.h"
+#include "cockpit_space.h"
 #include "head_pose_shm.h"
 #include "hrtf_format.h"
 
@@ -175,7 +178,7 @@ static void TestHrtfFormat() {
 
 static void TestConfig() {
     using namespace binaural_config;
-    CHECK(kKeyCount == 10);
+    CHECK(kKeyCount == 13);
     for (int i = 0; i < kKeyCount; ++i) {
         const KeyInfo& k = kKeys[i];
         if (k.type != KeyType::Text) CHECK(k.defaultValue >= k.minValue && k.defaultValue <= k.maxValue);
@@ -206,6 +209,108 @@ static void TestConfig() {
     CHECK(std::fabs(TrimGain(-6.0f) - 0.5012f) < 1e-3f && std::fabs(TrimGain(100.0f) - 1.9953f) < 1e-3f);
 }
 
+// C1: the cockpit space headers (docs/COCKPIT_SPACE.md 8.1): keys, layouts, presets, the type table.
+static void TestCockpitSpace() {
+    using namespace binaural_config;
+    using namespace cockpit_space;
+    // Keys: the three new [Audio] keys with their defaults and ranges, and the AudioConfig defaults.
+    auto key = [](const wchar_t* name) -> const KeyInfo* {
+        for (const KeyInfo& k : kKeys)
+            if (std::wcscmp(k.name, name) == 0) return &k;
+        return nullptr;
+    };
+    const KeyInfo* cs = key(L"CockpitSpace");
+    const KeyInfo* fam = key(L"CockpitSpaceFamily");
+    const KeyInfo* can = key(L"CockpitSpaceCanopy");
+    CHECK(cs && cs->type == KeyType::Int && cs->defaultValue == 1 && cs->minValue == 0 && cs->maxValue == 3 && std::strcmp(cs->ui, "main") == 0);
+    CHECK(fam && fam->type == KeyType::Text && std::strcmp(fam->ui, "advanced") == 0);
+    CHECK(can && can->type == KeyType::Bool && can->defaultValue == 1 && std::strcmp(can->ui, "advanced") == 0);
+    AudioConfig def;
+    CHECK(def.cockpitSpace == 1 && std::wcscmp(def.cockpitSpaceFamily, L"auto") == 0 && def.cockpitSpaceCanopy);
+    CHECK(std::wcscmp(kTestSection, L"AudioTest") == 0 && sizeof(kTestKeys) / sizeof(kTestKeys[0]) == 4 &&
+          sizeof(kTestHotkeys) / sizeof(kTestHotkeys[0]) == 8);
+    CHECK(IsValidCockpitSpaceFamily(L"auto") && IsValidCockpitSpaceFamily(L" Bubble ") && IsValidCockpitSpaceFamily(L"transport"));
+    CHECK(!IsValidCockpitSpaceFamily(L"") && !IsValidCockpitSpaceFamily(L"bubbles") && !IsValidCockpitSpaceFamily(nullptr) &&
+          !IsValidCockpitSpaceFamily(L"generic generic generic"));
+
+    // Layouts (the module and the harness share these structs).
+    static_assert(sizeof(SurfaceParams) == 16, "SurfaceParams layout");
+    static_assert(sizeof(RoomParams) == 140, "RoomParams layout");
+    static_assert(offsetof(RoomParams, surface) == 8 && offsetof(RoomParams, earlyDb) == 104 &&
+                  offsetof(RoomParams, neutralShare) == 136, "RoomParams offsets");
+    static_assert(sizeof(binaural::RoomFrame) == 32 && offsetof(binaural::RoomFrame, frameValid) == 16 &&
+                  offsetof(binaural::RoomFrame, wet) == 20 && offsetof(binaural::RoomFrame, canopyOpen) == 24 &&
+                  offsetof(binaural::RoomFrame, early) == 28, "RoomFrame layout");
+    static_assert(sizeof(binaural::RoomSource) == 24 && offsetof(binaural::RoomSource, send) == 12 &&
+                  offsetof(binaural::RoomSource, flags) == 16 && offsetof(binaural::RoomSource, direct) == 20,
+                  "RoomSource layout");
+    CHECK(binaural::kRoomBuses == 14 && binaural::kRoomTaps == 8 && binaural::kRoomFdnLines == 8);
+    CHECK(binaural::room_flags::kReset == 1u && binaural::room_flags::kThroughCanopy == 2u && binaural::room_flags::kLateOnly == 4u);
+
+    // Presets: every family x strength is finite, every R < 1, RT60 > 0; strength steps as section 5.3.
+    for (int f = 0; f < static_cast<int>(Family::Count); ++f) {
+        RoomParams n{};
+        CHECK(Preset(static_cast<Family>(f), kStrengthNormal, &n));
+        for (int s = kStrengthSubtle; s <= kStrengthStrong; ++s) {
+            RoomParams p{};
+            CHECK(Preset(static_cast<Family>(f), s, &p));
+            bool ok = p.strength == s && static_cast<int>(p.family) == f;
+            for (const SurfaceParams& w : p.surface)
+                ok = ok && std::isfinite(w.distanceM) && w.distanceM > 0.1f && w.reflection > 0.0f && w.reflection < 1.0f &&
+                     w.lowpassHz >= 0.0f && w.highpassHz >= 0.0f;
+            ok = ok && p.rt60LowS > 0.0f && p.rt60HighS > 0.0f && p.preDelayMs > 0.0f && p.sendHpHz == 200.0f &&
+                 p.neutralShare == kNeutralShare && std::isfinite(p.earlyDb) && std::isfinite(p.lateDb);
+            const float de[] = {0, -4, 0, 3}, dl[] = {0, -5, 0, 4}, rt[] = {0, 0.9f, 1.0f, 1.2f};
+            ok = ok && p.earlyDb == n.earlyDb + de[s] && p.lateDb == n.lateDb + dl[s] && std::fabs(p.rt60LowS - n.rt60LowS * rt[s]) < 1e-6f;
+            CHECK(ok);
+            const RoomParams q = Sanitize(p);  // a preset is already in range
+            bool same = q.family == p.family && q.strength == p.strength && q.earlyDb == p.earlyDb && q.lateDb == p.lateDb &&
+                        q.rt60LowS == p.rt60LowS && q.rt60HighS == p.rt60HighS && q.crossoverHz == p.crossoverHz &&
+                        q.preDelayMs == p.preDelayMs && q.sendHpHz == p.sendHpHz && q.throughDb == p.throughDb &&
+                        q.neutralShare == p.neutralShare;
+            for (int w = 0; w < kSurfaces; ++w)
+                same = same && std::memcmp(&q.surface[w], &p.surface[w], sizeof(SurfaceParams)) == 0;
+            CHECK(same);
+        }
+        CHECK(!Preset(static_cast<Family>(f), 0, &n) && !Preset(static_cast<Family>(f), 4, &n));
+    }
+    // Section 5.2 spot checks: bubble canopy and helicopter rows.
+    RoomParams b{};
+    Preset(Family::Bubble, kStrengthNormal, &b);
+    CHECK(b.surface[kUp].distanceM == 0.25f && b.surface[kUp].reflection == 0.85f && b.surface[kUp].highpassHz == 300.0f &&
+          b.surface[kLeft].lowpassHz == 8000.0f && b.surface[kLeft].highpassHz == 250.0f && b.earlyDb == -12.0f &&
+          b.lateDb == -17.0f && b.rt60LowS == 0.10f && b.rt60HighS == 0.08f && b.preDelayMs == 2.0f);
+    RoomParams h{};
+    Preset(Family::Helicopter, kStrengthSubtle, &h);
+    CHECK(h.surface[kRight].distanceM == 0.90f && h.surface[kBack].distanceM == 1.20f && h.earlyDb == -15.0f && h.lateDb == -19.0f);
+    RoomParams bad = b;
+    bad.surface[kUp].reflection = 3.0f, bad.rt60LowS = std::nanf(""), bad.strength = 9;
+    const RoomParams cl = Sanitize(bad);
+    CHECK(cl.surface[kUp].reflection == 0.95f && std::isfinite(cl.rt60LowS) && cl.strength == 3);
+
+    // Families: keys round trip, the type table (exact, prefixes, unknown -> Generic).
+    for (int f = 0; f < static_cast<int>(Family::Count); ++f) {
+        Family g;
+        bool isAuto = true;
+        CHECK(ParseFamily(FamilyKey(static_cast<Family>(f)), &g, &isAuto) && g == static_cast<Family>(f) && !isAuto);
+    }
+    Family g;
+    bool isAuto = false;
+    CHECK(ParseFamily(L"AUTO", &g, &isAuto) && isAuto);
+    CHECK(FamilyForType("F-16C_50") == Family::Bubble && FamilyForType("FA-18C_hornet") == Family::Bubble);
+    CHECK(FamilyForType("F-14B") == Family::Framed && FamilyForType("Su-25T") == Family::Framed && FamilyForType("Su-27") == Family::Bubble);
+    CHECK(FamilyForType("UH-1H") == Family::Helicopter && FamilyForType("Mi-8MT") == Family::Helicopter && FamilyForType("Mi-24P") == Family::Framed);
+    CHECK(FamilyForType("P-51D-30-NA") == Family::Warbird && FamilyForType("SpitfireLFMkIXCW") == Family::Warbird);
+    CHECK(FamilyForType("C-130J-30") == Family::Transport && FamilyForType("C-101CC") == Family::Framed);
+    // Prefixes (case-insensitive, longest wins) for names not in the table.
+    CHECK(FamilyForType("f-16c_block70") == Family::Bubble && FamilyForType("F-14D") == Family::Framed &&
+          FamilyForType("Su-25TM") == Family::Framed && FamilyForType("FW-190A9") == Family::Warbird &&
+          FamilyForType("SA342X") == Family::Helicopter && FamilyForType("Hawk T.1A") == Family::Framed);
+    CHECK(FamilyForType("Yak-40") == Family::Generic && FamilyForType("") == Family::Generic && FamilyForType(nullptr) == Family::Generic);
+    // Every exact name resolves to its own entry (no earlier duplicate with another family).
+    for (const TypeEntry& e : kTypes) CHECK(FamilyForType(e.name) == e.family);
+}
+
 static void TestCoreDeclarations() {
     // The core is implemented in src/; here only its declarations are checked to be usable.
     binaural::Config c;
@@ -222,6 +327,7 @@ int main() {
     TestPoseRing();
     TestHrtfFormat();
     TestConfig();
+    TestCockpitSpace();
     TestCoreDeclarations();
     std::printf("%d check(s), %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

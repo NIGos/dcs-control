@@ -151,4 +151,108 @@ void FdAvx2(const float* table, const float* x, std::int32_t base, float d0, flo
 
 Set Avx2() { return {&FirAvx2, &FirNAvx2, &FdAvx2, "AVX2/FMA"}; }
 
+// The cockpit space's tap mix (room.cpp): acc[q][i] += (gs[q] + dg[q] i) src[i], i < n, q < nu (<= 6), eight frames at a
+// time, the source loaded once for all the tap's buses.
+void RoomMixAvx2(const float* src, float* const* acc, const float* gs, const float* dg, int nu, std::uint32_t n) {
+    __m256 g[6], st[6];
+    const __m256 ramp = _mm256_setr_ps(0, 1, 2, 3, 4, 5, 6, 7);
+    for (int q = 0; q < nu; ++q) {
+        g[q] = _mm256_fmadd_ps(_mm256_set1_ps(dg[q]), ramp, _mm256_set1_ps(gs[q]));
+        st[q] = _mm256_set1_ps(8.0f * dg[q]);
+    }
+    std::uint32_t i = 0;
+    if (nu == 3) {
+        __m256 ga = g[0], gb = g[1], gc = g[2];
+        float* pa = acc[0];
+        float* pb = acc[1];
+        float* pc = acc[2];
+        for (; i + 8 <= n; i += 8) {
+            const __m256 x = _mm256_loadu_ps(src + i);
+            _mm256_storeu_ps(pa + i, _mm256_fmadd_ps(ga, x, _mm256_loadu_ps(pa + i)));
+            _mm256_storeu_ps(pb + i, _mm256_fmadd_ps(gb, x, _mm256_loadu_ps(pb + i)));
+            _mm256_storeu_ps(pc + i, _mm256_fmadd_ps(gc, x, _mm256_loadu_ps(pc + i)));
+            ga = _mm256_add_ps(ga, st[0]), gb = _mm256_add_ps(gb, st[1]), gc = _mm256_add_ps(gc, st[2]);
+        }
+    } else {
+        for (; i + 8 <= n; i += 8) {
+            const __m256 x = _mm256_loadu_ps(src + i);
+            for (int q = 0; q < nu; ++q) {
+                _mm256_storeu_ps(acc[q] + i, _mm256_fmadd_ps(g[q], x, _mm256_loadu_ps(acc[q] + i)));
+                g[q] = _mm256_add_ps(g[q], st[q]);
+            }
+        }
+    }
+    for (; i < n; ++i)
+        for (int q = 0; q < nu; ++q) acc[q][i] += (gs[q] + dg[q] * static_cast<float>(i)) * src[i];
+}
+
+namespace {
+// 8x8 transpose of r[0..7] (rows -> columns).
+inline void Transpose8(__m256* r) {
+    const __m256 t0 = _mm256_unpacklo_ps(r[0], r[1]), t1 = _mm256_unpackhi_ps(r[0], r[1]);
+    const __m256 t2 = _mm256_unpacklo_ps(r[2], r[3]), t3 = _mm256_unpackhi_ps(r[2], r[3]);
+    const __m256 t4 = _mm256_unpacklo_ps(r[4], r[5]), t5 = _mm256_unpackhi_ps(r[4], r[5]);
+    const __m256 t6 = _mm256_unpacklo_ps(r[6], r[7]), t7 = _mm256_unpackhi_ps(r[6], r[7]);
+    const __m256 u0 = _mm256_shuffle_ps(t0, t2, 0x44), u1 = _mm256_shuffle_ps(t0, t2, 0xee);
+    const __m256 u2 = _mm256_shuffle_ps(t1, t3, 0x44), u3 = _mm256_shuffle_ps(t1, t3, 0xee);
+    const __m256 u4 = _mm256_shuffle_ps(t4, t6, 0x44), u5 = _mm256_shuffle_ps(t4, t6, 0xee);
+    const __m256 u6 = _mm256_shuffle_ps(t5, t7, 0x44), u7 = _mm256_shuffle_ps(t5, t7, 0xee);
+    r[0] = _mm256_permute2f128_ps(u0, u4, 0x20), r[1] = _mm256_permute2f128_ps(u1, u5, 0x20);
+    r[2] = _mm256_permute2f128_ps(u2, u6, 0x20), r[3] = _mm256_permute2f128_ps(u3, u7, 0x20);
+    r[4] = _mm256_permute2f128_ps(u0, u4, 0x31), r[5] = _mm256_permute2f128_ps(u1, u5, 0x31);
+    r[6] = _mm256_permute2f128_ps(u2, u6, 0x31), r[7] = _mm256_permute2f128_ps(u3, u7, 0x31);
+}
+}  // namespace
+
+// The wall filters: eight pairs per vector, two vectors side by side (two independent FMA recursions per frame), eight
+// frames at a time through an 8x8 transpose; hs = (1 - hb) hs + hb x is one FMA on its chain (hb x off it), as is ls.
+void RoomPairsAvx2(const float* const* in, float* const* out, const float* hb, const float* la, float* hs, float* ls,
+                   int count, std::uint32_t n) {
+    const __m256 one = _mm256_set1_ps(1.0f);
+    for (int g0 = 0; g0 < count; g0 += 16) {
+        const int ng = count - g0 > 8 ? 2 : 1;
+        __m256 vhb[2], vla[2], vch[2], vcl[2], vhs[2], vls[2];
+        for (int g = 0; g < ng; ++g) {
+            const int b = g0 + 8 * g;
+            vhb[g] = _mm256_loadu_ps(hb + b), vla[g] = _mm256_loadu_ps(la + b);
+            vch[g] = _mm256_sub_ps(one, vhb[g]), vcl[g] = _mm256_sub_ps(one, vla[g]);
+            vhs[g] = _mm256_loadu_ps(hs + b), vls[g] = _mm256_loadu_ps(ls + b);
+        }
+        std::uint32_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m256 r[2][8];
+            for (int g = 0; g < ng; ++g) {
+                const int b = g0 + 8 * g;
+                for (int l = 0; l < 8; ++l) r[g][l] = _mm256_loadu_ps(in[b + l] + i);
+                Transpose8(r[g]);
+            }
+            for (int f = 0; f < 8; ++f)
+                for (int g = 0; g < ng; ++g) {
+                    const __m256 x = r[g][f];
+                    vhs[g] = _mm256_fmadd_ps(vch[g], vhs[g], _mm256_mul_ps(vhb[g], x));
+                    vls[g] = _mm256_fmadd_ps(vcl[g], vls[g], _mm256_mul_ps(vla[g], _mm256_sub_ps(x, vhs[g])));
+                    r[g][f] = vls[g];
+                }
+            for (int g = 0; g < ng; ++g) {
+                const int b = g0 + 8 * g;
+                Transpose8(r[g]);
+                for (int l = 0; l < 8; ++l) _mm256_storeu_ps(out[b + l] + i, _mm256_add_ps(_mm256_loadu_ps(out[b + l] + i), r[g][l]));
+            }
+        }
+        for (int g = 0; g < ng; ++g) {
+            const int b = g0 + 8 * g;
+            float h8[8], l8[8];
+            _mm256_storeu_ps(h8, vhs[g]), _mm256_storeu_ps(l8, vls[g]);
+            for (std::uint32_t k = i; k < n; ++k)
+                for (int l = 0; l < 8; ++l) {
+                    const float x = in[b + l][k];
+                    h8[l] = FmaSs(1.0f - hb[b + l], h8[l], hb[b + l] * x);
+                    l8[l] = FmaSs(1.0f - la[b + l], l8[l], la[b + l] * (x - h8[l]));
+                    out[b + l][k] += l8[l];
+                }
+            for (int l = 0; l < 8; ++l) hs[b + l] = h8[l], ls[b + l] = l8[l];
+        }
+    }
+}
+
 }  // namespace binaural::kernels

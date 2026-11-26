@@ -23,7 +23,7 @@
       "copies": [
         "external/ofxr-djules75/include/xrfg/dcsvr_cockpit_depth.h"
       ],
-      "sha256": "AE0E99EAF06F8239F7D53B63E772D064202537D11F37B45F9CFB1B43D403C22B"
+      "sha256": "4769A59E3824EBB28E9115F3F7700B2658F9EBAAEE617D9F11F4B7FF57AC7F63"
     },
     {
       "name": "dcsvr_motion.h",
@@ -31,7 +31,7 @@
       "copies": [
         "external/ofxr-djules75/include/xrfg/dcsvr_motion.h"
       ],
-      "sha256": "91E8CE6625EFCF5FC97D22A9E69D177BA919AFB683513DDE98F77D7C259B8A6F"
+      "sha256": "B48BAA0D2CABA37E136113230998EC45B3D3FE4DE4E2EF0F6C72E9ECC3BFB4B5"
     },
     {
       "name": "dcsvr_symbology.h",

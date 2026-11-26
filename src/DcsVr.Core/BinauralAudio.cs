@@ -62,6 +62,33 @@ public static partial class Binaural
         return text.Equals(DefaultHrtf, StringComparison.OrdinalIgnoreCase) ? "default-personal" : text;
     }
 
+    // ---- Cockpit space (docs/COCKPIT_SPACE.md section 7) -------------------------------------------------------------
+
+    /// <summary>[Audio] CockpitSpace: 0 Off, 1 Subtle (default), 2 Normal, 3 Strong.</summary>
+    public const int CockpitSpaceMin = 0, CockpitSpaceMax = 3, CockpitSpaceDefault = 1;
+    /// <summary>The level names, as the module logs them ("audio: cockpit space: Subtle (...)") and the page shows them.</summary>
+    public static IReadOnlyList<string> CockpitSpaceLevels { get; } = ["Off", "Subtle", "Normal", "Strong"];
+    /// <summary>[Audio] CockpitSpaceFamily: "auto" (from the aircraft flown) or a family id (cockpit_space.h).</summary>
+    public const string CockpitFamilyAuto = "auto";
+    /// <summary>The families (id, name on the page), in the page's order; "auto" first.</summary>
+    public static IReadOnlyList<(string Id, string Title)> CockpitFamilies { get; } =
+    [
+        (CockpitFamilyAuto, "Automatic"), ("bubble", "Bubble canopy"), ("framed", "Framed canopy"), ("helicopter", "Helicopter cabin"),
+        ("warbird", "Warbird"), ("transport", "Transport flight deck"), ("generic", "Generic"),
+    ];
+    /// <summary>A family id the module knows (case-insensitive), "auto" included.</summary>
+    public static bool IsCockpitFamily(string? id) => CockpitFamilies.Any(f => f.Id.Equals((id ?? "").Trim(), StringComparison.OrdinalIgnoreCase));
+    /// <summary>A profile's family as written: trimmed and lower case; null or blank is "auto". An unknown name is kept
+    /// (Checks names it; the writer writes "auto" for it).</summary>
+    public static string NormalizeCockpitFamily(string? id) => string.IsNullOrWhiteSpace(id) ? CockpitFamilyAuto : id.Trim().ToLowerInvariant();
+    /// <summary>The CockpitSpaceFamily value written: the family when known, else "auto".</summary>
+    public static string CockpitFamilyValue(string? id) => IsCockpitFamily(id) ? NormalizeCockpitFamily(id) : CockpitFamilyAuto;
+    /// <summary>The page's name of a family id ("bubble" → "Bubble canopy"); the id itself when unknown.</summary>
+    public static string CockpitFamilyTitle(string? id) =>
+        CockpitFamilies.FirstOrDefault(f => f.Id.Equals((id ?? "").Trim(), StringComparison.OrdinalIgnoreCase)).Title ?? (id ?? "");
+    /// <summary>The level's name ("Subtle"); out of range clamped.</summary>
+    public static string CockpitSpaceName(int level) => CockpitSpaceLevels[Math.Clamp(level, CockpitSpaceMin, CockpitSpaceMax)];
+
     /// <summary>"1, 3,5" → bits 1, 3 and 5 (binaural_config.h ParseExcludeContexts): integers 0 to 7, commas, spaces.
     /// Empty or null is no context.</summary>
     public static bool TryParseExcludeContexts(string? text, out uint mask)
@@ -134,23 +161,30 @@ public static partial class Binaural
 
     /// <summary>What the payload file carries, read once per size and time: the audio part (the UTF-16 name HRTF_DEFAULT
     /// anywhere in the image) and the generic set (the RCDATA resource HRTF_DEFAULT with data).</summary>
-    private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Audio, bool DefaultHrtf)> PayloadCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, (long Length, DateTime Written, bool Audio, bool DefaultHrtf, bool CockpitSpace)> PayloadCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly byte[] EmbeddedMarker = Encoding.Unicode.GetBytes("HRTF_DEFAULT");
-    private static (bool Audio, bool DefaultHrtf) PayloadFacts(string? payloadPath)
+    /// <summary>The cockpit space key in binaural_config.h's table (wide strings, as the module reads the ini).</summary>
+    private static readonly byte[] CockpitSpaceMarker = Encoding.Unicode.GetBytes("CockpitSpaceFamily");
+    private static (bool Audio, bool DefaultHrtf, bool CockpitSpace) PayloadFacts(string? payloadPath)
     {
         if (payloadPath is null) return default;
         try
         {
             var info = new FileInfo(payloadPath);
             if (!info.Exists || info.Length > 256L * 1024 * 1024) return default;
-            if (PayloadCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return (cached.Audio, cached.DefaultHrtf);
+            if (PayloadCache.TryGetValue(info.FullName, out var cached) && cached.Length == info.Length && cached.Written == info.LastWriteTimeUtc) return (cached.Audio, cached.DefaultHrtf, cached.CockpitSpace);
             var bytes = File.ReadAllBytes(info.FullName);
-            var facts = (Audio: bytes.AsSpan().IndexOf(EmbeddedMarker) >= 0, DefaultHrtf: PeResource.Find(bytes, PeResource.RcData, "HRTF_DEFAULT") is { Length: > 0 });
-            PayloadCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, facts.Audio, facts.DefaultHrtf);
+            var audio = bytes.AsSpan().IndexOf(EmbeddedMarker) >= 0;
+            var facts = (Audio: audio, DefaultHrtf: PeResource.Find(bytes, PeResource.RcData, "HRTF_DEFAULT") is { Length: > 0 }, CockpitSpace: audio && bytes.AsSpan().IndexOf(CockpitSpaceMarker) >= 0);
+            PayloadCache[info.FullName] = (info.Length, info.LastWriteTimeUtc, facts.Audio, facts.DefaultHrtf, facts.CockpitSpace);
             return facts;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return default; }
     }
+
+    /// <summary>The installed payload's audio part has cockpit space (it reads [Audio] CockpitSpace*: the key name is in
+    /// its key table). An earlier one ignores those keys, so Live mode must not report a change there as applied.</summary>
+    public static bool PayloadHasCockpitSpace(string? payloadPath) => PayloadFacts(payloadPath).CockpitSpace;
 
     /// <summary>The payload embeds the generic HRTF set: an RCDATA resource named HRTF_DEFAULT with data in its PE resource
     /// directory (binaural_config.h kEmbeddedResourceName; native/dcsqvcull embeds native/binaural/data/sadie2_ku100.dcshrtf
@@ -201,9 +235,11 @@ public static partial class Binaural
             if (line.Contains(" audio: ", StringComparison.Ordinal) || line.StartsWith("audio: ", StringComparison.Ordinal)) lines.Add(line);
         }
         string? state = null, reason = null, hrtf = null, fallback = null, fallbackWhy = null; int? sounds = null, maxNow = null; double? cost = null; bool? pose = null; var backoffs = 0; var switchedOff = false; var started = false;
+        var space = new CockpitSpaceStatus();
         foreach (var line in lines)
         {
             var text = line[(line.IndexOf("audio: ", StringComparison.Ordinal) + 7)..].Trim();
+            if (text.StartsWith(CockpitSpacePrefix, StringComparison.Ordinal)) { space = space.With(text[CockpitSpacePrefix.Length..]); continue; }
             if (text.StartsWith("off (", StringComparison.Ordinal))
             {
                 state = "off"; reason = Inside(text[3..]);
@@ -226,6 +262,7 @@ public static partial class Binaural
                 if (SoundsRegex().Match(text) is { Success: true } s) sounds = int.Parse(s.Groups[1].Value, CultureInfo.InvariantCulture);
                 if (P99Regex().Match(text) is { Success: true } c && double.TryParse(c.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var ms)) cost = ms;
                 if (PoseRegex().Match(text) is { Success: true } p) pose = p.Groups[1].Value switch { "on" => true, "off" => false, _ => (bool?)null };
+                space = space.WithRunning(text);
             }
             if (BudgetRegex().Match(text) is { Success: true } b)
             {
@@ -237,17 +274,18 @@ public static partial class Binaural
         hrtf = Named(hrtf); fallback = Named(fallback);
         var settingsOff = state == "off" && reason == SettingsOffReason;
         // Off in the deployed settings: off in this profile, unless DCS runs and the module said it switched off live.
+        var reported = space.Level is null && space.EarlyOffs == 0 ? null : space;
         if (enabled == false && !(dcsRunning && settingsOff)) return new("disabled", "Off in this profile. DCS's own sound plays.", Lines: tail);
         if (state is null)
-            return new("waiting", dcsRunning ? "Waiting for DCS's sound engine." : "Installed for the next DCS start.", Lines: tail);
+            return new("waiting", dcsRunning ? "Waiting for DCS's sound engine." : "Installed for the next DCS start.", Lines: tail) { CockpitSpace = reported };
         if (settingsOff)
-            return new("switched-off", "Switched off in the settings. DCS's own sound plays.", null, Backoffs: backoffs, SwitchedOff: true, Hrtf: hrtf, Lines: tail) { SwitchedOffBy = "settings", Started = started };
-        if (state == "off") return new("off", $"Off: {reason}. DCS's own sound plays.", reason, Backoffs: backoffs, Lines: tail) { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, Started = started };
+            return new("switched-off", "Switched off in the settings. DCS's own sound plays.", null, Backoffs: backoffs, SwitchedOff: true, Hrtf: hrtf, Lines: tail) { SwitchedOffBy = "settings", Started = started, CockpitSpace = reported };
+        if (state == "off") return new("off", $"Off: {reason}. DCS's own sound plays.", reason, Backoffs: backoffs, Lines: tail) { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, Started = started, CockpitSpace = reported };
         var parts = new List<string> { switchedOff ? "Switched off in flight" : dcsRunning ? "Running" : "Ran at the last DCS start" };
         if (sounds is { } n) parts.Add(n == 1 ? "1 sound" : n + " sounds");
         if (cost is { } t) parts.Add(t.ToString("0.0#", CultureInfo.InvariantCulture) + " ms");
         return new(switchedOff ? "switched-off" : "running", string.Join(" · ", parts), null, sounds, cost, backoffs, maxNow, switchedOff, hrtf, pose, tail)
-            { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, SwitchedOffBy = switchedOff ? "key" : null, Started = started };
+            { HrtfFallback = fallback, HrtfFallbackReason = fallbackWhy, SwitchedOffBy = switchedOff ? "key" : null, Started = started, CockpitSpace = reported };
 
         // The module's "personal": the set Launch DCS deployed (the ini's Hrtf) when that is one of the pilot's.
         string? Named(string? name) =>
@@ -258,6 +296,9 @@ public static partial class Binaural
             return open >= 0 && close > open ? text[(open + 1)..close].Trim() : text.Trim('(', ')', ' ');
         }
     }
+
+    /// <summary>Cockpit space's log lines start with this after "audio: " (docs/COCKPIT_SPACE.md section 8.5).</summary>
+    public const string CockpitSpacePrefix = "cockpit space: ";
 
     /// <summary>The module's line when its settings turn 3D audio off (native/dcsqvcull/src/main/audio.inc).</summary>
     public const string SettingsOffReason = "binaural is off in the settings";
@@ -298,7 +339,8 @@ public static partial class Binaural
 
     [GeneratedRegex(@"^([\w. -]+?) not found \(")] private static partial Regex NotFoundRegex();
     [GeneratedRegex(@"^(?:on \(.*?, )?HRTF ([\w .-]+?)(?=: \d+ directions| \(crossfading\))")] private static partial Regex HrtfRegex();
-    [GeneratedRegex(@"; head pose (on|off|unused)\s*$")] private static partial Regex PoseRegex();
+    // Not anchored at the end: cockpit space appends its own part to the running line.
+    [GeneratedRegex(@"; head pose (on|off|unused)\b")] private static partial Regex PoseRegex();
     [GeneratedRegex(@"^running, (\d+) sounds?\b")] private static partial Regex SoundsRegex();
     [GeneratedRegex(@"\bp99 (\d+(?:\.\d+)?) ms\b")] private static partial Regex P99Regex();
     [GeneratedRegex(@"^CPU budget: at most (\d+) sounds now\b")] private static partial Regex BudgetRegex();
@@ -329,6 +371,67 @@ public sealed record AudioStatus(string State, string Summary, string? Reason = 
     public string? HrtfFallbackReason { get; init; }
     /// <summary>The module started binaural audio in this session (an "on (" line after the last "loader started").</summary>
     public bool Started { get; init; }
+    /// <summary>Cockpit space as the module's log has it; null when it logged nothing about it (off, or a module without it).</summary>
+    public CockpitSpaceStatus? CockpitSpace { get; init; }
+}
+
+/// <summary>
+/// Cockpit space in the module's log (docs/COCKPIT_SPACE.md section 8.5):
+///   audio: cockpit space: &lt;Off|Subtle|Normal|Strong|Test&gt; (&lt;family&gt; &lt;auto|setting&gt;, aircraft &lt;type|unknown&gt;)
+///   audio: cockpit space: inside &lt;0|1&gt;, canopy &lt;0.00..1.00|unknown&gt; (&lt;mech|arg38|none&gt;)
+///   audio: cockpit space: early reflections off (CPU budget) | early reflections on again
+///   audio: running, ...; space &lt;level&gt; &lt;family&gt; inside &lt;0|1&gt; wet voices &lt;n&gt; early &lt;on|off&gt; room p99 &lt;ms&gt; ms, direct &lt;dB&gt; dB
+/// </summary>
+public sealed partial record CockpitSpaceStatus
+{
+    /// <summary>"Off", "Subtle", "Normal", "Strong", or "Test" while the listening test plays a level it does not name.</summary>
+    public string? Level { get; init; }
+    /// <summary>The family in use (cockpit_space.h id: bubble, framed, helicopter, warbird, transport, generic).</summary>
+    public string? Family { get; init; }
+    /// <summary>The family is the pilot's choice (Cockpit type), not picked from the aircraft.</summary>
+    public bool FamilyFromSetting { get; init; }
+    /// <summary>The aircraft's unit type as DCS reports it; null when unknown.</summary>
+    public string? Aircraft { get; init; }
+    /// <summary>The listener is in the cockpit (not an outside view); null when not said.</summary>
+    public bool? Inside { get; init; }
+    /// <summary>Canopy 0 closed .. 1 open; null when unknown.</summary>
+    public double? Canopy { get; init; }
+    /// <summary>Times the early reflections went off to stay within the CPU budget.</summary>
+    public int EarlyOffs { get; init; }
+    /// <summary>The early reflections are off now (CPU budget).</summary>
+    public bool EarlyOff { get; init; }
+    /// <summary>Sounds with the space at the last running line, and the room's p99 per block there.</summary>
+    public int? WetVoices { get; init; }
+    public double? RoomCostMs { get; init; }
+
+    /// <summary>The page's line: "In the cockpit: F-16C_50, bubble canopy." Null when the aircraft is unknown or the space is off.</summary>
+    public string? Summary => Aircraft is null || Level is null || Level == "Off" || Family is null ? null
+        : $"In the cockpit: {Aircraft}, {Binaural.CockpitFamilyTitle(Family).ToLowerInvariant()}{(FamilyFromSetting ? " (your choice)" : "")}.";
+
+    /// <summary>This status with one "cockpit space: " line (the text after the prefix) taken in.</summary>
+    public CockpitSpaceStatus With(string text)
+    {
+        if (LevelRegex().Match(text) is { Success: true } m)
+            return this with { Level = m.Groups[1].Value, Family = m.Groups[2].Value, FamilyFromSetting = m.Groups[3].Value == "setting", Aircraft = m.Groups[4].Value.Trim() is var a && a.Length > 0 && a != "unknown" ? a : null };
+        if (StateRegex().Match(text) is { Success: true } s)
+            return this with { Inside = s.Groups[1].Value == "1", Canopy = double.TryParse(s.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var c) && double.IsFinite(c) ? Math.Clamp(c, 0, 1) : null };
+        if (text.StartsWith("early reflections off", StringComparison.Ordinal)) return this with { EarlyOffs = EarlyOffs + 1, EarlyOff = true };
+        if (text.StartsWith("early reflections on", StringComparison.Ordinal)) return this with { EarlyOff = false };
+        return this;
+    }
+
+    /// <summary>This status with the space part of a "running," line taken in (the text after "audio: ").</summary>
+    public CockpitSpaceStatus WithRunning(string text) => RunningRegex().Match(text) is { Success: true } r
+        ? this with
+        {
+            Level = r.Groups[1].Value, Family = r.Groups[2].Value, Inside = r.Groups[3].Value == "1", WetVoices = int.Parse(r.Groups[4].Value, CultureInfo.InvariantCulture),
+            EarlyOff = r.Groups[5].Value == "off", RoomCostMs = double.Parse(r.Groups[6].Value, CultureInfo.InvariantCulture),
+        }
+        : this;
+
+    [GeneratedRegex(@"^(Off|Subtle|Normal|Strong|Test) \((\w+) (auto|setting), aircraft (.*)\)\s*$")] private static partial Regex LevelRegex();
+    [GeneratedRegex(@"^inside ([01]), canopy (\d+(?:\.\d+)?|unknown) \((?:mech|arg38|none)\)")] private static partial Regex StateRegex();
+    [GeneratedRegex(@"\bspace (Off|Subtle|Normal|Strong) (\w+) inside ([01]) wet voices (\d+) early (on|off) room p99 (\d+(?:\.\d+)?) ms")] private static partial Regex RunningRegex();
 }
 
 /// <summary>Reads one resource's data from a PE image's resource directory (no loading, no execution).</summary>

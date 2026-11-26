@@ -18,13 +18,37 @@
 #include <string>
 
 #include "binaural_config.h"
+#include "cockpit_space.h"  // the cockpit space's families (native/binaural)
 
 namespace audcfg {
 
 using binaural_config::AudioConfig;
 
+// Cockpit space (docs/COCKPIT_SPACE.md 7): [Audio] CockpitSpace 0..3 (Off, Subtle, Normal, Strong; default 1),
+// CockpitSpaceFamily auto | a family key (default auto), CockpitSpaceCanopy 0/1 (default 1). All Live. The keys are in
+// binaural_config.h's table (kKeys); the ranges spelt out here are the same.
+//
+// The listening test (docs/COCKPIT_SPACE.md 11): [AudioTest] Active=1 with Level 0..3 plays that level in place of
+// CockpitSpace (testLevel; -1 none: the pilot's own). Live like the rest. While it is set the module never names the
+// level it plays (log lines, running line): the pilot rates blind.
+struct SpaceConfig {
+  int level = 1;
+  bool familyAuto = true;
+  cockpit_space::Family family = cockpit_space::Family::Generic;  // with familyAuto false
+  bool canopy = true;
+  int testLevel = -1;  // [AudioTest] Level while Active=1, else -1
+  int Effective() const { return testLevel >= 0 ? testLevel : level; }
+  bool Blind() const { return testLevel >= 0; }
+};
+constexpr int kSpaceLevelDefault = 1, kSpaceLevelMax = 3;
+inline bool SameSpace(const SpaceConfig& a, const SpaceConfig& b) {
+  return a.level == b.level && a.familyAuto == b.familyAuto && a.family == b.family && a.canopy == b.canopy &&
+         a.testLevel == b.testLevel;
+}
+
 struct Read {
   AudioConfig cfg;
+  SpaceConfig space;
   int toggleVk = 0, toggleMods = 0;  // [Hotkeys] AudioToggle (default none)
   char notes[4][160] = {};           // clamped / invalid values (the control thread logs each once)
   int noteCount = 0;
@@ -112,6 +136,51 @@ inline Read ReadIni(const wchar_t* ini) {
     c.excludeContextMask = mask;
   }
   c.logVoices = Number(r, ini, L"LogVoices") != 0;
+  {  // cockpit space
+    SpaceConfig& s = r.space;
+    wchar_t buf[64] = {};
+    GetPrivateProfileStringW(binaural_config::kSection, L"CockpitSpace", L"", buf, 64, ini);
+    if (buf[0]) {
+      wchar_t* end = nullptr;
+      const double v = wcstod(buf, &end);
+      while (end && (*end == L' ' || *end == L'\t')) ++end;
+      if (end == buf || (end && *end) || !std::isfinite(v)) {
+        Note(r, "audio: config: CockpitSpace=%ls is not a number, %d", buf, kSpaceLevelDefault);
+      } else {
+        const long l = std::lround(binaural_config::Clamp(v, 0, kSpaceLevelMax));
+        if (static_cast<double>(l) != v) Note(r, "audio: config: CockpitSpace=%ls out of range, %ld", buf, l);
+        s.level = static_cast<int>(l);
+      }
+    }
+    GetPrivateProfileStringW(binaural_config::kSection, L"CockpitSpaceFamily", L"auto", buf, 64, ini);
+    bool isAuto = true;
+    cockpit_space::Family f = cockpit_space::Family::Generic;
+    if (!buf[0]) {
+      s.familyAuto = true;
+    } else if (cockpit_space::ParseFamily(buf, &f, &isAuto)) {
+      s.familyAuto = isAuto;
+      s.family = isAuto ? cockpit_space::Family::Generic : f;
+    } else {
+      Note(r, "audio: config: CockpitSpaceFamily is not a cockpit type (%zu characters), auto", wcslen(buf));
+      s.familyAuto = true;
+    }
+    GetPrivateProfileStringW(binaural_config::kSection, L"CockpitSpaceCanopy", L"", buf, 64, ini);
+    if (buf[0]) {
+      wchar_t* end = nullptr;
+      const double v = wcstod(buf, &end);
+      if (end == buf || !std::isfinite(v)) Note(r, "audio: config: CockpitSpaceCanopy=%ls is not a number, 1", buf);
+      else s.canopy = v != 0;
+    }
+    // [AudioTest] (binaural_config::kTestSection): Level counts only with Active=1 and a whole number 0..3; anything
+    // else is the pilot's own level (never noted: the app writes the section, and a note would name the level).
+    GetPrivateProfileStringW(binaural_config::kTestSection, L"Active", L"", buf, 64, ini);
+    if (!wcscmp(buf, L"1")) {
+      GetPrivateProfileStringW(binaural_config::kTestSection, L"Level", L"", buf, 64, ini);
+      wchar_t* end = nullptr;
+      const long l = buf[0] ? wcstol(buf, &end, 10) : -1;
+      if (buf[0] && end && !*end && l >= 0 && l <= kSpaceLevelMax) s.testLevel = static_cast<int>(l);
+    }
+  }
   {
     wchar_t hk[64] = {};
     GetPrivateProfileStringW(binaural_config::kHotkeySection, L"AudioToggle", L"0:0", hk, 64, ini);

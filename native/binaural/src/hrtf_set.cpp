@@ -262,6 +262,47 @@ HrtfSet* LoadHrtf(const void* data, std::size_t bytes, std::uint32_t deviceRate,
 
 void ReleaseHrtf(HrtfSet* set) { delete set; }
 
+HrtfSet* CopyHrtfShortened(const HrtfSet& src, std::uint32_t taps, double* worstKept) {
+    taps = std::clamp<std::uint32_t>((taps + 7u) & ~7u, 16u, src.taps);
+    std::unique_ptr<HrtfSet> set(new (std::nothrow) HrtfSet());
+    if (!set) return nullptr;
+    try {
+        HrtfSet& s = *set;
+        s.sampleRate = src.sampleRate, s.fileRate = src.fileRate, s.directions = src.directions, s.triangles = src.triangles;
+        s.taps = taps;
+        s.datasetHeadRadiusM = src.datasetHeadRadiusM, s.nearFromM = src.nearFromM, s.delayBase = src.delayBase;
+        std::memcpy(s.name, src.name, sizeof(s.name));
+        s.dir = src.dir, s.delay = src.delay, s.tri = src.tri, s.triInv = src.triInv, s.adj = src.adj, s.seed = src.seed;
+        s.serial = g_serial.fetch_add(1);
+        const std::size_t count = std::size_t(s.directions) * 2u * taps;
+        s.irStorage.reset(new float[count + 8]);
+        s.ir = reinterpret_cast<float*>((reinterpret_cast<std::uintptr_t>(s.irStorage.get()) + 31u) & ~std::uintptr_t(31));
+        // A raised-cosine fade over the last quarter (at most 16 taps) of the kept part: no step at the cut.
+        const std::uint32_t fade = std::min<std::uint32_t>(16u, taps / 4u);
+        double worst = 1.0;
+        for (std::uint32_t d = 0; d < s.directions; ++d) {
+            for (int ear = 0; ear < 2; ++ear) {
+                const float* in = src.Ir(d, ear);
+                float* out = s.ir + (std::size_t(d) * 2u + ear) * taps;
+                double eAll = 0.0, eKept = 0.0;
+                for (std::uint32_t t = 0; t < src.taps; ++t) eAll += double(in[t]) * in[t];
+                for (std::uint32_t t = 0; t < taps; ++t) {
+                    float g = 1.0f;
+                    if (taps != src.taps && t >= taps - fade)
+                        g = 0.5f + 0.5f * static_cast<float>(std::cos(dsp::kPi * double(t - (taps - fade) + 1) / double(fade + 1)));
+                    out[t] = in[t] * g;
+                    eKept += double(out[t]) * out[t];
+                }
+                if (eAll > 0.0) worst = std::min(worst, eKept / eAll);
+            }
+        }
+        if (worstKept) *worstKept = worst;
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+    return set.release();
+}
+
 HrtfInfo DescribeHrtf(const HrtfSet* set) {
     HrtfInfo info{};
     if (!set) return info;

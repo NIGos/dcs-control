@@ -1,0 +1,925 @@
+Frame-generation diagnosis dump (DCS Control, 2026-11-26, dev only): what the MV composition decided per pixel.
+Off unless the process has XRFG_DEV_FG_DIAG=1 and a folder (XRFG_DEV_FG_DIAG_DIR, else the capture layer's
+RIGTAP_DIR); without them nothing is made and every composition is the build before this patch, byte for byte.
+- A trigger file <folder>\fgdiag.txt (pairs, every, delay_ms, seconds, tag, window=l,r,u,d tangents, eye) starts a
+  session; it is renamed fgdiag.taken-<n>.txt. From delay_ms on, each synthesizer with that eye dumps up to `pairs`
+  of its pairs with DCS's MVs into <folder>\fgdiag<n>_<tag>\ (s<owner>_p<k>.bin + .json, s<owner>_pairs.csv).
+- A dumped pair binds the _extras twin of its composition (the records' code is compiled there only; with no quality
+  bit it composes exactly as the plain one) with UseGameMotion bit 28 on the dumped view. Its u0 is then the
+  synthesizer's diagnosis buffer: the counters copied in before and back after (their semantics unchanged), the dump
+  rectangle and magic written at byte 128 (WriteBufferImmediate), one 8-byte record per pixel and output from 256:
+  the path (cockpit mask, no usable MV, samples outside, gather MV, scatter MV), the gather's cell flags and class,
+  the scatter candidate's class, consistency and choice, the sky rule, the still-content guard, the strict check,
+  the final weight, the colour check's weight, the disagreement and the mask value.
+- After the composition the records, the resampled grid's three slices and the scatter's two of that view, and the
+  frame's MV and class atlases (as the consumer copied them) go into a readback ring entry; a writer thread of its
+  own (below normal priority) writes them once the slot's fence has passed. A full ring skips the pair (noted).
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 913dea1..aec6407 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -141,7 +141,13 @@
+ #include <cstddef>
+ #include <cstdlib> // DCS Control (0059)
+ #include <cstring>
++#include <cctype>             // DCS Control (0129)
++#include <condition_variable> // DCS Control (0129)
++#include <deque>              // DCS Control (0129)
++#include <filesystem>         // DCS Control (0129)
+ #include <limits>
++#include <mutex>              // DCS Control (0129)
++#include <share.h>            // DCS Control (0129)
+ #include <new>
+ #include <tuple>
+ #include <utility>
+@@ -1497,6 +1503,160 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
+     return file;
+ }
+ 
++// DCS Control (0129, dev only): the frame-generation diagnosis dump. Off
++// unless the process has XRFG_DEV_FG_DIAG=1 and a folder (XRFG_DEV_FG_DIAG_DIR,
++// else the capture layer's RIGTAP_DIR): nothing below then runs, no resource
++// is made and no composition changes. With them, a trigger file
++// <folder>\fgdiag.txt (key=value lines, all optional: pairs=N the pairs each
++// synthesizer dumps, every=K one pair in K, delay_ms, seconds, tag,
++// window=l,r,u,d the tangents of the target view to dump, eye=0|1) starts a
++// session: it is renamed fgdiag.taken-<n>.txt, and from delay_ms on each
++// synthesizer with that eye dumps up to N of its pairs with DCS's MVs into
++// <folder>\fgdiag<n>_<tag>\: per pair s<owner>_p<k>.bin (the per-pixel
++// records of frame_synthesis.hlsl's dcs_motion_diag_write, then the resampled
++// grid's three slices and the scatter's two of that view, then the frame's MV
++// and class atlases as OFXR copied them; offsets and pitches in the .json)
++// and s<owner>_p<k>.json, plus s<owner>_pairs.csv (every pair the
++// synthesizer recorded in the session, with why it was not dumped).
++constexpr UINT kDcsMotionDiagBit = 1U << 28U;
++constexpr UINT64 kFgDiagHeaderOffset = 128;
++constexpr UINT64 kFgDiagRecordsOffset = 256;
++constexpr std::uint32_t kFgDiagMagic = 0x47444746U; // 'FGDG'
++constexpr UINT64 kFgDiagRecordBytes = 8;
++
++struct FgDiagSession {
++    std::uint32_t id{};
++    std::string tag;
++    std::int64_t start_qpc{};
++    std::int64_t end_qpc{};
++    std::uint32_t pairs{12};
++    std::uint32_t every{1};
++    std::array<float, 4> window{-100.0F, 100.0F, 100.0F, -100.0F};
++    std::uint32_t eye{};
++    std::filesystem::path directory;
++};
++
++class FgDiagTrigger {
++public:
++    static FgDiagTrigger& get() noexcept {
++        static FgDiagTrigger trigger;
++        return trigger;
++    }
++    [[nodiscard]] bool enabled() const noexcept { return enabled_; }
++    [[nodiscard]] std::int64_t frequency() const noexcept { return frequency_; }
++    [[nodiscard]] UINT64 record_bytes() const noexcept { return record_bytes_; }
++    [[nodiscard]] UINT ring() const noexcept { return ring_; }
++    [[nodiscard]] static std::int64_t now() noexcept {
++        LARGE_INTEGER value{};
++        QueryPerformanceCounter(&value);
++        return value.QuadPart;
++    }
++    // The current session (id 0: none yet), the trigger file polled at most
++    // every 50 ms (any thread).
++    [[nodiscard]] FgDiagSession current() noexcept {
++        std::scoped_lock lock(mutex_);
++        const std::int64_t at = now();
++        if (enabled_ && at - last_poll_ >= frequency_ / 20) {
++            last_poll_ = at;
++            try {
++                poll(at);
++            } catch (...) {
++            }
++        }
++        return session_;
++    }
++
++private:
++    FgDiagTrigger() noexcept {
++        LARGE_INTEGER frequency{};
++        QueryPerformanceFrequency(&frequency);
++        frequency_ = (std::max)(frequency.QuadPart, static_cast<LONGLONG>(1));
++        try {
++            const auto env = [](const wchar_t* name) {
++                std::wstring value(4096, L'\0');
++                const DWORD length = GetEnvironmentVariableW(name, value.data(), static_cast<DWORD>(value.size()));
++                value.resize(length < value.size() ? length : 0U);
++                return value;
++            };
++            std::wstring directory = env(L"XRFG_DEV_FG_DIAG_DIR");
++            if (directory.empty()) directory = env(L"RIGTAP_DIR");
++            enabled_ = env(L"XRFG_DEV_FG_DIAG") == L"1" && !directory.empty();
++            directory_ = directory;
++            const std::wstring megabytes = env(L"XRFG_DEV_FG_DIAG_MB");
++            const std::wstring ring = env(L"XRFG_DEV_FG_DIAG_RING");
++            if (!megabytes.empty()) record_bytes_ = std::clamp<UINT64>(_wtoi(megabytes.c_str()), 8, 512) << 20U;
++            if (!ring.empty()) ring_ = std::clamp<UINT>(static_cast<UINT>(_wtoi(ring.c_str())), 1U, 16U);
++        } catch (...) {
++            enabled_ = false;
++        }
++    }
++    void poll(std::int64_t at) {
++        const std::filesystem::path trigger = directory_ / L"fgdiag.txt";
++        const DWORD attributes = GetFileAttributesW(trigger.c_str());
++        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) return;
++        std::string text;
++        if (FILE* file = _wfsopen(trigger.c_str(), L"rb", _SH_DENYNO)) {
++            char buffer[2048];
++            const std::size_t read = fread(buffer, 1, sizeof(buffer), file);
++            fclose(file);
++            text.assign(buffer, read);
++        } else {
++            return;
++        }
++        const std::uint32_t id = ++count_;
++        const std::filesystem::path taken = directory_ / (L"fgdiag.taken-" + std::to_wstring(id) + L".txt");
++        if (!MoveFileExW(trigger.c_str(), taken.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(trigger.c_str());
++        FgDiagSession session{};
++        session.id = id;
++        double delay_ms = 0.0;
++        double seconds = 4.0;
++        std::size_t begin = 0;
++        while (begin < text.size()) {
++            std::size_t end = text.find('\n', begin);
++            if (end == std::string::npos) end = text.size();
++            std::string line = text.substr(begin, end - begin);
++            begin = end + 1;
++            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
++            const std::size_t equals = line.find('=');
++            if (equals == std::string::npos) continue;
++            const std::string key = line.substr(0, equals);
++            const std::string value = line.substr(equals + 1);
++            if (key == "pairs") session.pairs = static_cast<std::uint32_t>(std::clamp(atoi(value.c_str()), 1, 400));
++            else if (key == "every") session.every = static_cast<std::uint32_t>(std::clamp(atoi(value.c_str()), 1, 100));
++            else if (key == "delay_ms") delay_ms = (std::max)(0.0, atof(value.c_str()));
++            else if (key == "seconds") seconds = std::clamp(atof(value.c_str()), 0.1, 60.0);
++            else if (key == "eye") session.eye = static_cast<std::uint32_t>(std::clamp(atoi(value.c_str()), 0, 1));
++            else if (key == "tag") {
++                for (const char c : value) {
++                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') session.tag += c;
++                }
++            } else if (key == "window") {
++                float w[4]{};
++                if (sscanf_s(value.c_str(), "%f,%f,%f,%f", &w[0], &w[1], &w[2], &w[3]) == 4 && w[1] > w[0] && w[2] > w[3]) {
++                    session.window = {w[0], w[1], w[2], w[3]};
++                }
++            }
++        }
++        session.start_qpc = at + static_cast<std::int64_t>(delay_ms * 1.0e-3 * static_cast<double>(frequency_));
++        session.end_qpc = session.start_qpc + static_cast<std::int64_t>(seconds * static_cast<double>(frequency_));
++        std::wstring name = L"fgdiag" + std::to_wstring(id);
++        if (!session.tag.empty()) name += L"_" + std::wstring(session.tag.begin(), session.tag.end());
++        session.directory = directory_ / name;
++        std::error_code error;
++        std::filesystem::create_directories(session.directory, error);
++        session_ = session;
++    }
++    bool enabled_{};
++    std::filesystem::path directory_;
++    std::int64_t frequency_{1};
++    std::int64_t last_poll_{};
++    UINT64 record_bytes_{UINT64{96} << 20U};
++    UINT ring_{4};
++    std::uint32_t count_{};
++    FgDiagSession session_{};
++    std::mutex mutex_;
++};
++
+ }  // namespace
+ 
+ struct D3D12FrameSynthesizer::Impl {
+@@ -1584,6 +1744,12 @@ struct D3D12FrameSynthesizer::Impl {
+         // DCS Control (0128): the view blocks' t11 / t12 name the fine
+         // grid's resampled motion and scatter (else the grid's own).
+         bool motion_views_fine{};
++        // DCS Control (0129): this slot's pair copied a diagnosis dump into
++        // ring entry fg_diag_entry - 1 (0: none), handed to the writer once
++        // the slot's work has completed; and whether the view blocks' u0
++        // names the diagnosis buffer (else the counters).
++        UINT fg_diag_entry{};
++        bool fg_diag_uav{};
+         std::uint64_t fence_value{};
+         UINT timing_query_base{};
+         bool timing_pending{};
+@@ -2086,7 +2252,9 @@ struct D3D12FrameSynthesizer::Impl {
+     // Whether the pair being recorded needs the _extras compositions: a
+     // quality bit (quality_bits: NVIDIA only).
+     [[nodiscard]] bool pair_extras() const noexcept {
+-        return quality_bits() != 0U;
++        // DCS Control (0129): or a pair the diagnosis dump records (its code
++        // is in the twins only; with no quality bit they compose as the plain).
++        return quality_bits() != 0U || fg_diag_pair;
+     }
+     // DCS Control (0125): with DCS's motion vectors (NVIDIA), the twins are
+     // made on a thread of their own (start_extras_build), off the frame
+@@ -2236,6 +2404,7 @@ struct D3D12FrameSynthesizer::Impl {
+         start_extras_build_once();
+         ID3D12PipelineState* const twin = extras_twin(pipeline);
+         if (twin != pipeline) ++extras_binds;
++        if (twin != pipeline && fg_diag_pair) fg_diag_twin = true; // DCS Control (0129)
+         return twin;
+     }
+     // Every twin made now (the options have a key on at creation).
+@@ -2675,6 +2844,10 @@ struct D3D12FrameSynthesizer::Impl {
+         if (cursor_capture_thread.joinable()) {
+             cursor_capture_thread.join();
+         }
++        // DCS Control (0129): the diagnosis dump's pair list and its writer
++        // (it writes what is queued, then stops).
++        fg_diag_end_session();
++        fg_diag_stop_writer();
+         // DCS Control (0125): a background _extras build stops after the
+         // pipeline it is making.
+         retire_extras_build();
+@@ -5784,6 +5957,13 @@ struct D3D12FrameSynthesizer::Impl {
+         std::span<const D3D12ReprojectionView> target_views) noexcept {
+         pair_motion_bound = false;
+         pair_motion_bits = {};
++        // DCS Control (0129): the diagnosis dump's session, and the pair's
++        // line at every exit below (nothing without the dev trigger).
++        fg_diag_begin_pair(slot);
++        struct FgDiagLineAtExit {
++            Impl* self;
++            ~FgDiagLineAtExit() { self->fg_diag_line(); }
++        } fg_diag_line_at_exit{this};
+         D3D12CockpitMaskFrame* const current = pair_mask_current.get();
+         D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
+         ID3D12PipelineState* const plain = nvidia_options.bidirectional
+@@ -5793,6 +5973,8 @@ struct D3D12FrameSynthesizer::Impl {
+             current->motion_texture == nullptr || dcs_motion_target == nullptr ||
+             dcs_motion_resample_pipeline == nullptr || dcs_motion_scatter_pipeline == nullptr ||
+             motion_pipeline(plain, pair_depth_bound) == nullptr) {
++            fg_diag_note = !pair_mask_bound ? "no mask" : (current == nullptr || !current->motion ||
++                current->motion_texture == nullptr) ? "no MVs in the frame" : "MV path not made";
+             return;
+         }
+         // The MVs point at the frame DCS drew before this one: only a pair
+@@ -5802,6 +5984,7 @@ struct D3D12FrameSynthesizer::Impl {
+             if (current->counters) {
+                 current->counters->motion_previous_mismatch.fetch_add(1U, std::memory_order_relaxed);
+             }
++            fg_diag_note = "previous capture is not the MVs' previous frame";
+             return;
+         }
+         // Backing off (the MVs fell back too often lately): the flow alone.
+@@ -5809,6 +5992,7 @@ struct D3D12FrameSynthesizer::Impl {
+         // consumer's DcsMotionBackoff), so the eyes never compose apart.
+         if (current->counters && current->counters->motion_backoff.backing_off(current->display_time)) {
+             current->counters->motion_backoff_pairs.fetch_add(1U, std::memory_order_relaxed);
++            fg_diag_note = "backoff";
+             return;
+         }
+         const UINT outputs = std::clamp(synthetic_output_count(), 1U, 2U);
+@@ -5883,12 +6067,15 @@ struct D3D12FrameSynthesizer::Impl {
+         }
+         if (!any) {
+             pair_motion_bits = {};
++            fg_diag_note = "no view with MVs";
+             return;
+         }
+         // DCS Control (0128): the grid the pair resamples into, named by the
+         // slot's view blocks too.
+         pair_motion_target = fine ? fine_motion_target() : dcs_motion_target.Get();
+         pair_motion_scatter = fine ? fine_motion_scatter() : dcs_motion_scatter.Get();
++        // DCS Control (0129): whether the diagnosis dump records this pair.
++        fg_diag_prepare(slot, *current, *previous_frame, views, target_views, outputs);
+         write_dcs_motion_grid(slot, fine);
+         ID3D12Resource* const depth_plane = any_depth ? current->motion_depth_texture.Get() : nullptr;
+         ID3D12Resource* const source = current->motion_texture.Get();
+@@ -5989,6 +6176,7 @@ struct D3D12FrameSynthesizer::Impl {
+         after[after_count++] = transition_barrier(
+             dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         list->ResourceBarrier(after_count, after.data());
++        fg_diag_record_header(list); // DCS Control (0129)
+         pair_motion_bound = true;
+         if (current->counters) {
+             current->counters->motion_pairs.fetch_add(1U, std::memory_order_relaxed);
+@@ -6004,6 +6192,7 @@ struct D3D12FrameSynthesizer::Impl {
+         if (!pair_motion_bound) {
+             return;
+         }
++        fg_diag_record_copies(list, slot); // DCS Control (0129)
+         const std::array<D3D12_RESOURCE_BARRIER, 3> barriers{
+             transition_barrier(pair_motion_target, kShaderReadState, D3D12_RESOURCE_STATE_COMMON),
+             transition_barrier(
+@@ -6030,6 +6219,13 @@ struct D3D12FrameSynthesizer::Impl {
+             fence_status(fence.Get(), slot.fence_value) != S_OK) {
+             return;
+         }
++        // DCS Control (0129): a diagnosis dump of this slot's pair, complete.
++        if (slot.fg_diag_entry != 0U) {
++            FgDiagJob job;
++            job.entry = slot.fg_diag_entry - 1U;
++            slot.fg_diag_entry = 0;
++            fg_diag_queue(std::move(job));
++        }
+         const UINT slot_index = static_cast<UINT>(&slot - work_slots.data());
+         const SIZE_T begin = static_cast<SIZE_T>(slot_index) * kDcsMotionCounterBytes;
+         const D3D12_RANGE read_range{begin, begin + kDcsMotionCounterBytes};
+@@ -6066,6 +6262,463 @@ struct D3D12FrameSynthesizer::Impl {
+         slot.motion_sink.reset();
+     }
+ 
++    // ---- DCS Control (0129, dev only): the frame-generation diagnosis dump
++    // (FgDiagTrigger). Nothing here runs or is made unless the trigger is
++    // enabled and a session is active for this synthesizer's eye.
++    struct FgDiagEntry {
++        ComPtr<ID3D12Resource> readback;
++        UINT64 size{};
++        UINT64 used{};
++        std::atomic<bool> busy{false};
++        std::filesystem::path stem;
++        std::string json;
++    };
++    struct FgDiagJob {
++        UINT entry{UINT_MAX};       // a ring entry to write, or
++        std::filesystem::path path; // a text file
++        std::string text;
++    };
++    std::unique_ptr<FgDiagEntry[]> fg_diag_ring;
++    UINT fg_diag_ring_count{};
++    ComPtr<ID3D12Resource> fg_diag_buffer;
++    UINT64 fg_diag_buffer_size{};
++    UINT64 fg_diag_entry_size{};
++    bool fg_diag_failed{};
++    std::uint32_t fg_diag_session{};
++    FgDiagSession fg_diag_current{};
++    bool fg_diag_in_window{};
++    bool fg_diag_session_open{};
++    std::uint32_t fg_diag_lines{};
++    std::uint32_t fg_diag_bound{};
++    std::uint32_t fg_diag_dumped{};
++    std::string fg_diag_csv;
++    // The pair being recorded.
++    bool fg_diag_pair{};
++    bool fg_diag_twin{};
++    UINT fg_diag_entry_index{};
++    UINT fg_diag_view{};
++    std::array<UINT, 4> fg_diag_rect{};
++    UINT fg_diag_outputs{};
++    std::string fg_diag_note;
++    std::thread fg_diag_thread;
++    std::mutex fg_diag_mutex;
++    std::condition_variable fg_diag_cv;
++    std::deque<FgDiagJob> fg_diag_jobs;
++    bool fg_diag_stop{};
++
++    [[nodiscard]] static UINT64 fg_diag_align(UINT64 value) noexcept {
++        return (value + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1U) &
++            ~static_cast<UINT64>(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1U);
++    }
++    static bool fg_diag_write_file(const std::filesystem::path& path, const void* data, UINT64 size) noexcept {
++        HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++        if (handle == INVALID_HANDLE_VALUE) return false;
++        bool ok = true;
++        const auto* bytes = static_cast<const std::uint8_t*>(data);
++        while (ok && size > 0U) {
++            const DWORD chunk = static_cast<DWORD>((std::min)(size, UINT64{1} << 26U));
++            DWORD written = 0;
++            ok = WriteFile(handle, bytes, chunk, &written, nullptr) != FALSE && written == chunk;
++            bytes += chunk;
++            size -= chunk;
++        }
++        CloseHandle(handle);
++        return ok;
++    }
++    void fg_diag_queue(FgDiagJob job) noexcept {
++        try {
++            if (!fg_diag_thread.joinable()) {
++                fg_diag_thread = std::thread([this] {
++                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++                    for (;;) {
++                        FgDiagJob next;
++                        {
++                            std::unique_lock lock(fg_diag_mutex);
++                            fg_diag_cv.wait(lock, [this] { return fg_diag_stop || !fg_diag_jobs.empty(); });
++                            if (fg_diag_jobs.empty()) return;
++                            next = std::move(fg_diag_jobs.front());
++                            fg_diag_jobs.pop_front();
++                        }
++                        if (next.entry == UINT_MAX) {
++                            static_cast<void>(fg_diag_write_file(next.path, next.text.data(), next.text.size()));
++                            continue;
++                        }
++                        FgDiagEntry& entry = fg_diag_ring[next.entry];
++                        void* mapped = nullptr;
++                        const D3D12_RANGE read_range{0, static_cast<SIZE_T>(entry.used)};
++                        bool written = false;
++                        if (SUCCEEDED(entry.readback->Map(0, &read_range, &mapped)) && mapped != nullptr) {
++                            std::filesystem::path bin = entry.stem;
++                            bin += L".bin";
++                            written = fg_diag_write_file(bin, mapped, entry.used);
++                            const D3D12_RANGE no_write{0, 0};
++                            entry.readback->Unmap(0, &no_write);
++                        }
++                        std::filesystem::path json = entry.stem;
++                        json += L".json";
++                        std::string text = entry.json;
++                        text += written ? ",\"written\":true}\n" : ",\"written\":false}\n";
++                        static_cast<void>(fg_diag_write_file(json, text.data(), text.size()));
++                        entry.busy.store(false, std::memory_order_release);
++                    }
++                });
++            }
++            {
++                std::scoped_lock lock(fg_diag_mutex);
++                fg_diag_jobs.push_back(std::move(job));
++            }
++            fg_diag_cv.notify_one();
++        } catch (...) {
++            if (job.entry != UINT_MAX && fg_diag_ring) fg_diag_ring[job.entry].busy.store(false);
++        }
++    }
++    void fg_diag_stop_writer() noexcept {
++        if (!fg_diag_thread.joinable()) return;
++        {
++            std::scoped_lock lock(fg_diag_mutex);
++            fg_diag_stop = true;
++        }
++        fg_diag_cv.notify_all();
++        fg_diag_thread.join();
++    }
++    // The session's pair list, once it has ended (or another began).
++    void fg_diag_end_session() noexcept {
++        if (!fg_diag_session_open) return;
++        fg_diag_session_open = false;
++        try {
++            FgDiagJob job;
++            job.path = fg_diag_current.directory / (L"s" + std::to_wstring(hud_allocation_owner()) + L"_pairs.csv");
++            job.text = "qpc,owner,line,image_w,image_h,cur_display_time,cur_seq,prev_display_time,prev_seq,bound,"
++                       "outputs,fraction0,fraction1,dumped,note\n" + fg_diag_csv;
++            fg_diag_csv.clear();
++            fg_diag_queue(std::move(job));
++        } catch (...) {
++        }
++    }
++    // At the start of record_dcs_motion: the session state for this pair; the
++    // slot's u0 back to the counters.
++    void fg_diag_begin_pair(WorkSlot& slot) noexcept {
++        fg_diag_pair = false;
++        fg_diag_twin = false;
++        fg_diag_in_window = false;
++        fg_diag_note.clear();
++        fg_diag_bind_uav(slot, false);
++        FgDiagTrigger& trigger = FgDiagTrigger::get();
++        if (!trigger.enabled()) return;
++        const FgDiagSession session = trigger.current();
++        const std::int64_t now = FgDiagTrigger::now();
++        if (session.id != fg_diag_session) {
++            fg_diag_end_session();
++            fg_diag_session = session.id;
++            fg_diag_current = session;
++            fg_diag_lines = fg_diag_bound = fg_diag_dumped = 0;
++        }
++        fg_diag_in_window = session.id != 0 && now >= session.start_qpc && now <= session.end_qpc;
++        if (!fg_diag_in_window && now > session.end_qpc) fg_diag_end_session();
++        if (fg_diag_in_window) {
++            fg_diag_session_open = true;
++            start_extras_build_once(); // the _extras twins hold the records' code
++        }
++    }
++    // At every exit of record_dcs_motion within a session: the pair's line.
++    void fg_diag_line() noexcept {
++        if (!fg_diag_in_window) return;
++        try {
++            const D3D12CockpitMaskFrame* const current = pair_mask_current.get();
++            const D3D12CockpitMaskFrame* const previous = pair_mask_previous.get();
++            char line[512];
++            snprintf(line, sizeof(line), "%lld,%u,%u,%llu,%u,%lld,%llu,%lld,%llu,%d,%u,%.4f,%.4f,%d,%s\n",
++                static_cast<long long>(FgDiagTrigger::now()), hud_allocation_owner(), fg_diag_lines++,
++                static_cast<unsigned long long>(image_description.Width), image_description.Height,
++                static_cast<long long>(current ? current->display_time : 0),
++                static_cast<unsigned long long>(current ? current->mask_seq : 0),
++                static_cast<long long>(previous ? previous->display_time : 0),
++                static_cast<unsigned long long>(previous ? previous->mask_seq : 0), pair_motion_bound ? 1 : 0,
++                synthetic_output_count(), synthetic_output_fraction(0),
++                synthetic_output_count() > 1U ? synthetic_output_fraction(1) : 0.0F,
++                fg_diag_pair ? static_cast<int>(fg_diag_dumped) - 1 : -1,
++                fg_diag_note.empty() ? (fg_diag_pair ? "dumped" : "-") : fg_diag_note.c_str());
++            fg_diag_csv += line;
++        } catch (...) {
++        }
++    }
++    // The view blocks' u0 of `slot`: the diagnosis buffer or the counters.
++    void fg_diag_bind_uav(WorkSlot& slot, bool diag) noexcept {
++        if (slot.fg_diag_uav == diag || (diag && fg_diag_buffer == nullptr) || dcs_motion_counters == nullptr) return;
++        const D3D12_CPU_DESCRIPTOR_HANDLE start = slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
++        D3D12_UNORDERED_ACCESS_VIEW_DESC counters{};
++        counters.Format = DXGI_FORMAT_R32_TYPELESS;
++        counters.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
++        counters.Buffer.NumElements = static_cast<UINT>((diag ? fg_diag_buffer_size : kDcsMotionCounterBytes) / 4U);
++        counters.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
++        for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
++            device->CreateUnorderedAccessView(diag ? fg_diag_buffer.Get() : dcs_motion_counters.Get(), nullptr,
++                &counters, offset_cpu_handle(start, block * kDescriptorBlockSize + kSrvDescriptorCount, descriptor_increment));
++        }
++        slot.fg_diag_uav = diag;
++    }
++    // The copy footprint of one subresource of `resource` at `offset`.
++    [[nodiscard]] UINT64 fg_diag_footprint(ID3D12Resource* resource, UINT subresource, UINT64 offset,
++        D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint) const noexcept {
++        const D3D12_RESOURCE_DESC description = resource->GetDesc();
++        UINT rows = 0;
++        UINT64 row_bytes = 0;
++        UINT64 total = 0;
++        device->GetCopyableFootprints(&description, subresource, 1, offset, &footprint, &rows, &row_bytes, &total);
++        return total;
++    }
++    // What a dump of this pair needs besides its records.
++    [[nodiscard]] UINT64 fg_diag_extra_bytes(const D3D12CockpitMaskFrame& current) const noexcept {
++        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
++        UINT64 bytes = 0;
++        bytes += 3U * fg_diag_align(fg_diag_footprint(pair_motion_target, 0, 0, footprint));
++        bytes += 2U * fg_diag_align(fg_diag_footprint(pair_motion_scatter, 0, 0, footprint));
++        bytes += fg_diag_align(fg_diag_footprint(current.motion_texture.Get(), 0, 0, footprint));
++        if (current.motion_class && current.motion_class_texture != nullptr) {
++            bytes += fg_diag_align(fg_diag_footprint(current.motion_class_texture.Get(), 0, 0, footprint));
++        }
++        return bytes;
++    }
++    // After record_dcs_motion has filled `views` (pair_motion_target and
++    // pair_motion_scatter chosen): whether this pair is dumped, and if so its
++    // view's bit, the slot's u0 and the ring entry's description.
++    void fg_diag_prepare(WorkSlot& slot, const D3D12CockpitMaskFrame& current, const D3D12CockpitMaskFrame& previous,
++        const std::array<DcsMotionParameters, kMaxReprojectionViews>& views,
++        std::span<const D3D12ReprojectionView> target_views, UINT outputs) noexcept {
++        if (!fg_diag_in_window) return;
++        const FgDiagSession& session = fg_diag_current;
++        const std::uint32_t bound = fg_diag_bound++;
++        if (fg_diag_dumped >= session.pairs) { fg_diag_note = "pairs done"; return; }
++        if (bound % session.every != 0U) { fg_diag_note = "every"; return; }
++        UINT view = kMaxReprojectionViews;
++        for (UINT index = 0; index < static_cast<UINT>(target_views.size()) && index < kMaxReprojectionViews; ++index) {
++            if (pair_motion_bits[index] != 0U && cockpit_mask_eye(target_views[index], index) == session.eye) {
++                view = index;
++                break;
++            }
++        }
++        if (view >= kMaxReprojectionViews) { fg_diag_note = "eye not here"; return; }
++        const DcsMotionParameters& p = views[view];
++        const auto& tr = p.target_rect;
++        const auto& tt = p.target_tangents;
++        const auto& w = session.window;
++        if (!(tt[1] > tt[0]) || !(tt[2] > tt[3]) || tr[2] < 1.0F || tr[3] < 1.0F) { fg_diag_note = "no tangents"; return; }
++        const auto px = [&](float tangent) { return tr[0] + (tangent - tt[0]) / (tt[1] - tt[0]) * tr[2]; };
++        const auto py = [&](float tangent) { return tr[1] + (tt[2] - tangent) / (tt[2] - tt[3]) * tr[3]; };
++        const float x0 = std::clamp(px(w[0]), tr[0], tr[0] + tr[2]);
++        const float x1 = std::clamp(px(w[1]), tr[0], tr[0] + tr[2]);
++        const float y0 = std::clamp(py(w[2]), tr[1], tr[1] + tr[3]);
++        const float y1 = std::clamp(py(w[3]), tr[1], tr[1] + tr[3]);
++        UINT rx = static_cast<UINT>(std::floor(x0));
++        UINT ry = static_cast<UINT>(std::floor(y0));
++        UINT rw = static_cast<UINT>(std::ceil(x1)) > rx ? static_cast<UINT>(std::ceil(x1)) - rx : 0U;
++        UINT rh = static_cast<UINT>(std::ceil(y1)) > ry ? static_cast<UINT>(std::ceil(y1)) - ry : 0U;
++        if (rw == 0U || rh == 0U) { fg_diag_note = "window outside"; return; }
++        const UINT64 cap = FgDiagTrigger::get().record_bytes();
++        const UINT64 max_rows = cap / (static_cast<UINT64>(rw) * outputs * kFgDiagRecordBytes);
++        if (max_rows == 0U) { fg_diag_note = "window too wide"; return; }
++        if (rh > max_rows) {
++            ry += (rh - static_cast<UINT>(max_rows)) / 2U;
++            rh = static_cast<UINT>(max_rows);
++        }
++        const UINT64 records = static_cast<UINT64>(rw) * rh * outputs * kFgDiagRecordBytes;
++        const UINT64 need = fg_diag_align(records) + fg_diag_extra_bytes(current);
++        // The buffers, made once (the first pair of the first session here).
++        if (fg_diag_buffer == nullptr && !fg_diag_failed) {
++            fg_diag_failed = true;
++            const D3D12_HEAP_PROPERTIES heap = default_heap_properties(0);
++            D3D12_HEAP_PROPERTIES readback_heap = heap;
++            readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
++            fg_diag_buffer_size = kFgDiagRecordsOffset + cap;
++            const D3D12_RESOURCE_DESC buffer =
++                buffer_description(fg_diag_buffer_size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++            fg_diag_entry_size = fg_diag_align(cap) + fg_diag_extra_bytes(current) * 2U + (UINT64{8} << 20U);
++            const D3D12_RESOURCE_DESC entry = buffer_description(fg_diag_entry_size, D3D12_RESOURCE_FLAG_NONE);
++            try {
++                fg_diag_ring_count = FgDiagTrigger::get().ring();
++                fg_diag_ring = std::make_unique<FgDiagEntry[]>(fg_diag_ring_count);
++                bool made = SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
++                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(fg_diag_buffer.GetAddressOf())));
++                for (UINT index = 0; made && index < fg_diag_ring_count; ++index) {
++                    made = SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &entry,
++                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(fg_diag_ring[index].readback.GetAddressOf())));
++                    fg_diag_ring[index].size = fg_diag_entry_size;
++                }
++                fg_diag_failed = !made;
++            } catch (...) {
++            }
++            if (fg_diag_failed) {
++                fg_diag_buffer.Reset();
++                fg_diag_ring.reset();
++                fg_diag_ring_count = 0;
++            } else {
++                fg_diag_buffer->SetName(L"OFXR FG diagnosis buffer (dev)");
++            }
++        }
++        if (fg_diag_failed) { fg_diag_note = "buffers not made"; return; }
++        UINT entry = fg_diag_ring_count;
++        for (UINT index = 0; index < fg_diag_ring_count; ++index) {
++            if (!fg_diag_ring[index].busy.load(std::memory_order_acquire)) {
++                entry = index;
++                break;
++            }
++        }
++        if (entry >= fg_diag_ring_count) { fg_diag_note = "ring full"; return; }
++        if (need > fg_diag_ring[entry].size) { fg_diag_note = "entry too small"; return; }
++        try {
++            FgDiagEntry& e = fg_diag_ring[entry];
++            const std::uint32_t index = fg_diag_dumped;
++            e.stem = session.directory /
++                (L"s" + std::to_wstring(hud_allocation_owner()) + L"_p" + std::to_wstring(index));
++            char text[4096];
++            const auto f4 = [](const std::array<float, 4>& a) {
++                char b[160];
++                snprintf(b, sizeof(b), "[%.9g,%.9g,%.9g,%.9g]", a[0], a[1], a[2], a[3]);
++                return std::string(b);
++            };
++            snprintf(text, sizeof(text),
++                "{\"session\":%u,\"tag\":\"%s\",\"owner\":%u,\"pair\":%u,\"line\":%u,\"qpc\":%lld,\"qpcFreq\":%lld,"
++                "\"image\":[%llu,%u,%u],\"format\":%d,\"view\":%u,\"eye\":%u,\"slice\":%u,"
++                "\"current\":{\"displayTime\":%lld,\"maskSeq\":%llu},\"previous\":{\"displayTime\":%lld,\"maskSeq\":%llu},"
++                "\"outputs\":%u,\"fractions\":[%.6f,%.6f],\"rect\":[%u,%u,%u,%u],\"recordBytes\":%llu,"
++                "\"cell\":%u,\"grid\":[%u,%u],\"useGameMotion\":%u,\"qualityBits\":%u,\"motionFlags\":%u,"
++                "\"targetRect\":%s,\"targetTangents\":%s,\"targetToPrevious\":%s,\"sourceRect\":%s,\"sourceFov\":%s,"
++                "\"offset\":%s,\"focusRect\":%s,\"focusFov\":%s,\"focusOffset\":[%.9g,%.9g],\"focusFlags\":%u,"
++                "\"peripheryCell\":%u,\"maskBound\":%d,\"depthBound\":%d",
++                session.id, session.tag.c_str(), hud_allocation_owner(), index, fg_diag_lines,
++                static_cast<long long>(FgDiagTrigger::now()), static_cast<long long>(FgDiagTrigger::get().frequency()),
++                static_cast<unsigned long long>(image_description.Width), image_description.Height,
++                static_cast<UINT>(image_description.DepthOrArraySize), static_cast<int>(view_format), view,
++                session.eye, p.slice, static_cast<long long>(current.display_time),
++                static_cast<unsigned long long>(current.mask_seq), static_cast<long long>(previous.display_time),
++                static_cast<unsigned long long>(previous.mask_seq), outputs, p.fraction0, p.fraction1, rx, ry, rw, rh,
++                static_cast<unsigned long long>(records), p.cell, p.output_width, p.output_height,
++                pair_motion_bits[view] | kDcsMotionDiagBit, quality_bits(), p.flags, f4(p.target_rect).c_str(),
++                f4(p.target_tangents).c_str(), f4(p.target_to_previous).c_str(), f4(p.source_rect).c_str(),
++                f4(p.source_fov).c_str(), f4(p.offset).c_str(), f4(p.focus_rect).c_str(), f4(p.focus_fov).c_str(),
++                p.focus_offset[0], p.focus_offset[1], p.focus_flags, p.periphery_cell, pair_mask_bound ? 1 : 0,
++                pair_depth_bound ? 1 : 0);
++            e.json = text;
++            e.used = 0;
++            e.busy.store(true, std::memory_order_release);
++        } catch (...) {
++            fg_diag_note = "no memory";
++            return;
++        }
++        fg_diag_pair = true;
++        fg_diag_entry_index = entry;
++        fg_diag_view = view;
++        fg_diag_rect = {rx, ry, rw, rh};
++        fg_diag_outputs = outputs;
++        ++fg_diag_dumped;
++        pair_motion_bits[view] |= kDcsMotionDiagBit;
++        fg_diag_bind_uav(slot, true);
++    }
++    // After record_dcs_motion's last barrier (the counters in UAV): the
++    // counters copied into the diagnosis buffer, its header written.
++    void fg_diag_record_header(ID3D12GraphicsCommandList* list) noexcept {
++        if (!fg_diag_pair) return;
++        ComPtr<ID3D12GraphicsCommandList2> list2;
++        if (FAILED(list->QueryInterface(IID_PPV_ARGS(list2.GetAddressOf())))) {
++            // Never reached on Windows 10 1709 or later; the records stay
++            // unwritten (the magic is not there) and the dump says so.
++            fg_diag_note = "no WriteBufferImmediate";
++            return;
++        }
++        const std::array<D3D12_RESOURCE_BARRIER, 2> before{
++            transition_barrier(dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
++            transition_barrier(fg_diag_buffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
++        };
++        list->ResourceBarrier(static_cast<UINT>(before.size()), before.data());
++        list->CopyBufferRegion(fg_diag_buffer.Get(), 0, dcs_motion_counters.Get(), 0, kDcsMotionCounterBytes);
++        const std::array<UINT, 8> values{fg_diag_rect[0], fg_diag_rect[1], fg_diag_rect[2], fg_diag_rect[3],
++            kFgDiagMagic, static_cast<UINT>(kFgDiagRecordsOffset), fg_diag_outputs, 0U};
++        std::array<D3D12_WRITEBUFFERIMMEDIATE_PARAMETER, 8> parameters{};
++        const D3D12_GPU_VIRTUAL_ADDRESS base = fg_diag_buffer->GetGPUVirtualAddress() + kFgDiagHeaderOffset;
++        for (UINT index = 0; index < 8U; ++index) {
++            parameters[index].Dest = base + index * 4U;
++            parameters[index].Value = values[index];
++        }
++        list2->WriteBufferImmediate(static_cast<UINT>(parameters.size()), parameters.data(), nullptr);
++        const std::array<D3D12_RESOURCE_BARRIER, 2> after{
++            transition_barrier(dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
++            transition_barrier(fg_diag_buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
++        };
++        list->ResourceBarrier(static_cast<UINT>(after.size()), after.data());
++    }
++    // In finish_dcs_motion, before its barriers (the diagnosis buffer and the
++    // counters in UAV, the resampled motion readable, the scatter a pixel
++    // shader resource): the counters back from the diagnosis buffer, and the
++    // records, grids and the frame's atlases into the ring entry.
++    void fg_diag_record_copies(ID3D12GraphicsCommandList* list, WorkSlot& slot) noexcept {
++        if (!fg_diag_pair) return;
++        fg_diag_pair = false;
++        FgDiagEntry& e = fg_diag_ring[fg_diag_entry_index];
++        const D3D12CockpitMaskFrame* const current = pair_mask_current.get();
++        const std::array<D3D12_RESOURCE_BARRIER, 4> before{
++            transition_barrier(fg_diag_buffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
++            transition_barrier(dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST),
++            transition_barrier(pair_motion_target, kShaderReadState, D3D12_RESOURCE_STATE_COPY_SOURCE),
++            transition_barrier(pair_motion_scatter, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
++        };
++        list->ResourceBarrier(static_cast<UINT>(before.size()), before.data());
++        list->CopyBufferRegion(dcs_motion_counters.Get(), 0, fg_diag_buffer.Get(), 0, kDcsMotionCounterBytes);
++        const UINT64 records = static_cast<UINT64>(fg_diag_rect[2]) * fg_diag_rect[3] * fg_diag_outputs * kFgDiagRecordBytes;
++        list->CopyBufferRegion(e.readback.Get(), 0, fg_diag_buffer.Get(), kFgDiagRecordsOffset, records);
++        std::string layout = ",\"twin\":";
++        layout += fg_diag_twin ? "true" : "false";
++        char b[320];
++        snprintf(b, sizeof(b), ",\"layout\":{\"records\":{\"offset\":0,\"bytes\":%llu}", static_cast<unsigned long long>(records));
++        layout += b;
++        UINT64 offset = fg_diag_align(records);
++        const auto copy = [&](const char* name, ID3D12Resource* resource, UINT subresource, bool more) {
++            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
++            const UINT64 total = fg_diag_footprint(resource, subresource, offset, footprint);
++            D3D12_TEXTURE_COPY_LOCATION destination{};
++            destination.pResource = e.readback.Get();
++            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++            destination.PlacedFootprint = footprint;
++            D3D12_TEXTURE_COPY_LOCATION source{};
++            source.pResource = resource;
++            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++            source.SubresourceIndex = subresource;
++            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
++            snprintf(b, sizeof(b), "%s{\"offset\":%llu,\"rowPitch\":%u,\"width\":%u,\"height\":%u,\"format\":%d,\"subresource\":%u}%s",
++                name, static_cast<unsigned long long>(footprint.Offset), footprint.Footprint.RowPitch,
++                footprint.Footprint.Width, footprint.Footprint.Height, static_cast<int>(footprint.Footprint.Format),
++                subresource, more ? "," : "");
++            layout += b;
++            offset = fg_diag_align(offset + total);
++        };
++        layout += ",\"grid\":[";
++        for (UINT k = 0; k < 3U; ++k) copy("", pair_motion_target, fg_diag_view * 3U + k, k < 2U);
++        layout += "],\"scatter\":[";
++        for (UINT k = 0; k < 2U; ++k) copy("", pair_motion_scatter, fg_diag_view * 2U + k, k < 1U);
++        layout += "]";
++        if (current != nullptr && current->motion_texture != nullptr) {
++            // The consumer's copies rest in COMMON: promoted to COPY_SOURCE
++            // by this read (a read state, as the resample's).
++            copy(",\"mv\":", current->motion_texture.Get(), 0, false);
++            if (current->motion_class && current->motion_class_texture != nullptr) {
++                copy(",\"class\":", current->motion_class_texture.Get(), 0, false);
++            }
++        }
++        layout += "}";
++        const std::array<D3D12_RESOURCE_BARRIER, 4> after{
++            transition_barrier(fg_diag_buffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
++            transition_barrier(dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
++            transition_barrier(pair_motion_target, D3D12_RESOURCE_STATE_COPY_SOURCE, kShaderReadState),
++            transition_barrier(pair_motion_scatter, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
++        };
++        list->ResourceBarrier(static_cast<UINT>(after.size()), after.data());
++        try {
++            e.json += layout;
++        } catch (...) {
++        }
++        e.used = offset;
++        slot.fg_diag_entry = fg_diag_entry_index + 1U;
++    }
++
+     // DCS Control (0049): a pair's symbology fallback, counted where its
+     // current frame's mask counts (cockpit_mask result=20).
+     void count_hud_fallback(std::uint32_t reason, std::uint64_t views) noexcept {
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index ff877d6..85d4be4 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1556,11 +1556,55 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
+     return taken;
+ }
+ 
++// DCS Control (0129, dev only): the frame-generation diagnosis dump. With
++// UseGameMotion bit 28 (set by the synthesizer only for a pair it dumps, and
++// only with the _extras twin bound: XRFG_FG_EXTRAS) every pixel of the dump
++// rectangle writes what dcs_motion_pixel decided into the u0 buffer (which is
++// then the synthesizer's diagnosis buffer, its first 128 bytes the counters):
++// at byte 128 the rectangle (x0, y0, width, height in target pixels), at 144
++// the magic 'FGDG' and the records' byte offset; one record of two words per
++// pixel and output, (output * height + y) * width + x:
++//   word 0: bits 0-3 the path (1 cockpit mask, 2 no usable MV (class or
++//           none), 3 the samples outside an image, 4 the gather's MV, 5 the
++//           scatter's MV; 0 not evaluated), 4-6 the gather's cell flags
++//           (1 MV, 2 one surface, 4 uniform field), 7 the mask band, 8-15 the
++//           gather's class byte, 16-23 the scatter candidate's class, 24 a
++//           scatter key, 25 the candidate consistent, 26 the candidate taken,
++//           27 dcs_motion_sky_occlusion forced the colour, 28 the
++//           still-content guard lowered the weight, 29 the strict check,
++//           30 the gather on the sky, 31 mask_here >= 0.75;
++//   word 1: unorm8 x4: the final weight, the colour check's weight (before
++//           the guard, the band and the sky rule), the disagreement (0-1),
++//           the mask value.
++// Without the bit (every pair the synthesizer does not dump, and every
++// composition built without the _extras twin) nothing here runs.
++#if XRFG_FG_EXTRAS
++static const uint kDcsMotionDiagBit = 1u << 28;
++void dcs_motion_diag_write(uint2 pixel, uint output, uint word0, float weight, float check_weight,
++    float disagreement, float mask) {
++    [branch] if ((UseGameMotion & kDcsMotionDiagBit) != 0u) {
++        uint4 rect = DcsMotionCounters.Load4(128);
++        uint4 info = DcsMotionCounters.Load4(144);
++        [branch] if (info.x == 0x47444746u && pixel.x >= rect.x && pixel.y >= rect.y &&
++            pixel.x < rect.x + rect.z && pixel.y < rect.y + rect.w && output < 2u) {
++            uint index = (output * rect.w + (pixel.y - rect.y)) * rect.z + (pixel.x - rect.x);
++            uint packed = uint(round(saturate(weight) * 255.0)) | (uint(round(saturate(check_weight) * 255.0)) << 8) |
++                (uint(round(saturate(disagreement) * 255.0)) << 16) | (uint(round(saturate(mask) * 255.0)) << 24);
++            DcsMotionCounters.Store2(info.y + index * 8u, uint2(word0, packed));
++        }
++    }
++}
++#endif
++
+ // The MVs' composition of the pixel at `position` at this instant (`color`) and how
+ // far it holds: 1 it alone, 0 the flow's as before, between the two blended.
+ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 color) {
+     color = float4(0.0, 0.0, 0.0, 1.0);
+     float weight = 0.0;
++    uint diag_word = 0u;              // DCS Control (0129)
++    float diag_check = 0.0;
++    float diag_disagreement = 0.0;
++    float diag_mask = 0.0;
+     uint2 integer_pixel = uint2(position);
+     [branch] if (dcs_motion_bound() && cockpit_mask_bound() && repeated_capture_flag() == 0 &&
+         integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize) {
+@@ -1573,6 +1617,8 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+         [branch] if (mask_here >= 0.75 && quality_option(kQualityMaskBand)) {
+             band = quality_mask_band_world(pixel, dcs_motion_field(pixel, ViewIndex * 3u + 1u + output));
+         }
++        diag_mask = mask_here; // DCS Control (0129)
++        diag_word = 1u | (band ? 0x80u : 0u) | (mask_here >= 0.75 ? 0x80000000u : 0u);
+         [branch] if (mask_here < 0.75 || band) {
+             // The gather: the MV at its fixed point for this instant.
+             float4 here = dcs_motion_field(pixel, ViewIndex * 3u + 1u + output);
+@@ -1583,6 +1629,8 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+             float2 motion = dot(here.xy, here.xy) > kDcsMotionSnap * kDcsMotionSnap ? here.xy : float2(0.0, 0.0);
+             bool same_field = (here_flags & 4u) != 0u;
+             bool scattered = false; // DCS Control (0104)
++            // DCS Control (0129): no usable MV until one is found below.
++            diag_word = (diag_word & 0x80000080u) | 2u | ((here_flags & 7u) << 4) | ((here_class & 0xFFu) << 8);
+             // The scatter: an edge cell's content arriving here.
+             float2 rect_cells = ceil(PreviousMappings[ViewIndex].TargetRect.zw / dcs_motion_cell());
+             int2 cell = int2(floor((pixel - PreviousMappings[ViewIndex].TargetRect.xy + 0.5) / dcs_motion_cell()));
+@@ -1603,18 +1651,22 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+                 // surface over the sky or over nothing usable.
+                 uint gather_priority = use == 0u || (here_class & 0x80u) != 0u ? 0u
+                     : ((here_class & 7u) == 1u ? 2u : 1u);
++                diag_word |= ((source_class & 0xFFu) << 16) | (1u << 24) | (consistent ? (1u << 25) : 0u); // 0129
+                 [branch] if (consistent && priority > gather_priority) {
+                     motion = source.xy;
+                     use = dcs_motion_class_use(source_class);
+                     same_field = false;
+                     scattered = true; // DCS Control (0104)
++                    diag_word |= 1u << 26; // DCS Control (0129)
+                 }
+             }
+             [branch] if (use != 0u) {
+                 CameraSample previous = sample_previous_target(pixel + t * motion, Slice, ViewIndex);
+                 CameraSample current = sample_current_target(pixel - (1.0 - t) * motion, Slice, ViewIndex);
++                diag_word = (diag_word & ~0xFu) | 3u; // DCS Control (0129)
+                 [branch] if (previous.valid >= 0.5 && current.valid >= 0.5) {
+                     eligible = true;
++                    diag_word = (diag_word & ~0xFu) | (scattered ? 5u : 4u); // DCS Control (0129)
+                     color = saturate(lerp(previous.color, current.color, t));
+                     if ((UseGameMotion & 4u) != 0u) {
+                         weight = 1.0;
+@@ -1633,6 +1685,11 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+                         }
+                         weight = 1.0 - smoothstep(strict ? 6.0 / 255.0 : 16.0 / 255.0,
+                                            strict ? 20.0 / 255.0 : 48.0 / 255.0, disagreement);
++                        // DCS Control (0129)
++                        diag_check = weight;
++                        diag_disagreement = disagreement;
++                        diag_word |= (strict ? (1u << 29) : 0u) | (sky_gather ? (1u << 30) : 0u);
++                        const float diag_before_guard = weight;
+                         // Content the MVs do not hold over a uniformly moving
+                         // surface: the two frames agree at the very pixel,
+                         // the MV's samples show something else.
+@@ -1647,6 +1704,7 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+                                 weight *= 1.0 - still * differs;
+                             }
+                         }
++                        diag_word |= weight < diag_before_guard - 0.004 ? (1u << 28) : 0u; // DCS Control (0129)
+                         // DCS Control (0104): dcs_motion_mask_band's stricter check.
+                         [branch] if (band) {
+                             weight = min(weight, quality_mask_band_weight(previous.color, current.color));
+@@ -1657,12 +1715,16 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+                             if (quality_sky_occlusion(pixel, motion, previous.color, current.color, sky_color)) {
+                                 color = saturate(sky_color);
+                                 weight = 1.0;
++                                diag_word |= 1u << 27; // DCS Control (0129)
+                             }
+                         }
+                     }
+                 }
+             }
+         }
++#if XRFG_FG_EXTRAS
++        dcs_motion_diag_write(integer_pixel, output, diag_word, weight, diag_check, diag_disagreement, diag_mask);
++#endif
+         // One pixel in 256, spread over 16 buckets.
+         [branch] if (count && eligible && ((integer_pixel.x | integer_pixel.y) & 15u) == 0u) {
+             uint bucket = (((integer_pixel.x >> 4) ^ (integer_pixel.y >> 4)) & 15u) * 8u;

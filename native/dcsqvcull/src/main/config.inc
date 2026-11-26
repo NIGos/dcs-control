@@ -305,6 +305,11 @@ struct Config {
   bool cockpitMotionExport = false; // [Perception] CockpitMotionExport (R70): DCS's MVs of views 0/1 (needs the mask)
   bool cockpitMotionClass = true;   // [Perception] CockpitMotionClass: the class byte atlas with the MVs
   int cockpitMotionDump = 0;        // [Perception] CockpitMotionDump: write N committed motion slots (debug)
+  // Motion contract revision 4 (docs/FOCUS_MOTION.md; both need CockpitMotionExport, default off until a live A/B).
+  bool cockpitMotionFocus = false;  // [Perception] CockpitMotionFocus: also the focus views' (2 / 3) MVs and class
+  bool cockpitMotionDepth = false;  // [Perception] CockpitMotionDepth: every view's per-pixel linear depth plane
+  bool cockpitMotionFocusAssumeJitterFree = false;  // [Dev] CockpitMotionFocusAssumeJitterFree: jitter_proven on 2 / 3
+                                                    // before the live check (OFXR bring-up only)
   int cockpitFgDump = 0;            // [Perception] CockpitFgDump (R71): N consecutive frames of MV / class / depth /
                                     // colour + JSON for frame-generation fixtures (dev; needs mask, depth, motion)
   bool symbologyExport = false;     // [Perception] SymbologyExport (R95): HUD / helmet emission companion (needs the mask)
@@ -598,6 +603,9 @@ Config PerceptionOnlyConfig(const Config& c) {
   p.cockpitMotionExport = c.cockpitMotionExport;  // R70
   p.cockpitMotionClass = c.cockpitMotionClass;
   p.cockpitMotionDump = c.cockpitMotionDump;
+  p.cockpitMotionFocus = c.cockpitMotionFocus;  // motion contract revision 4
+  p.cockpitMotionDepth = c.cockpitMotionDepth;
+  p.cockpitMotionFocusAssumeJitterFree = c.cockpitMotionFocusAssumeJitterFree;
   p.cockpitFgDump = c.cockpitFgDump;  // R71
   // R95 / R97: Sharp HUD (was missing here: the app writes it with the engine off and nothing was exported).
   p.symbologyExport = c.symbologyExport;

@@ -88,6 +88,9 @@ public static class Readiness
                     Add("audio-hrtf-refused", CheckState.Warning, "3D headphone audio", $"At the last DCS start your HRTF set{(refused == Binaural.ModulePersonalSet ? "" : $" \"{refused}\"")} could not be used ({audio.HrtfFallbackReason}), so the generic one played. Import the SOFA file again on the Audio page.");
                 else if (audio.Backoffs > 0)
                     Add("audio-backoff", CheckState.Manual, "3D headphone audio", $"At the last DCS start it rendered fewer sounds in 3D to stay within its CPU budget{(audio.MaxObjectsNow is { } n ? $" (down to {n})" : "")}. Raise CPU budget on the Audio page if your CPU has room, or lower Most 3D sounds.");
+                // Cockpit space's first CPU step: its early reflections went off (the tail stayed).
+                if (audio.CockpitSpace is { EarlyOffs: > 0 } space)
+                    Add("audio-space-early", CheckState.Manual, "Cockpit space", $"At the last DCS start Cockpit space left out its close reflections {(space.EarlyOffs == 1 ? "once" : space.EarlyOffs + " times")} to stay within the CPU budget. Raise CPU budget on the Audio page if your CPU has room, or choose Subtle.");
             }
         }
         if (!profile.Desktop && inventory.Layers.Any(l => l.Enabled && VectorXr.Is(l)))

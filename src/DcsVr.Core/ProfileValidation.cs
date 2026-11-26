@@ -371,6 +371,11 @@ public static class ProfileValidation
                 Error("audio-level", string.Format(inv, "3D sound level must be between {0} and +{1} dB.", Binaural.LevelTrimMin, Binaural.LevelTrimMax));
             if (profile.BinauralCpuBudgetPercent is < Binaural.CpuBudgetMin or > Binaural.CpuBudgetMax)
                 Error("audio-cpu", string.Format(inv, "CPU budget must be between {0} and {1}%.", Binaural.CpuBudgetMin, Binaural.CpuBudgetMax));
+            if (profile.CockpitSpace is < Binaural.CockpitSpaceMin or > Binaural.CockpitSpaceMax)
+                Error("audio-cockpit-space", "Cockpit space must be Off, Subtle, Normal or Strong (0 to 3).");
+            // An unknown cockpit type (a newer or a hand-edited profile) does not block Launch: Automatic is written.
+            if (!Binaural.IsCockpitFamily(profile.CockpitSpaceFamily))
+                issues.Add(new("audio-cockpit-type", IssueSeverity.Warning, $"Cockpit type \"{profile.CockpitSpaceFamily}\" is not one DCS Control knows; Automatic is used. Choose one on the Audio page."));
             if (!Binaural.TryParseExcludeContexts(profile.BinauralExcludeContexts, out _))
                 Error("audio-contexts", "binauralExcludeContexts takes sound context numbers 0 to 7, separated by commas.");
             Key(profile.AudioToggleKey, NeuralHotkeys.AudioDefault, profile.UsesAudioToggleKey, "audio-hotkey", "3D audio switch");

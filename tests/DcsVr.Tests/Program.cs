@@ -219,6 +219,18 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!qualitySaved.Contains("frameGenSkyOcclusion") && !qualitySaved.Contains("frameGenEdgeChoice") && !qualitySaved.Contains("frameGenMaskBand") && !qualitySaved.Contains("frameGenHudGuard"), qualitySaved);
     var qualityOn = JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenSkyOcclusion = true, FrameGenEdgeChoice = true, FrameGenMaskBand = true, FrameGenHudGuard = true }));
     Require(qualityOn is { FrameGenSkyOcclusion: true, FrameGenEdgeChoice: true, FrameGenMaskBand: true, FrameGenHudGuard: true }, "the quality options round-trip when on");
+    // OFXR 0128: the focus view's own MVs, off by default, 1 only with NVIDIA frame generation, in the profile only when on.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_focus=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=1\n")
+        && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("\ndcs_motion_focus=0\n") && !new VrProfile().FrameGenFocusMotion
+        && !qualitySaved.Contains("frameGenFocusMotion") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenFocusMotion = true }))!.FrameGenFocusMotion, "dcs_motion_focus: off by default, 1 only with NVIDIA frame generation");
+    // ... and the consumer turns on the engine's focus-view export it reads (motion contract revision 4), NVIDIA only.
+    Require(!ConfigurationWriters.DcsQvCull(nvidia).Contains("CockpitMotionFocus=1") && ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("\nCockpitMotionFocus=1")
+        && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenFocusMotion = true }).Contains("CockpitMotionFocus=1")
+        && !ConfigurationWriters.DcsQvCull(nvidia with { FrameGenFocusMotion = true }).Contains("CockpitMotionDepth=1"), "dcs_motion_focus brings the engine's CockpitMotionFocus, not the depth plane");
+    // OFXR 0130: the aircraft cover, off by default, 1 only with NVIDIA frame generation, in the profile only when on.
+    Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion_cover=0\n") && ConfigurationWriters.Ofxr(nvidia with { FrameGenCover = true }).Contains("\ndcs_motion_cover=1\n")
+        && ConfigurationWriters.Ofxr(nvidia with { FrameGen = FrameGeneration.FidelityFx, FrameGenCover = true }).Contains("\ndcs_motion_cover=0\n") && !new VrProfile().FrameGenCover
+        && !qualitySaved.Contains("frameGenCover") && JsonData.Deserialize<VrProfile>(JsonData.Serialize(nvidia with { FrameGenCover = true }))!.FrameGenCover, "dcs_motion_cover: off by default, 1 only with NVIDIA frame generation");
     // The occlusion fill of the 0.7.1 development builds (OFXR dcs_motion_occlusion_fill) is gone: never written.
     Require(ConfigurationWriters.Ofxr(nvidia).Contains("\ndcs_motion=1\n") && !ConfigurationWriters.Ofxr(nvidia).Contains("occlusion_fill"), "no occlusion fill key");
     // Live mode compares settings one by one: the profile node has those saved only when set, at their defaults.
@@ -234,7 +246,7 @@ Test("Profiles for 0.7.0: a profile that changed no setting new since 0.7.0 has 
     // refuses keys it does not know: simulated by these options' strict reader with exactly these members taken out.
     string[] newSince070 = ["binauralAudio", "binauralHrtf", "headCircumferenceCm", "binauralLateHeadTracking", "binauralNearField", "binauralMaxObjects",
         "binauralLevelTrimDb", "binauralCpuBudgetPercent", "binauralExcludeContexts", "binauralLogVoices", "audioToggleKey",
-        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard"];
+        "frameGenSkyOcclusion", "frameGenEdgeChoice", "frameGenMaskBand", "frameGenHudGuard", "frameGenCover"];
     var strict070 = new System.Text.Json.JsonSerializerOptions
     {
         PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
@@ -7123,12 +7135,19 @@ Test("3D audio: the app's keys, defaults and ranges are binaural_config.h's (the
     var keys = System.Text.RegularExpressions.Regex.Matches(text, @"\{L""(\w+)"", KeyType::(\w+), ([-\d.]+), ([-\d.]+), ([-\d.]+), ""(\w+)""\}")
         .ToDictionary(m => m.Groups[1].Value, m => (Type: m.Groups[2].Value, Default: double.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture),
             Min: double.Parse(m.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture), Max: double.Parse(m.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture)));
-    Require(keys.Count == 10, "the table's ten keys: " + string.Join(", ", keys.Keys));
+    // Cockpit space's three keys (docs/COCKPIT_SPACE.md section 7) come into the table with the core's branch
+    // (feat/cspace-core); until it is merged here the app writes them ahead of the table.
+    string[] cockpitKeys = ["CockpitSpace", "CockpitSpaceFamily", "CockpitSpaceCanopy"];
+    var tableHasSpace = keys.ContainsKey("CockpitSpace");
+    Require(keys.Count == (tableHasSpace ? 13 : 10), "the table's keys: " + string.Join(", ", keys.Keys));
     string Const(string name) => System.Text.RegularExpressions.Regex.Match(text, name + @" = L""([^""]*)""").Groups[1].Value;
     Require(Const("kSection") == Binaural.Section && Const("kKillFlagFile") == Binaural.KillFlag && Const("kHotkeyKey") == "AudioToggle" && Const("kHotkeySection") == "Hotkeys"
         && Const("kHrtfFolder") == Binaural.HrtfFolder && Const("kDefaultHrtfName") == Binaural.DefaultHrtf && Const("kPosePublishSection") == Binaural.PoseSection && Const("kPosePublishKey") == Binaural.PoseKey, "names");
     var written = IniFile.Parse(ConfigurationWriters.DcsQvCull(AudioOn() with { BinauralExcludeContexts = "1" }).ReplaceLineEndings("\n")).Keys.Where(k => k.StartsWith("Audio.", StringComparison.Ordinal)).Select(k => k[6..]).ToHashSet();
-    Require(written.SetEquals(keys.Keys), "the app writes exactly the table's keys: " + string.Join(", ", written.Order()));
+    Require(written.SetEquals(tableHasSpace ? keys.Keys : keys.Keys.Concat(cockpitKeys)), "the app writes exactly the table's keys: " + string.Join(", ", written.Order()));
+    if (tableHasSpace)
+        Require(keys["CockpitSpace"] is { Type: "Int", Default: Binaural.CockpitSpaceDefault, Min: Binaural.CockpitSpaceMin, Max: Binaural.CockpitSpaceMax } && keys["CockpitSpaceCanopy"] is { Type: "Bool", Default: 1, Min: 0, Max: 1 }
+            && keys["CockpitSpaceFamily"].Type == "Text" && new VrProfile().CockpitSpace == Binaural.CockpitSpaceDefault, "cockpit space keys as the table has them");
     var p = new VrProfile();
     var expected = new Dictionary<string, (double Default, double Min, double Max)>
     {
@@ -7151,6 +7170,320 @@ Test("3D audio: the app's keys, defaults and ranges are binaural_config.h's (the
     var core = File.ReadAllText(Path.Combine(workspace, "native/binaural/include/binaural_core.h"));
     var floor = System.Text.RegularExpressions.Regex.Match(core, @"kNearFieldFloorM = ([\d.]+)f;");
     Require(floor.Success && double.Parse(floor.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) == DcsVr.Core.Hrtf.HrtfConverter.NearFieldFloorM, "near-field floor: " + floor.Value);
+});
+// ---- Cockpit space (docs/COCKPIT_SPACE.md, APP tests P1-P10) ------------------------------------------------------------
+Test("Cockpit space: Subtle, automatic and canopy by default, saved only when changed, written to [Audio] clamped, checked by Checks (P1, P9)", () =>
+{
+    var p = new VrProfile();
+    Require(p.CockpitSpace == 1 && p.CockpitSpaceFamily == "auto" && p.CockpitSpaceCanopy, "defaults");
+    var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { Id = "x", Name = "X" }))!.AsObject();
+    Require(!node.ContainsKey("cockpitSpace") && !node.ContainsKey("cockpitSpaceFamily") && !node.ContainsKey("cockpitSpaceCanopy"), "not saved at their defaults (an earlier version opens the profile)");
+    var all = AudioOn() with { CockpitSpace = 3, CockpitSpaceFamily = " Helicopter ", CockpitSpaceCanopy = false };
+    var json = JsonData.Serialize(all);
+    Require(all.CockpitSpaceFamily == "helicopter" && JsonData.Deserialize<VrProfile>(json) == all && json.Contains("\"cockpitSpace\": 3", StringComparison.Ordinal) && json.Contains("\"cockpitSpaceFamily\": \"helicopter\"", StringComparison.Ordinal)
+        && json.Contains("\"cockpitSpaceCanopy\": false", StringComparison.Ordinal), "round trip: " + json.Length);
+    Require(JsonData.Deserialize<VrProfile>("{\"cockpitSpaceFamily\": null}").CockpitSpaceFamily == "auto" && JsonData.Deserialize<VrProfile>("{\"cockpitSpaceFamily\": \"  \"}").CockpitSpaceFamily == "auto", "blank is automatic");
+    string Ini(VrProfile v) => ConfigurationWriters.DcsQvCull(v).ReplaceLineEndings("\n");
+    Require(Ini(AudioOn()).Contains("\nLogVoices=0\nCockpitSpace=1\nCockpitSpaceFamily=auto\nCockpitSpaceCanopy=1\n", StringComparison.Ordinal), "defaults written: " + Ini(AudioOn()));
+    var read = IniFile.Parse(Ini(all));
+    Require(read["Audio.CockpitSpace"] == "3" && read["Audio.CockpitSpaceFamily"] == "helicopter" && read["Audio.CockpitSpaceCanopy"] == "0", "every setting reaches the file");
+    var wild = IniFile.Parse(Ini(AudioOn() with { CockpitSpace = 9, CockpitSpaceFamily = "zeppelin" }));
+    Require(wild["Audio.CockpitSpace"] == "3" && wild["Audio.CockpitSpaceFamily"] == "auto" && IniFile.Parse(Ini(AudioOn() with { CockpitSpace = -2 }))["Audio.CockpitSpace"] == "0", "clamped; an unknown cockpit type is automatic");
+    Require(!Ini(new VrProfile { EngineOptimizations = true, CockpitSpace = 3 }).Contains("CockpitSpace", StringComparison.Ordinal), "3D audio off: nothing written");
+    string[] Errors(VrProfile v) => [.. ProfileValidation.Validate(v).Where(x => x.Severity == IssueSeverity.Error).Select(x => x.Code)];
+    string[] Warnings(VrProfile v) => [.. ProfileValidation.Validate(v).Where(x => x.Severity == IssueSeverity.Warning).Select(x => x.Code)];
+    Require(Errors(AudioOn() with { CockpitSpace = 4 }).Contains("audio-cockpit-space") && !Errors(AudioOn() with { CockpitSpaceFamily = "zeppelin" }).Contains("audio-cockpit-type")
+        && Warnings(AudioOn() with { CockpitSpaceFamily = "zeppelin" }).Contains("audio-cockpit-type")
+        && !Errors(AudioOn() with { CockpitSpace = 0, CockpitSpaceFamily = "warbird" }).Any(c => c.StartsWith("audio-cockpit", StringComparison.Ordinal))
+        && !Errors(new VrProfile { CockpitSpace = 9, CockpitSpaceFamily = "zeppelin" }).Any(c => c.StartsWith("audio-cockpit", StringComparison.Ordinal)), "Checks");
+    // The families are the design's (section 5.1), "auto" first, and the core's header names each once it is here.
+    Require(Binaural.CockpitFamilies.Select(f => f.Id).SequenceEqual(["auto", "bubble", "framed", "helicopter", "warbird", "transport", "generic"]) && Binaural.CockpitFamilyTitle("bubble") == "Bubble canopy"
+        && Binaural.CockpitFamilyTitle("HELICOPTER") == "Helicopter cabin" && Binaural.CockpitSpaceName(2) == "Normal" && Binaural.CockpitSpaceName(7) == "Strong" && Binaural.CockpitFamilyValue("Warbird") == "warbird", "families");
+    if (File.Exists(Path.Combine(workspace, "native/binaural/include/cockpit_space.h")))
+    {
+        var header = File.ReadAllText(Path.Combine(workspace, "native/binaural/include/cockpit_space.h"));
+        foreach (var (id, _) in Binaural.CockpitFamilies.Skip(1)) Require(header.Contains("\"" + id + "\"", StringComparison.Ordinal), "cockpit_space.h names the family " + id);
+    }
+    // The page's control, choices and rows (docs/COCKPIT_SPACE.md section 7).
+    var app = File.ReadAllText(Path.Combine(workspace, "src/DcsVr.App/ui/app.js"));
+    Require(app.Contains("field(c,'cockpitSpace','<span class=\"tag\">EXPERIMENTAL</span> Cockpit space',['Puts cockpit sounds around you instead of inside your head.'", StringComparison.Ordinal)
+        && app.Contains("[['0','Off'],['1','Subtle · default'],['2','Normal'],['3','Strong']]", StringComparison.Ordinal)
+        && app.Contains("field(more,'cockpitSpaceFamily','Cockpit type','Automatic picks it from the aircraft you fly.'", StringComparison.Ordinal)
+        && app.Contains("field(more,'cockpitSpaceCanopy','Open canopy opens the space'", StringComparison.Ordinal), "the Audio page's control (P6; the UI smoke test clicks it)");
+});
+Test("Cockpit space: the module's lines give the status line, the Audio page's row, Last flight and Checks (P7)", () =>
+{
+    const string on = "audio: on (48000 Hz stereo, HRTF default: 2562 directions, head radius 9.1 cm, near field on, at most 48 sounds)";
+    static string Stats(string space) => "audio: running, 12 sounds, p99 0.31 ms per block (budget 25% of a block, about 2.50 ms at 10 ms), limit 48; fades in/out 3/1, fallbacks 0, refused 0, torn 0, pan solves 40 (median 40, mismatch 0), overruns 0; head pose on" + space;
+    var s = Binaural.ParseStatus(["10:00 DcsQvCull loader started", "10:01 " + on, "10:01 audio: cockpit space: Subtle (bubble auto, aircraft F-16C_50)", "10:02 audio: cockpit space: inside 1, canopy 0.35 (mech)",
+        "10:03 " + Stats("; space Subtle bubble inside 1 wet voices 11 early on room p99 0.08 ms, direct -0.1 dB")], true, true);
+    Require(s is { State: "running", Sounds: 12, HeadTracking: true, CostMs: 0.31 } && s.CockpitSpace is { Level: "Subtle", Family: "bubble", FamilyFromSetting: false, Aircraft: "F-16C_50", Inside: true, WetVoices: 11, EarlyOffs: 0, EarlyOff: false }
+        && s.CockpitSpace.Canopy == 0.35 && s.CockpitSpace.RoomCostMs == 0.08 && s.CockpitSpace.Summary == "In the cockpit: F-16C_50, bubble canopy.", "running with the space: " + s.CockpitSpace?.Summary);
+    Require(Binaural.ParseStatus([on, "audio: cockpit space: Normal (generic auto, aircraft unknown)", "audio: cockpit space: inside 0, canopy unknown (none)"], true, true).CockpitSpace is { Level: "Normal", Aircraft: null, Summary: null, Inside: false, Canopy: null }, "unknown aircraft: no line");
+    Require(Binaural.ParseStatus([on, "audio: cockpit space: Strong (helicopter setting, aircraft UH-1H)"], true, true).CockpitSpace?.Summary == "In the cockpit: UH-1H, helicopter cabin (your choice).", "the pilot's cockpit type");
+    Require(Binaural.ParseStatus([on, "audio: cockpit space: Normal (bubble auto, aircraft F-86F Sabre)"], true, true).CockpitSpace?.Aircraft == "F-86F Sabre", "a type name with a space");
+    Require(Binaural.ParseStatus([on, "audio: cockpit space: Off (bubble auto, aircraft F-16C_50)"], true, true).CockpitSpace is { Level: "Off", Summary: null }, "off: no line");
+    // The listening test: the module names no level, and the running line's "space Test" leaves it so (blind).
+    var blind = Binaural.ParseStatus([on, "audio: cockpit space: Subtle (bubble auto, aircraft F-16C_50)", "audio: cockpit space: Test (bubble auto, aircraft F-16C_50)",
+        "audio: running, 12 sounds, p99 0.31 ms per block (budget 25% of a block, about 2.50 ms at 10 ms), limit 48; fades in/out 3/1, fallbacks 0, refused 0, torn 0, pan solves 40 (median 40, mismatch 0), overruns 0; space Test; head pose on"], true, true);
+    Require(blind.CockpitSpace is { Level: "Test", Aircraft: "F-16C_50", RoomCostMs: null, WetVoices: null } && blind.HeadTracking == true, "listening test: the level is not named");
+    var budget = Binaural.ParseStatus([on, "audio: cockpit space: Subtle (framed auto, aircraft F-14B)", "audio: cockpit space: early reflections off (CPU budget)", "audio: cockpit space: early reflections on again",
+        "audio: cockpit space: early reflections off (CPU budget)"], true, true);
+    Require(budget.CockpitSpace is { EarlyOffs: 2, EarlyOff: true }, "CPU steps");
+    Require(Binaural.ParseStatus([on, Stats("")], true, true).CockpitSpace is null && Binaural.ParseStatus([on, Stats("")], true, true).HeadTracking == true, "a module without it: nothing, and the head pose still read");
+    Require(LastFlight.ParseAudio([on, "audio: cockpit space: Subtle (bubble auto, aircraft F-16C_50)", "audio: cockpit space: early reflections off (CPU budget)"])?.CockpitSpace is { Level: "Subtle", EarlyOffs: 1 }, "Last flight");
+    var json = JsonData.Serialize(s);
+    Require(json.Contains("\"cockpitSpace\": {", StringComparison.Ordinal) && json.Contains("\"summary\": \"In the cockpit: F-16C_50, bubble canopy.\"", StringComparison.Ordinal), "the page gets it: " + json);
+    // Checks: the close reflections left out for CPU, from the module's log of the applied profile.
+    var f = E2e("cspace-checks");
+    var profile = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-cspace-checks", Name = "Audio", QuadViews = QuadProvider.None, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, BinauralAudio = true });
+    Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    var module = EngineOptimizations.ModuleDirectory(f.Options);
+    if (!File.Exists(Path.Combine(module, "DcsQvCull.dll"))) File.WriteAllBytes(Path.Combine(module, "DcsQvCull.dll"), [0x4d, 0x5a]);
+    File.WriteAllText(EngineOptimizations.ModuleLog(module), "10:00 DcsQvCull loader started\n10:01 " + on + "\n10:02 audio: cockpit space: Subtle (bubble auto, aircraft F-16C_50)\n10:03 audio: cockpit space: early reflections off (CPU budget)\n");
+    Require(Readiness.Check(profile, E2eInventory(f), f.Service).Checks.Any(c => c.Id == "audio-space-early" && c.State == CheckState.Manual && c.Detail.Contains("once", StringComparison.Ordinal)), "Checks says the close reflections were left out");
+});
+Test("Cockpit space Live: all three settings are written at once to a module that has it; an earlier audio module makes them wait (P3)", () =>
+{
+    var f = E2e("cspace-live");
+    var payload = Path.Combine(f.Service.DistributionRoot, "components/dcsqvcull/DcsQvCullPayload.dll");
+    byte[] withSpace = [.. File.ReadAllBytes(payload), .. Encoding.Unicode.GetBytes("CockpitSpaceFamily")];
+    File.WriteAllBytes(payload, withSpace); File.WriteAllText(payload + ".sha256", Hashing.FileSha256(payload));
+    Require(Binaural.PayloadHasAudio(payload) && Binaural.PayloadHasCockpitSpace(payload), "the payload reads the keys");
+    var monitor = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-cspace-live", Name = "Space live", Desktop = true, BinauralAudio = true, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false });
+    var baseInventory = E2eInventory(f);
+    var inventory = baseInventory with { DcsSettings = new Dictionary<string, string>(baseInventory.DcsSettings) { ["sound.main_layout"] = "\"stereo\"" } };
+    Require(f.Service.SyncApplied(monitor, inventory).Kind == LaunchSyncKind.Applied);
+    var journal = f.Service.Originals.ReadCurrent()!;
+    Require(LiveSettings.CockpitSpaceInstalled(journal) && new[] { "cockpitSpace", "cockpitSpaceFamily", "cockpitSpaceCanopy" }.All(LiveSettings.AvailableFields(f.Service.ReadAppliedProfile()!.Profile, journal).Contains), "offered live");
+    var result = WhileDcsRuns(f, () => f.Service.ApplyLive(monitor with { CockpitSpace = 2, CockpitSpaceFamily = "warbird", CockpitSpaceCanopy = false }, inventory));
+    Require(result.Applied.Order().SequenceEqual(new[] { "cockpitSpace", "cockpitSpaceCanopy", "cockpitSpaceFamily" }) && result.Waiting.Count == 0, result.Message);
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(result.Written.Single())));
+    Require(ini["Audio.CockpitSpace"] == "2" && ini["Audio.CockpitSpaceFamily"] == "warbird" && ini["Audio.CockpitSpaceCanopy"] == "0", "written");
+    var offLive = WhileDcsRuns(f, () => f.Service.ApplyLive(monitor with { CockpitSpace = 0 }, inventory));
+    Require(offLive.Applied.Contains("cockpitSpace") && offLive.Waiting.Count == 0, "Off is live too: " + offLive.Message);
+    // An audio payload from before cockpit space: the other audio settings stay live, these three wait.
+    var oldPayload = Path.Combine(root, "e2e-cspace-old", "DcsQvCullPayload.dll"); Directory.CreateDirectory(Path.GetDirectoryName(oldPayload)!); File.WriteAllBytes(oldPayload, PayloadFixture());
+    var old = journal with { Entries = [.. journal.Entries.Select(e => Path.GetFileName(e.Path) == "DcsQvCullPayload.dll" ? e with { Path = oldPayload } : e)] };
+    var oldFields = LiveSettings.AvailableFields(monitor, old);
+    Require(LiveSettings.AudioInstalled(old) && !LiveSettings.CockpitSpaceInstalled(old) && oldFields.Contains("binauralMaxObjects") && !oldFields.Contains("cockpitSpace") && !oldFields.Contains("cockpitSpaceFamily"), "earlier module: " + string.Join(",", oldFields.Where(x => x.Contains("ockpit"))));
+    Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Audio.CockpitSpace", "2", "1") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "AudioTest.Level", null, null) && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "AudioTest.Active", "1", null, audio: false), "key level");
+});
+Test("Cockpit space test: audio-test writes and removes exactly [AudioTest]; a Live write, Launch DCS and Back to stock DCS end it (P4, P5)", () =>
+{
+    // The section alone, in any ini text.
+    const string sample = "[General]\nBeeps=0\n\n[Audio]\nBinaural=1\nCockpitSpace=1\n";
+    var withTest = CockpitSpaceTest.WithSection(sample, new(42, 12, 2));
+    Require(withTest.EndsWith("\n[AudioTest]\nActive=1\nSeed=42\nTrials=12\nLevel=2\n", StringComparison.Ordinal) && CockpitSpaceTest.Read(withTest) == new AudioTestSettings(42, 12, 2), withTest);
+    var again = CockpitSpaceTest.WithSection(withTest, new(42, 12));
+    Require(again.Split('\n').Count(l => l == "[AudioTest]") == 1 && !again.Contains("Level=", StringComparison.Ordinal) && CockpitSpaceTest.Read(again) == new AudioTestSettings(42, 12), "replaced, not added");
+    Require(CockpitSpaceTest.WithSection(again, null) == sample && CockpitSpaceTest.WithSection(sample, null) == sample && CockpitSpaceTest.Read(sample) is null, "removed: the file as it was");
+    Require(CockpitSpaceTest.WithSection(sample.Replace("\n", "\r\n", StringComparison.Ordinal), new(1, 1, 9)).Contains("\r\nLevel=3\r\n", StringComparison.Ordinal), "CRLF kept, level clamped");
+    var f = E2e("cspace-test");
+    var profile = ProfileValidation.ResolveFeatures(new VrProfile { Id = "e2e-cspace-test", Name = "Audio", Desktop = true, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, BinauralAudio = true });
+    var baseTree = E2eTree(f, "game", "sg");
+    Throws<InvalidOperationException>(() => f.Service.SetAudioTest(new(1, 12)));
+    Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    var module = EngineOptimizations.ModuleDirectory(f.Options);
+    var iniPath = Path.Combine(module, "DcsQvCull.ini");
+    var before = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(iniPath)));
+    var output = new StringWriter(); var error = new StringWriter();
+    int Cli(params string[] a) => CockpitSpaceTestCli.Run(a, () => f.Service, output, error);
+    Require(Cli("start", "--seed", "7") == 0 && f.Service.ReadAudioTest() == new AudioTestSettings(7, 12), "start: " + error);
+    Require(Cli("level", "2") == 0 && f.Service.ReadAudioTest() == new AudioTestSettings(7, 12, 2) && Cli("level", "5") == 1 && f.Service.ReadAudioTest()!.Level == 2, "level: " + error);
+    var during = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(iniPath)));
+    Require(during.Where(k => !k.Key.StartsWith("AudioTest.", StringComparison.Ordinal)).OrderBy(k => k.Key).SequenceEqual(before.OrderBy(k => k.Key)) && during.Count(k => k.Key.StartsWith("AudioTest.", StringComparison.Ordinal)) == 4, "only [AudioTest] changes");
+    Require(Cli("stop") == 0 && f.Service.ReadAudioTest() is null && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(iniPath))).OrderBy(k => k.Key).SequenceEqual(before.OrderBy(k => k.Key)), "stop: as before");
+    Require(Cli("level", "1") == 1 && error.ToString().Contains("No listening test is on", StringComparison.Ordinal), "level without a test");
+    // The file stays DCS Control's: a Live write of another setting goes through and ends the test.
+    Cli("start", "--seed", "8"); Cli("level", "3");
+    var baseInventory = E2eInventory(f);
+    var inventory = baseInventory with { DcsSettings = new Dictionary<string, string>(baseInventory.DcsSettings) { ["sound.main_layout"] = "\"stereo\"" } };
+    var live = WhileDcsRuns(f, () => f.Service.ApplyLive(profile with { BinauralMaxObjects = 40 }, inventory));
+    Require(live.Applied.Contains("binauralMaxObjects") && live.Waiting.Count == 0 && f.Service.ReadAudioTest() is null, "a Live write ends the test: " + live.Message);
+    // Launch DCS writes the whole file again.
+    Cli("start", "--seed", "9");
+    Require(f.Service.SyncApplied(profile, inventory).Kind is LaunchSyncKind.Applied or LaunchSyncKind.Unchanged && f.Service.ReadAudioTest() is null, "Launch DCS ends the test");
+    // Back to stock DCS: nothing of it is left.
+    Cli("start", "--seed", "10"); Cli("level", "1");
+    var kept = File.ReadAllBytes(iniPath);
+    File.AppendAllText(iniPath, "; edited by hand\n");
+    Require(Cli("level", "2") == 1 && error.ToString().Contains("changed outside DCS Control", StringComparison.Ordinal), "a file edited by hand is refused");
+    File.WriteAllBytes(iniPath, kept);
+    Require(f.Service.ReadAudioTest() == new AudioTestSettings(10, 12, 1), "the test is on before Back to stock DCS");
+    Require(f.Service.RestoreOriginals().Complete);
+    var after = E2eTree(f, "game", "sg"); Require(after.SequenceEqual(baseTree), "DCS's folders differ: " + E2eDiff(baseTree, after));
+    E2eCheckClean(f, "Back to stock DCS after a listening test");
+    Require(Cli("stop") == 1, "no applied profile: refused");
+});
+Test("Cockpit space test kit: blind orders, Part A's plan and sounds, the test mission, the watcher, the analysis and no personal data (P5, P8, P10)", () =>
+{
+    // Orders: blocks that hold every level once, the same for a seed, others for another seed.
+    var orders = Enumerable.Range(1, 6).Select(s => CockpitSpaceTest.CockpitOrder((uint)s)).ToList();
+    Require(orders.All(o => o.Length == 9 && o.Chunk(3).All(b => b.Order().SequenceEqual(new[] { 0, 1, 2 }))) && CockpitSpaceTest.CockpitOrder(1).SequenceEqual(orders[0])
+        && orders.Select(o => string.Join("", o)).Distinct().Count() > 1, "cockpit order");
+    Require(CockpitSpaceTest.OutsideOrder(5).Chunk(2).All(b => b.Order().SequenceEqual(new[] { 0, 1 })) && CockpitSpaceTest.OutsideOrder(5).Length == 16, "outside order");
+    Require(CockpitSpaceTest.AbxXIsA(5, "a", 8).Count(x => x) == 4, "A/B/X balanced");
+    // Part A: 24 stimuli with opaque ids, each played once in A1; A2 pairs Off and Subtle of one direction.
+    var (trials, key) = CockpitSpaceTest.PartAPlan(77);
+    var byId = key.Stimuli.ToDictionary(s => s.Id);
+    Require(key.Stimuli.Count == 24 && byId.Keys.Order().SequenceEqual(Enumerable.Range(1, 24).Select(i => "s" + i.ToString("00", System.Globalization.CultureInfo.InvariantCulture)))
+        && trials.A1.Select(t => t.Stimulus).Order().SequenceEqual(byId.Keys.Order()) && trials.A1.Select(t => t.Trial).SequenceEqual(Enumerable.Range(1, 24)), "A1");
+    Require(trials.A2.Count == 8 && trials.A2.All(t => byId[t.A].Level == 0 && byId[t.B].Level == 1 && byId[t.A].AzimuthDeg == byId[t.B].AzimuthDeg && byId[t.A].ElevationDeg == byId[t.B].ElevationDeg
+        && byId[t.A].Signal == byId[t.B].Signal && (t.X == t.A || t.X == t.B)), "A2");
+    var trialsJson = JsonData.Serialize(trials);
+    Require(!trialsJson.Contains("level", StringComparison.OrdinalIgnoreCase) && !trialsJson.Contains("azimuth", StringComparison.OrdinalIgnoreCase), "the runner's file names no level or direction");
+    var side = new CockpitSpaceTest.Stimulus("x", "pink", 90, 0, 0.5, 1).Position; var back = new CockpitSpaceTest.Stimulus("x", "pink", 180, 0, 0.5, 1).Position; var up = new CockpitSpaceTest.Stimulus("x", "pink", 0, 45, 0.5, 1).Position;
+    Require(Math.Abs(side.X) < 1e-9 && Math.Abs(side.Z - 0.5) < 1e-9 && Math.Abs(back.X + 0.5) < 1e-9 && up.Y > 0.35 && new CockpitSpaceTest.Stimulus("x", "pink", -90, 0, 0.5, 1).Front is null && new CockpitSpaceTest.Stimulus("x", "pink", 135, 0, 0.5, 1).Front == false, "x forward, y up, z right");
+    var right = new CockpitSpaceTest.Stimulus("s03", "click", 90, 0, 0.5, 2);
+    Require(CockpitSpaceTest.RenderArguments(right, "dry.wav", "out dir", "my set.dcshrtf").SequenceEqual(["--family", "generic", "--strength", "2", "--source", "0,0,0.5", "--yaw", "0", "--input", "dry.wav", "--out", "out dir", "--hrtf", "my set.dcshrtf"]), "the render tool's command line");
+    // The dry run writes the plan and the dry signals and prints the tool's command lines.
+    var folder = Path.Combine(root, "cspace-kit", "session");
+    var output = new StringWriter(); var error = new StringWriter();
+    Require(CockpitSpaceTestCli.Run(["stimuli", "--folder", folder, "--dry-run"], () => throw new InvalidOperationException("no service needed"), output, error) == 0, error.ToString());
+    var printed = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    Require(printed.Length == 24 && printed.All(l => l.StartsWith("binaural_room_render.exe --family generic --strength ", StringComparison.Ordinal) && l.Contains(" --input ", StringComparison.Ordinal)), output.ToString());
+    var seed = CockpitSpaceTestCli.Seed(folder, create: false);
+    Require(File.Exists(Path.Combine(folder, "trials.json")) && File.Exists(Path.Combine(folder, "key.json")) && JsonData.Deserialize<CockpitSpaceTest.PartAKey>(File.ReadAllText(Path.Combine(folder, "key.json"))).Seed == seed, "plan files");
+    foreach (var signal in new[] { "pink", "click" })
+    {
+        var wav = File.ReadAllBytes(Path.Combine(folder, "dry", signal + ".wav"));
+        Require(Encoding.ASCII.GetString(wav, 0, 4) == "RIFF" && BitConverter.ToInt32(wav, 24) == 48000 && BitConverter.ToInt32(wav, 40) == 48000 * 3 / 2 * 2, signal + " wav header");
+        var x = CockpitSpaceTest.DrySignal(signal, seed);
+        Require(x.All(float.IsFinite) && Math.Abs(x.Max(Math.Abs) - 0.5) < 1e-6, signal + " level");
+    }
+    Require(CockpitSpaceTestCli.Run(["stimuli", "--folder", folder], () => throw new InvalidOperationException(), output, error) == 1 && error.ToString().Contains("render tool was not found", StringComparison.Ordinal), "no tool: says so");
+    // The test mission: one MISSION START trigger (DO SCRIPT FILE) and two resources added, the rest kept byte for byte.
+    string T(int n) => new('\t', n);
+    var mission = "mission = \n{\n" + T(1) + "[\"trig\"] = \n" + T(1) + "{\n"
+        + T(2) + "[\"actions\"] = \n" + T(2) + "{\n" + T(3) + "[1] = \"a_out_text_delay(\\\"hi\\\", 10, false, 0); mission.trig.func[1]=nil;\",\n" + T(2) + "}, -- end of [\"actions\"]\n"
+        + T(2) + "[\"events\"] = {},\n" + T(2) + "[\"custom\"] = {},\n"
+        + T(2) + "[\"func\"] = \n" + T(2) + "{\n" + T(3) + "[1] = \"if mission.trig.conditions[1]() then mission.trig.actions[1]() end\",\n" + T(2) + "}, -- end of [\"func\"]\n"
+        + T(2) + "[\"flag\"] = \n" + T(2) + "{\n" + T(3) + "[1] = true,\n" + T(2) + "}, -- end of [\"flag\"]\n"
+        + T(2) + "[\"conditions\"] = \n" + T(2) + "{\n" + T(3) + "[1] = \"return(c_time_after(2) )\",\n" + T(2) + "}, -- end of [\"conditions\"]\n"
+        + T(2) + "[\"customStartup\"] = {},\n" + T(2) + "[\"funcStartup\"] = {},\n" + T(1) + "}, -- end of [\"trig\"]\n"
+        + T(1) + "[\"trigrules\"] = \n" + T(1) + "{\n" + T(2) + "[1] = \n" + T(2) + "{\n" + T(3) + "[\"rules\"] = \n" + T(3) + "{\n" + T(4) + "[1] = \n" + T(4) + "{\n" + T(5) + "[\"seconds\"] = 2,\n"
+        + T(5) + "[\"predicate\"] = \"c_time_after\",\n" + T(4) + "}, -- end of [1]\n" + T(3) + "}, -- end of [\"rules\"]\n" + T(3) + "[\"predicate\"] = \"triggerOnce\",\n" + T(2) + "}, -- end of [1]\n"
+        + T(1) + "}, -- end of [\"trigrules\"]\n" + T(1) + "[\"version\"] = 21,\n} -- end of mission\n";
+    byte[] Miz(string missionText, string? map)
+    {
+        using var stream = new MemoryStream();
+        using (var zip = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create, true))
+        {
+            void Add(string name, byte[] bytes) { using var s = zip.CreateEntry(name).Open(); s.Write(bytes); }
+            Add("mission", Encoding.UTF8.GetBytes(missionText)); Add("options", Encoding.UTF8.GetBytes("options = {}\n")); Add("l10n/DEFAULT/briefing.png", [1, 2, 3, 4]);
+            if (map is not null) Add("l10n/DEFAULT/mapResource", Encoding.UTF8.GetBytes(map));
+        }
+        return stream.ToArray();
+    }
+    Dictionary<string, byte[]> Entries(byte[] miz)
+    {
+        using var zip = new System.IO.Compression.ZipArchive(new MemoryStream(miz));
+        return zip.Entries.ToDictionary(e => e.FullName, e => { using var s = e.Open(); using var m = new MemoryStream(); s.CopyTo(m); return m.ToArray(); });
+    }
+    int Balance(string lua) { var code = System.Text.RegularExpressions.Regex.Replace(lua, "\"(?:\\\\.|[^\"\\\\])*\"", "\"\""); return code.Count(c => c == '{') - code.Count(c => c == '}'); }
+    var source = Miz(mission, "mapResource = \n{\n\t[\"ResKey_Action_1\"] = \"hello.ogg\",\n} -- end of mapResource\n");
+    var built = Entries(CockpitSpaceTest.BuildMission(source, 99));
+    var text = Encoding.UTF8.GetString(built["mission"]);
+    Require(Balance(text) == 0 && text.Contains("\t\t[2] = \n\t\t{\n\t\t\t[\"rules\"] = {},\n\t\t\t[\"eventlist\"] = \"\",\n\t\t\t[\"comment\"] = \"Cockpit space test\",\n\t\t\t[\"predicate\"] = \"triggerStart\",\n", StringComparison.Ordinal)
+        && text.Contains("\t\t\t\t\t[\"file\"] = \"ResKey_CockpitSpaceTest\",\n\t\t\t\t\t[\"predicate\"] = \"a_do_script_file\",\n", StringComparison.Ordinal)
+        && text.Contains("\t\t[\"conditions\"] = \n\t\t{\n\t\t\t[1] = \"return(c_time_after(2) )\",\n\t\t\t[2] = \"return(true)\",\n\t\t}, -- end of [\"conditions\"]\n", StringComparison.Ordinal)
+        && text.Contains("\t\t\t[2] = \"a_do_script_file(getValueResourceByKey(\\\"ResKey_CockpitSpaceTest\\\"));\",\n\t\t}, -- end of [\"actions\"]\n", StringComparison.Ordinal)
+        && text.Contains("\t\t[\"funcStartup\"] = \n\t\t{\n\t\t\t[2] = \"if mission.trig.conditions[2]() then mission.trig.actions[2]() end\",\n\t\t}, -- end of [\"funcStartup\"]\n", StringComparison.Ordinal)
+        && text.Contains("\t\t\t[1] = true,\n\t\t}, -- end of [\"flag\"]", StringComparison.Ordinal), "the trigger, as DCS writes it:\n" + text);
+    Require(text.Length > mission.Length && Encoding.UTF8.GetString(built["l10n/DEFAULT/mapResource"]).Contains("\t[\"ResKey_Action_1\"] = \"hello.ogg\",\n\t[\"ResKey_CockpitSpaceTest\"] = \"cockpit_space_test.lua\",\n\t[\"ResKey_CockpitSpaceTick\"] = \"cockpit_space_tick.wav\",\n} -- end of mapResource", StringComparison.Ordinal)
+        && built["options"].SequenceEqual(Encoding.UTF8.GetBytes("options = {}\n")) && built["l10n/DEFAULT/briefing.png"].SequenceEqual(new byte[] { 1, 2, 3, 4 })
+        && Encoding.ASCII.GetString(built["l10n/DEFAULT/cockpit_space_tick.wav"], 0, 4) == "RIFF", "resources added, the rest kept");
+    var script = Encoding.UTF8.GetString(built["l10n/DEFAULT/cockpit_space_test.lua"]);
+    Require(script == CockpitSpaceTest.MissionScript(99) && !script.Contains("__", StringComparison.Ordinal) && script.Contains("local SEED = 100\n", StringComparison.Ordinal) && script.Contains("missionCommands.addSubMenu(\"Cockpit space test\")", StringComparison.Ordinal)
+        && script.Contains("trigger.action.explosion(", StringComparison.Ordinal) && script.Contains("env.info(\"CSPACE \" .. text)", StringComparison.Ordinal) && script.Contains("\"l10n/DEFAULT/cockpit_space_tick.wav\"", StringComparison.Ordinal)
+        && !script.Contains("Subtle", StringComparison.Ordinal) && !script.Contains("Normal", StringComparison.Ordinal) && !script.Contains("Strong", StringComparison.Ordinal) && Balance(script) == 0, "the script names no level");
+    Throws<InvalidDataException>(() => CockpitSpaceTest.BuildMission(CockpitSpaceTest.BuildMission(source, 1), 2));
+    Throws<InvalidDataException>(() => CockpitSpaceTest.BuildMission(Miz("not a mission", null), 2));
+    // A mission without triggers and without resources: the tables are made.
+    var bare = "mission = \n{\n" + T(1) + "[\"trig\"] = \n" + T(1) + "{\n" + T(2) + "[\"actions\"] = {},\n" + T(2) + "[\"events\"] = {},\n" + T(2) + "[\"func\"] = {},\n" + T(2) + "[\"flag\"] = {},\n"
+        + T(2) + "[\"conditions\"] = {},\n" + T(2) + "[\"funcStartup\"] = {},\n" + T(1) + "}, -- end of [\"trig\"]\n" + T(1) + "[\"trigrules\"] = {},\n} -- end of mission\n";
+    var bareBuilt = Entries(CockpitSpaceTest.BuildMission(Miz(bare, null), 3));
+    var bareText = Encoding.UTF8.GetString(bareBuilt["mission"]);
+    Require(Balance(bareText) == 0 && bareText.Contains("\t[\"trigrules\"] = \n\t{\n\t\t[1] = \n", StringComparison.Ordinal) && bareText.Contains("\t\t[\"funcStartup\"] = \n\t\t{\n\t\t\t[1] = \"if mission.trig.conditions[1]() then mission.trig.actions[1]() end\",\n", StringComparison.Ordinal)
+        && Encoding.UTF8.GetString(bareBuilt["l10n/DEFAULT/mapResource"]).Contains("[\"ResKey_CockpitSpaceTest\"] = \"cockpit_space_test.lua\"", StringComparison.Ordinal), "bare mission:\n" + bareText);
+    // A mission DCS ships (read only, when DCSVR_TEST_DCS_DIR names a DCS install): built the same way, with exactly one
+    // more MISSION START.
+    var quickStart = Environment.GetEnvironmentVariable("DCSVR_TEST_DCS_DIR") is { Length: > 0 } dcsDir ? Path.Combine(dcsDir, "Mods", "aircraft", "F-16C", "Missions", "QuickStart") : null;
+    var shipped = quickStart is not null && Directory.Exists(quickStart) ? Directory.GetFiles(quickStart, "*Cold and Dark.miz").FirstOrDefault() : null;
+    if (shipped is not null)
+    {
+        var original = Entries(File.ReadAllBytes(shipped));
+        var real = Entries(CockpitSpaceTest.BuildMission(File.ReadAllBytes(shipped), 5));
+        var before = Encoding.UTF8.GetString(original["mission"]); var after = Encoding.UTF8.GetString(real["mission"]);
+        int Count(string s, string what) => System.Text.RegularExpressions.Regex.Matches(s, System.Text.RegularExpressions.Regex.Escape(what)).Count;
+        Require(Count(after, "\"triggerStart\"") == Count(before, "\"triggerStart\"") + 1 && Count(after, "a_do_script_file(getValueResourceByKey(\\\"ResKey_CockpitSpaceTest\\\"))") == 1 && Balance(after) == Balance(before)
+            && original.Keys.All(real.ContainsKey) && original.Where(e => e.Key is not ("mission" or "l10n/DEFAULT/mapResource")).All(e => real[e.Key].AsSpan().SequenceEqual(e.Value)), "a shipped mission");
+    }
+    // The mission's dcs.log lines.
+    Require(CockpitSpaceTest.ParseLine("2026-11-25 10:00:01.123 INFO    SCRIPTING (Main): CSPACE rate 3 4") == new CockpitSpaceTest.MissionEvent("rate", 3, 4)
+        && CockpitSpaceTest.ParseLine("x CSPACE outside 2 az 135") == new CockpitSpaceTest.MissionEvent("outside", 2, 135) && CockpitSpaceTest.ParseLine("x CSPACE abx 1 X") == new CockpitSpaceTest.MissionEvent("abx", 1, null, "X")
+        && CockpitSpaceTest.ParseLine("x CSPACE rate 3 7") is null && CockpitSpaceTest.ParseLine("INFO EDCORE: nothing") is null && CockpitSpaceTest.ParseLine("x CSPACE start 9 16 3") == new CockpitSpaceTest.MissionEvent("start", 0), "log lines");
+    // The watcher: from the log's end, a new log (DCS started again) from its start; each trial's level set, none printed.
+    var log = Path.Combine(root, "cspace-kit", "dcs.log"); File.WriteAllText(log, new string('x', 400) + "\nCSPACE trial 1\n");
+    var copy = Path.Combine(root, "cspace-kit", "part-b.log"); var levels = new List<int?>(); var watchOut = new StringWriter();
+    using (var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
+    {
+        var watch = Task.Run(() => CockpitSpaceTestCli.Watch(log, 11, l => { lock (levels) levels.Add(l); }, copy, watchOut, cancel.Token, TimeSpan.FromMilliseconds(20)));
+        Thread.Sleep(150);
+        File.WriteAllText(log, "new\n");
+        Thread.Sleep(100);
+        foreach (var line in new[] { "a CSPACE start 9 16 3", "b CSPACE trial 1", "c CSPACE rate 1 3", "d CSPACE outside 1 az 90", "e CSPACE abxtrial 1", "f CSPACE abx 1 A", "g CSPACE abx 1 X", "h CSPACE end" })
+        { File.AppendAllText(log, line + "\n"); Thread.Sleep(30); }
+        Require(watch.Wait(TimeSpan.FromSeconds(10)), "the watcher ends at the mission's end line");
+    }
+    var expected = new int?[] { CockpitSpaceTest.CockpitOrder(11)[0], CockpitSpaceTest.OutsideOrder(11)[0], 0, CockpitSpaceTest.AbxXIsA(11, "b", 3)[0] ? 0 : 1 };
+    Require(levels.SequenceEqual(expected) && File.ReadAllLines(copy).Length == 8 && !File.ReadAllText(copy).Contains("xxx", StringComparison.Ordinal), "levels " + string.Join(",", levels) + "; copy " + File.ReadAllText(copy));
+    Require(!watchOut.ToString().Contains("Off", StringComparison.Ordinal) && !watchOut.ToString().Contains("Subtle", StringComparison.Ordinal) && !watchOut.ToString().Contains("Normal", StringComparison.Ordinal)
+        && watchOut.ToString().Contains("Cockpit trial 1: set.", StringComparison.Ordinal), "blind: " + watchOut);
+    // The statistics.
+    Require(Math.Abs(CockpitSpaceTest.BinomialP(7, 8) - 9 / 256.0) < 1e-12 && Math.Abs(CockpitSpaceTest.BinomialP(8, 8) - 1 / 256.0) < 1e-12 && CockpitSpaceTest.BinomialP(0, 8) == 1, "binomial");
+    Require(Math.Abs(CockpitSpaceTest.WilcoxonSignedRankP([0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 3, 4, 5, 6, 7, 8]) - 2 / 256.0) < 1e-12
+        && Math.Abs(CockpitSpaceTest.WilcoxonSignedRankP([0, 0, 0, 0], [1, -2, 3, 4]) - 0.375) < 1e-12 && CockpitSpaceTest.WilcoxonSignedRankP([1, 2], [1, 2]) == 1, "Wilcoxon");
+    // The analysis on a fixture session: Part A rates each level one step higher, one reversal at Off, 7 of 8 A/B/X;
+    // Part B likewise, one outside reversal at Off, 3 of 3 A/B/X.
+    var answers = new List<string> { "part,trial,stimulus,answer1,answer2" };
+    var reversalAt = key.Stimuli.First(s => s.Level == 0 && s.Front == false).Id;
+    foreach (var t in trials.A1)
+    {
+        var s = byId[t.Stimulus];
+        var fb = (s.Front == true) == (t.Stimulus != reversalAt) ? "front" : "back";
+        answers.Add($"a1,{t.Trial},{t.Stimulus},{s.Level + 1},{fb}");
+    }
+    foreach (var t in trials.A2) answers.Add($"a2,{t.Trial},,{((t.X == t.A) == (t.Trial != 1) ? "A" : "B")},");
+    var partB = new List<string> { "x CSPACE start 9 16 3" };
+    for (var n = 1; n <= 9; n++) partB.Add($"x CSPACE rate {n} {CockpitSpaceTest.CockpitOrder(77)[n - 1] + 2}");
+    var outsideFirstOff = Array.IndexOf(CockpitSpaceTest.OutsideOrder(77), 0) + 1;
+    for (var n = 1; n <= 16; n++) { partB.Add($"x CSPACE outside {n} az 45"); partB.Add($"x CSPACE heard {n} {(n == outsideFirstOff ? 135 : 45)}"); }
+    var xb = CockpitSpaceTest.AbxXIsA(77, "b", 3);
+    for (var n = 1; n <= 3; n++) partB.Add($"x CSPACE abxanswer {n} {(xb[n - 1] ? "A" : "B")}");
+    var analysis = CockpitSpaceTest.Analyze(77, CockpitSpaceTest.ReadAnswers(answers), partB);
+    Require(analysis.Levels.Select(l => l.Median).SequenceEqual(new double?[] { 1, 2, 3 }) && analysis.Levels.All(l => l.Count == 11), "medians: " + string.Join(",", analysis.Levels.Select(l => l.Median)));
+    Require(analysis.Levels[0].Reversals == 1 / 8.0 && analysis.Levels[1].Reversals == 0 && analysis.Outside[0].Reversals == 1 / 8.0 && analysis.Outside[1].Reversals == 0 && analysis.Outside[0].Median == 0, "reversals");
+    Require(analysis.Comparisons[0] is { Pairs: 11, MedianDifference: 1 } && Math.Abs(analysis.Comparisons[0].P - 2 / 2048.0) < 1e-12 && analysis.Comparisons[1].Pairs == 11, "Wilcoxon over A1 and B: " + analysis.Comparisons[0].P);
+    Require(analysis.Abx.Single(a => a.Part == "A2") is { Correct: 7, Trials: 8 } a2 && Math.Abs(a2.P - 9 / 256.0) < 1e-12 && analysis.Abx.Single(a => a.Part == "B") is { Correct: 3, Trials: 3 }, "A/B/X");
+    Require(analysis.Verdict.StartsWith("Subtle beats Off, and Normal beats Subtle", StringComparison.Ordinal), analysis.Verdict);
+    var report = CockpitSpaceTest.Report(analysis);
+    Require(report.Contains("| Subtle | 11 | 2 | 27 % | 0 % |", StringComparison.Ordinal) && report.Contains("| A2 | 7 of 8 | 0.035 |", StringComparison.Ordinal), report);
+    // Subtle with more reversals than Off is not accepted, whatever its ratings.
+    var worse = answers.Select(l => l.StartsWith("a1,", StringComparison.Ordinal) && byId[l.Split(',')[2]].Level == 1 ? string.Join(",", l.Split(',')[..4]) + "," + (byId[l.Split(',')[2]].Front == true ? "back" : "front") : l).ToList();
+    Require(CockpitSpaceTest.Analyze(77, CockpitSpaceTest.ReadAnswers(worse), null).Verdict.StartsWith("Subtle has more front/back reversals", StringComparison.Ordinal), "reversals veto");
+    Require(CockpitSpaceTest.Analyze(77, null, null).Verdict == "Not enough answers for a verdict.", "empty");
+    // analyze through the command line writes the report next to the answers.
+    File.WriteAllLines(Path.Combine(folder, "answers.csv"), answers); File.WriteAllLines(Path.Combine(folder, "part-b.log"), partB); File.WriteAllText(Path.Combine(folder, "seed.txt"), "77\n");
+    Require(CockpitSpaceTestCli.Run(["analyze", "--folder", folder], () => throw new InvalidOperationException(), new StringWriter(), error) == 0 && File.ReadAllText(Path.Combine(folder, "summary.md")).StartsWith("# Cockpit space listening test", StringComparison.Ordinal)
+        && File.Exists(Path.Combine(folder, "summary.json")), "analyze: " + error);
+    // No personal data in what the kit makes or ships: no user folder, no user name (P10).
+    var made = string.Join("\n", Directory.GetFiles(folder, "*.json").Select(File.ReadAllText)) + script + report;
+    var kit = Directory.Exists(Path.Combine(workspace, "tools/listening-test")) ? string.Join("\n", Directory.GetFiles(Path.Combine(workspace, "tools/listening-test")).Select(File.ReadAllText)) : "";
+    foreach (var text2 in new[] { made, kit })
+        Require(!text2.Contains(@"\Users\", StringComparison.OrdinalIgnoreCase) && !text2.Contains("/Users/", StringComparison.OrdinalIgnoreCase) && (Environment.UserName.Length < 4 || !text2.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase)), "no personal data");
+    Require(kit.Length > 0 || !Directory.Exists(Path.Combine(workspace, "tools")), "the kit is in tools/listening-test");
 });
 Test("3D audio: Checks refuse values outside the module's ranges, a key in use twice, and say what happens to DCS's speaker layout", () =>
 {

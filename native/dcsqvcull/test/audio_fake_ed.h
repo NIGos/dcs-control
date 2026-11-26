@@ -40,13 +40,16 @@ constexpr uint32_t kDrvP3a = 0x4d00, kDrvP3b = 0x1b9e0, kDrvP5 = 0x20160, kMixFn
 constexpr uint32_t kWasapiSize = 0x2800, kSoundSize = 0x400, kVoiceSize = 0x1f10;
 // test data inside a voice (bytes ed_sound's offsets never use here)
 constexpr uint32_t kVPhase = 0x1800, kVStep = 0x1808, kVAmp = 0x1810, kVKind = 0x1814, kVRng = 0x1818,
-                   kVRemaining = 0x1820, kVAlive = 0x1828, kVEnded = 0x182c;
+                   kVRemaining = 0x1820, kVAlive = 0x1828, kVEnded = 0x182c, kVLp = 0x1830, kVBrown = 0x1834,
+                   kVSkip = 0x1838;  // the mix passes this voice without rendering it (a paused or loading voice)
 constexpr uint32_t kSndCrosstalk = 0x300;  // test field: crosstalk x of the pan law
 // Stereo waves: kSine plays sin(ph) left and sin(1.3 ph + 0.5) right, kNoise two independent noises (decorrelated
 // channels), kDual the same sine on both (DCS's dual-mono stereo files), kDc the same DC on both, kDcSplit DC amp left
 // and amp / 4 right (a side for click tests), kPartial a common noise plus 0.9 x independent noise per channel
-// (correlated in part: P_S / P_M about 0.29, loudness factor about 1.13).
-enum Kind : uint32_t { kSine = 0, kDc = 1, kNoise = 2, kDual = 3, kDcSplit = 4, kPartial = 5 };
+// (correlated in part: P_S / P_M about 0.29, loudness factor about 1.13), kEngine a DCS-like engine: harmonics of hz up
+// to 12 x hz (amplitude 1/sqrt(h)) plus low-passed brown noise, the same in both channels, and 0.25 x independent noise
+// per channel (voices with the same seed and hz play the same signal: DCS's engine layers).
+enum Kind : uint32_t { kSine = 0, kDc = 1, kNoise = 2, kDual = 3, kDcSplit = 4, kPartial = 5, kEngine = 6 };
 
 using DrvP3a = void (*)(void** soundSlot);
 using DrvP3b = void (*)(void* voice, uint8_t ctx2d);
@@ -138,6 +141,26 @@ inline float NextSample(void* v, float* right) {
     W<uint32_t>(v, kVRng, st);
     l = amp * (s + 0.9f * n1);
     rr = amp * (s + 0.9f * n2);
+  } else if (kind == kEngine) {
+    uint32_t st = R<uint32_t>(v, kVRng);
+    st = st * 1664525u + 1013904223u;
+    const float c = static_cast<float>(st >> 8) / 8388608.0f - 1.0f;
+    st = st * 1664525u + 1013904223u;
+    const float n1 = static_cast<float>(st >> 8) / 8388608.0f - 1.0f;
+    st = st * 1664525u + 1013904223u;
+    const float n2 = static_cast<float>(st >> 8) / 8388608.0f - 1.0f;
+    W<uint32_t>(v, kVRng, st);
+    float brown = R<float>(v, kVBrown), lp = R<float>(v, kVLp);
+    brown = 0.995f * brown + 0.05f * c;
+    lp += 0.0875f * (brown - lp);  // about 700 Hz
+    W<float>(v, kVBrown, brown), W<float>(v, kVLp, lp);
+    double e = 1.2 * lp;
+    for (int h = 1; h <= 12; ++h) e += 0.12 / std::sqrt(double(h)) * std::sin(ph * h + h);
+    ph += R<double>(v, kVStep);
+    if (ph > 6.283185307179586 * 1000) ph -= 6.283185307179586 * 1000;
+    W<double>(v, kVPhase, ph);
+    l = amp * static_cast<float>(0.5 * e + 0.25 * 0.1 * n1);
+    rr = amp * static_cast<float>(0.5 * e + 0.25 * 0.1 * n2);
   } else if (kind == kNoise) {
     uint32_t st = R<uint32_t>(v, kVRng);
     st = st * 1664525u + 1013904223u;
@@ -207,8 +230,18 @@ inline int FakeVoiceRender(void* v, float* out, uint32_t frames) {
   return 1;
 }
 
+// ed_sound's master processing after the voices (sub_1ca60, the limiter, and the global gain ramp at 0x3a330, hook spec
+// 2.3), here as one gain over `out`: whatever reaches `out` after the mix skips it. 1 (the default) changes nothing.
+inline std::atomic<float> g_fakeMasterGain{1.0f};
+inline void FakeMaster(void*, float* out, uint32_t frames) {
+  const float g = g_fakeMasterGain.load(std::memory_order_relaxed);
+  if (g != 1.0f)
+    for (uint32_t i = 0; i < 2 * frames; ++i) out[i] *= g;
+}
 inline void FakeMixRef(void* renderer, float* out, uint32_t frames) {
-  for (void* v = R<void*>(renderer, 0x20); v; v = R<void*>(v, 0)) FakeVoiceRender(v, out, frames);
+  for (void* v = R<void*>(renderer, 0x20); v; v = R<void*>(v, 0))
+    if (!R<uint8_t>(v, kVSkip)) FakeVoiceRender(v, out, frames);
+  FakeMaster(renderer, out, frames);
 }
 
 SRWLOCK g_edLock = SRWLOCK_INIT;
@@ -332,13 +365,19 @@ inline Image Build(uint32_t timestamp, uint32_t sizeOfImage = kImageSize) {
   // ---- mix 0x1b180-0x1b45a ----
   im.B(0x1b180, {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41,
                  0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF1, 0x4C, 0x8D, 0x79, 0x20});
-  im.B(0x1b19d, {0x45, 0x8B, 0xE0, 0x48, 0x8B, 0xDA, 0x33, 0xED, 0x49, 0x8B, 0x3F, 0x48, 0x85, 0xFF, 0x74, 0x76, 0xEB, 0x41});
+  im.B(0x1b19d, {0x45, 0x8B, 0xE0, 0x48, 0x8B, 0xDA, 0x33, 0xED, 0x49, 0x8B, 0x3F, 0x48, 0x85, 0xFF, 0x74, 0x76, 0xEB, 0x11});
+  // each voice: skipped (not rendered) when its kVSkip byte is set, as ed_sound passes voices that do not play
+  im.B(0x1b1c0, {0x80, 0xBF, 0x38, 0x18, 0x00, 0x00, 0x00, 0x75, 0x52, 0xEB, 0x25});
   im.B(0x1b1f0, {0x45, 0x8B, 0xC4, 0x48, 0x8B, 0xD3, 0x48, 0x8B, 0xCF, 0xFF, 0xC5, 0xE8});
   im.Rel(0x1b1fc, 0x1b200, 0x165d0);  // P4: call voice render
   im.B(0x1b200, {0x85, 0xC0, 0x75, 0x17, 0xEB, 0x15});
-  im.B(0x1b21b, {0x48, 0x8B, 0x3F, 0x48, 0x85, 0xFF, 0x75, 0xCD});
-  im.B(0x1b223, {0x48, 0x83, 0xC4, 0x20, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5C, 0x5F, 0x5E, 0x48, 0x8B, 0x5C, 0x24, 0x10, 0x48,
+  im.B(0x1b21b, {0x48, 0x8B, 0x3F, 0x48, 0x85, 0xFF, 0x75, 0x9D});
+  // after the voices: the master processing, FakeMaster(renderer = rsi, out = rbx, frames = r12d) through a thunk
+  im.B(0x1b223, {0x48, 0x8B, 0xCE, 0x48, 0x8B, 0xD3, 0x45, 0x8B, 0xC4, 0xE8});
+  im.Rel(0x1b22d, 0x1b231, 0x1b300);
+  im.B(0x1b231, {0x48, 0x83, 0xC4, 0x20, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5C, 0x5F, 0x5E, 0x48, 0x8B, 0x5C, 0x24, 0x10, 0x48,
                  0x8B, 0x6C, 0x24, 0x18, 0xC3});
+  im.JumpTo(0x1b300, reinterpret_cast<const void*>(&FakeMaster));
   // ---- voice render 0x165d0 ----
   im.B(0x165d0, {0x40, 0x53, 0x48, 0x83, 0xEC, 0x40, 0x80, 0xB9, 0xC0, 0x0E, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9, 0x0F, 0x10,
                  0x41, 0x20, 0x48, 0x83, 0xC4, 0x40, 0x5B});
@@ -352,6 +391,14 @@ inline Image Build(uint32_t timestamp, uint32_t sizeOfImage = kImageSize) {
   im.B(0x1c1c0 + 0x29c, {0xF3, 0x42, 0x0F, 0x11, 0x74, 0xFD, 0x4C});
   im.B(0x1c1c0 + 0x2a6, {0x44, 0x3B, 0xBE, 0x74, 0x22, 0x00, 0x00});
   im.B(0x1c1c0 + 0x42e, {0x80, 0xBB, 0xA6, 0x01, 0x00, 0x00, 0x00});  // cmp byte [rbx+0x1a6], 0 (auto_width)
+  // ---- cockpit space (the optional rows): the sound update's canopy damping at 0x7010 (function 0x6f70-0x72ba) and
+  // its listener-frame orientation at 0x735d (function 0x72c0-0x7990), ed_sound's own bytes; never executed ----
+  im.B(0x7010, {0x80, 0xBF, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x74, 0x35, 0x80, 0xBB, 0xA8, 0x01, 0x00, 0x00, 0x00, 0x74,
+                0x2C, 0x48, 0x8B, 0x43, 0x50, 0x48, 0x85, 0xC0, 0x74, 0x10, 0x48, 0x8B, 0x40, 0x18, 0x8B, 0x88, 0xA0,
+                0x00, 0x00, 0x00, 0x89, 0x8B, 0xB0, 0x01, 0x00, 0x00});
+  im.B(0x7317, {0x48, 0x8D, 0xB9, 0xD0, 0x00, 0x00, 0x00});  // lea rdi, [rcx+0xd0]
+  im.B(0x735d, {0x48, 0x8D, 0x93, 0x80, 0x00, 0x00, 0x00, 0x4D, 0x8D, 0x47, 0x78, 0x48, 0x8D, 0x4F, 0x18, 0xE8});
+  im.Rel(0x736d, 0x7371, 0x1300);
   // ---- WASAPI loop 0x1ff00-0x20312: driver void drv(Wasapi*, float* out, uint32_t frames) ----
   im.B(0x20160, {0x53, 0x57, 0x55, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xD9, 0x41, 0x8B, 0xF8, 0x48, 0x89, 0x54, 0x24, 0x20,
                  0x48, 0x8D, 0x6C, 0x24, 0x41, 0x90});
@@ -461,6 +508,13 @@ struct World {
     }
     W<float>(v, 0x618, R<float>(v, 0x24));
   }
+  // Cockpit space: the host's allow-cockpit-gain flag and the gain DCS applied (+0x1a8, +0x1b0), and the source's
+  // orientation in the listener frame (+0xe8, x y z w).
+  void SetCockpitGain(int i, bool allow, float gain) {
+    W<uint8_t>(sounds[i], 0x1a8, allow ? 1 : 0);
+    W<float>(sounds[i], 0x1b0, gain);
+  }
+  void SetOrient(int i, const double q[4]) { memcpy(sounds[i] + 0xe8, q, 32); }
   // The sdef's auto_width with its inner_radius (as DCS stores them in the sound: +0x1a6, +0x144).
   void SetAutoWidth(int i, float innerRadius) {
     W<uint8_t>(sounds[i], 0x1a6, 1);
