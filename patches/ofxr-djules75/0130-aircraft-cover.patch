@@ -23,9 +23,10 @@ focus-MV review's HIGH-1 and LOW-3.
   dispatch, no bit, every composition as before (output hashes of XRFG_TEST_DCS_MOTION and XRFG_TEST_FG_FOCUS_MOTION
   equal to 0129's).
 - Review HIGH-1 (0128): an eye's focus MVs are used only where the pair's previous frame has that eye's focus record
-  too and its fovTan moved by at most a quarter focus texel; the residual maps the previous end with the previous
-  frame's tangents (focus_prev_fov, DcsMotionParameters 48 DWORDs). Else the periphery's MVs cover the focus region, as
-  without dcs_motion_focus. Counted: CockpitMaskPairCounters::motion_focus_moved, cockpit_mask result=12 c bits 16-31.
+  too and its fovTan moved by at most 1.5 focus texels (the DLSS jitter moves the jittered fovTan by 0.5-1 texel every
+  frame; gate P1 live: with the gaze still DCS's focus MVs match the CURRENT fovTan at both ends, residual 0.000 px
+  against the periphery's MVs, so the residual keeps the current fovTan; focus_prev_fov, DcsMotionParameters 48 DWORDs,
+  stays zero). Else the periphery's MVs cover the focus region, as without dcs_motion_focus. Counted: CockpitMaskPairCounters::motion_focus_moved, cockpit_mask result=12 c bits 16-31.
 - Review LOW-3: the focus import checks the jitters are finite, as the periphery's.
 - 0129's diagnosis records are 16 bytes (json recordStride): word 2 the vector composed along (f16 x, y), word 3 bit 0
   dcs_motion_cover's aircraft vector, bit 1 its one-frame rule, bit 2 the reach bit.
@@ -35,6 +36,11 @@ focus-MV review's HIGH-1 and LOW-3.
   along the true motion to within 1 px; gates: HUD, smoke, lights, wires, far and the image not worse with the key, no
   change without MVs, the crossings' cross-fade fraction down. XRFG_TEST_DCS_MOTION_BENCH_SKY=1: the bench's world is
   the sky.
+- Live round 2 (fg-cover, 2026-11-26): the cover's reach is two MV texels (kCoverReach), and lever 2's fixed point
+  counts when it lands within two cells of a cell of the candidate's class and vector, where the two frames' samples
+  agree (live 99.97 % of the aircraft candidates' fixed points fell on cells DCS calls sky, 65 % within two cells of the
+  aircraft). tests/fg_cover.inc XRFG_TEST_FG_COVER_LIVE=<dir>: live pairs exported from a flight's dumps
+  (export_live_fixture.py): the frame's MV / class atlases, the real frames in target pixels, the measured motion.
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index e5237e5..97ab563 100644
@@ -207,7 +213,7 @@ index cc8b140..e1b85a6 100644
                      }
                      // DCS Control (0049): the HUD symbology: what the frames
 diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
-index aec6407..a112431 100644
+index aec6407..c0dbb66 100644
 --- a/src/d3d12/d3d12_frame_synthesizer.cpp
 +++ b/src/d3d12/d3d12_frame_synthesizer.cpp
 @@ -74,6 +74,7 @@
@@ -299,7 +305,7 @@ index aec6407..a112431 100644
  [[nodiscard]] const ExtrasShader* find_extras_shader(const void* plain) noexcept {
      for (const ExtrasShader& shader : kExtrasShaders) {
          if (shader.plain == plain) return &shader;
-@@ -634,13 +658,21 @@ struct DcsMotionParameters {
+@@ -634,13 +658,25 @@ struct DcsMotionParameters {
      std::array<float, 2> focus_offset{};
      UINT focus_flags{};
      UINT periphery_cell{};
@@ -318,11 +324,15 @@ index aec6407..a112431 100644
 +// resample), and the largest move of a focus view's tangents between the
 +// pair's frames, in its MV texels, for which its MVs are still used.
 +constexpr UINT kDcsMotionCoverFlag = 4U;
-+constexpr float kDcsMotionFocusMaxMoveTexels = 0.25F;
++// Live round 2 (gate P1, fixed gaze): a focus view's fovTan is DCS's jittered projection's, so it moves by the DLSS
++// jitter (0.5-1 focus texel) every frame while DCS's focus MVs match the CURRENT fovTan at both ends exactly (residual
++// 0.000 px against the periphery's MVs): the residual keeps the current fovTan (focus_prev_fov stays zero), and a pair
++// is refused only where the fovTan moved by more than the jitter can (the gaze moved the inset).
++constexpr float kDcsMotionFocusMaxMoveTexels = 1.5F;
  // The fine grid's cell, and the depth plane's place in the MVs' block (t3).
  constexpr UINT kDcsMotionFineCell = 4U;
  constexpr UINT kDcsMotionDepthSrvIndex = 3U;
-@@ -680,14 +712,17 @@ constexpr UINT kQualityLinearInputBit = 1U << 17U;
+@@ -680,14 +716,17 @@ constexpr UINT kQualityLinearInputBit = 1U << 17U;
  constexpr UINT kQualityEdgeChoiceBit = 1U << 18U;
  constexpr UINT kQualityMaskBandBit = 1U << 19U;
  constexpr UINT kQualityHudGuardBit = 1U << 20U;
@@ -343,7 +353,7 @@ index aec6407..a112431 100644
  // The sky's MVs (the camera's motion at infinity, R70 T2) instead of its flow
  // (the fixtures: a little closer to the true middle frame, and no worse).
  constexpr bool kDcsMotionSkyDefault = true;
-@@ -1522,7 +1557,7 @@ constexpr UINT kDcsMotionDiagBit = 1U << 28U;
+@@ -1522,7 +1561,7 @@ constexpr UINT kDcsMotionDiagBit = 1U << 28U;
  constexpr UINT64 kFgDiagHeaderOffset = 128;
  constexpr UINT64 kFgDiagRecordsOffset = 256;
  constexpr std::uint32_t kFgDiagMagic = 0x47444746U; // 'FGDG'
@@ -352,7 +362,7 @@ index aec6407..a112431 100644
  
  struct FgDiagSession {
      std::uint32_t id{};
-@@ -2132,6 +2167,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2132,6 +2171,7 @@ struct D3D12FrameSynthesizer::Impl {
      ComPtr<ID3D12PipelineState> nvidia_triple_bidirectional_graphics_pipeline_depth_motion;
      ComPtr<ID3D12PipelineState> dcs_motion_resample_pipeline;
      ComPtr<ID3D12PipelineState> dcs_motion_scatter_pipeline;
@@ -360,7 +370,7 @@ index aec6407..a112431 100644
      ComPtr<ID3D12Resource> dcs_motion_target;
      ComPtr<ID3D12Resource> dcs_motion_scatter;
      ComPtr<ID3D12Resource> dcs_motion_counters;
-@@ -2204,6 +2240,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2204,6 +2244,7 @@ struct D3D12FrameSynthesizer::Impl {
          bits |= (q & kFgQualityEdgeChoice) != 0U ? kQualityEdgeChoiceBit : 0U;
          bits |= (q & kFgQualityMaskBand) != 0U ? kQualityMaskBandBit : 0U;
          bits |= (q & kFgQualityHudGuard) != 0U ? kQualityHudGuardBit : 0U;
@@ -368,7 +378,7 @@ index aec6407..a112431 100644
          return bits;
      }
      // DCS Control (0104): the quality bits next to the MVs' (apply_dcs_motion
-@@ -2233,6 +2270,14 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2233,6 +2274,14 @@ struct D3D12FrameSynthesizer::Impl {
          D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
          ComPtr<ID3D12PipelineState> pipeline;
          bool failed{};
@@ -383,7 +393,7 @@ index aec6407..a112431 100644
      };
      std::vector<ExtrasTwin> extras_twins;
      [[nodiscard]] HRESULT create_composition_pipeline(
-@@ -2244,6 +2289,11 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2244,6 +2293,11 @@ struct D3D12FrameSynthesizer::Impl {
                  twin.plain = static_cast<ID3D12PipelineState*>(*out);
                  twin.description = *description;
                  twin.description.PS = {shader->extras, shader->extras_size};
@@ -395,7 +405,7 @@ index aec6407..a112431 100644
                  extras_twins.push_back(std::move(twin));
              }
          }
-@@ -2256,6 +2306,13 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2256,6 +2310,13 @@ struct D3D12FrameSynthesizer::Impl {
          // is in the twins only; with no quality bit they compose as the plain).
          return quality_bits() != 0U || fg_diag_pair;
      }
@@ -409,7 +419,7 @@ index aec6407..a112431 100644
      // DCS Control (0125): with DCS's motion vectors (NVIDIA), the twins are
      // made on a thread of their own (start_extras_build), off the frame
      // thread: made there on first use, they held the first pair after a key
-@@ -2288,6 +2345,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2288,6 +2349,7 @@ struct D3D12FrameSynthesizer::Impl {
      [[nodiscard]] bool extras_twin_missing() const noexcept {
          for (const ExtrasTwin& twin : extras_twins) {
              if (twin.pipeline == nullptr && !twin.failed) return true;
@@ -417,7 +427,7 @@ index aec6407..a112431 100644
          }
          return false;
      }
-@@ -2315,11 +2373,19 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2315,11 +2377,19 @@ struct D3D12FrameSynthesizer::Impl {
          try {
              auto build = std::make_shared<ExtrasBuild>();
              build->device = device;
@@ -439,7 +449,7 @@ index aec6407..a112431 100644
              build->pipelines.resize(build->descriptions.size());
              build->states = std::make_unique<std::atomic<std::uint8_t>[]>(build->descriptions.size());
              for (std::size_t index = 0; index < build->descriptions.size(); ++index) build->states[index].store(0);
-@@ -2355,26 +2421,31 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2355,26 +2425,31 @@ struct D3D12FrameSynthesizer::Impl {
              extras_build.reset(); // no thread: the twins are made on first use, as in 0123
          }
      }
@@ -482,7 +492,7 @@ index aec6407..a112431 100644
          }
          return pipeline;
      }
-@@ -2382,11 +2453,19 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2382,11 +2457,19 @@ struct D3D12FrameSynthesizer::Impl {
      // (it has ended: no wait), its time kept. Called per pair; cheap.
      void finish_extras_build() noexcept {
          if (extras_build == nullptr || !extras_build->done.load(std::memory_order_acquire)) return;
@@ -507,7 +517,7 @@ index aec6407..a112431 100644
          }
          extras_build_microseconds = extras_build->microseconds.load(std::memory_order_relaxed);
          extras_build.reset();
-@@ -2402,7 +2481,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2402,7 +2485,7 @@ struct D3D12FrameSynthesizer::Impl {
          // pipeline made here). Until a twin is there the pair composes with
          // the plain pipeline.
          start_extras_build_once();
@@ -516,7 +526,7 @@ index aec6407..a112431 100644
          if (twin != pipeline) ++extras_binds;
          if (twin != pipeline && fg_diag_pair) fg_diag_twin = true; // DCS Control (0129)
          return twin;
-@@ -2411,6 +2490,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -2411,6 +2494,7 @@ struct D3D12FrameSynthesizer::Impl {
      void make_extras_twins() noexcept {
          for (ExtrasTwin& twin : extras_twins) {
              static_cast<void>(extras_twin(twin.plain.Get()));
@@ -524,7 +534,7 @@ index aec6407..a112431 100644
          }
      }
      // The composition for `pipeline`: its masked counterpart while the pair
-@@ -3083,6 +3163,13 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -3083,6 +3167,13 @@ struct D3D12FrameSynthesizer::Impl {
                      &compute_description, IID_PPV_ARGS(dcs_motion_scatter_pipeline.GetAddressOf())))) {
                  dcs_motion_scatter_pipeline.Reset();
              }
@@ -538,19 +548,19 @@ index aec6407..a112431 100644
          }
          D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_description{};
          graphics_description.pRootSignature = root_signature.Get();
-@@ -6003,19 +6090,53 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -6003,19 +6094,53 @@ struct D3D12FrameSynthesizer::Impl {
          // current frame has a focus view's MVs for an eye a target view uses
          // (one grid per pair: the view blocks share t11 / t12).
          bool fine = false;
 +        // DCS Control (0130): review HIGH-1. With eye-tracked Quad Views the
 +        // focus projection moves with the gaze, and DCS's MVs of a focus view
-+        // are made with that view's own previous camera. An eye's focus MVs
++        // may carry the change of that view's projection. An eye's focus MVs
 +        // are used only where the previous frame has the same eye's focus
-+        // record too (its tangents map the previous end, focus_prev_fov) and
-+        // the tangents moved by at most kDcsMotionFocusMaxMoveTexels between
-+        // the two frames: then whichever projection DCS's previous matrix
-+        // holds, the two readings differ by less than that. Otherwise that
-+        // eye's focus region takes the periphery's MVs, as without the key.
++        // record too and the tangents moved by at most
++        // kDcsMotionFocusMaxMoveTexels (the DLSS jitter moves them every
++        // frame; the MVs then match the current tangents at both ends, gate
++        // P1 live). Otherwise that eye's focus region takes the periphery's
++        // MVs, as without the key.
 +        std::array<bool, 2> focus_usable{};
 +        bool focus_moved = false;
          if (dcs_motion_focus_enabled() && dcs_motion_fine_ready) {
@@ -594,7 +604,7 @@ index aec6407..a112431 100644
              if (eye >= 2U || (!current->motion_views[eye].valid && !with_focus)) {
                  continue;
              }
-@@ -6030,7 +6151,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -6030,7 +6155,7 @@ struct D3D12FrameSynthesizer::Impl {
              parameters.output_height =
                  (static_cast<UINT>(mapping.target_rect[3]) + grid_cell - 1U) / grid_cell;
              parameters.flags = (current->motion_class && current->motion_class_texture != nullptr ? 1U : 0U) |
@@ -603,15 +613,7 @@ index aec6407..a112431 100644
              // DCS Control (0128): the fine grid's periphery cells, and the
              // focus view's MVs (and depth) of this eye where the frame has them.
              if (fine) {
-@@ -6043,6 +6164,7 @@ struct D3D12FrameSynthesizer::Impl {
-                         (depth ? kDcsMotionFocusDepth : 0U);
-                     parameters.focus_rect = {float(focus.x), float(focus.y), float(focus.width), float(focus.height)};
-                     parameters.focus_fov = focus.fov_tan;
-+                    parameters.focus_prev_fov = previous_frame->motion_focus_views[eye].fov_tan; // DCS Control (0130)
-                     parameters.focus_offset = {focus.offset_px[0], focus.offset_px[1]};
-                     any_depth = any_depth || depth;
-                 }
-@@ -6169,6 +6291,21 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -6169,6 +6294,21 @@ struct D3D12FrameSynthesizer::Impl {
                  2, static_cast<UINT>(sizeof(DcsMotionParameters) / sizeof(UINT)), &views[index], 0);
              list->Dispatch((views[index].output_width + 7U) / 8U, (views[index].output_height + 7U) / 8U, 1);
          }
@@ -633,7 +635,7 @@ index aec6407..a112431 100644
          std::array<D3D12_RESOURCE_BARRIER, 2> after{};
          UINT after_count = 0;
          after[after_count++] = transition_barrier(
-@@ -6405,6 +6542,11 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -6405,6 +6545,11 @@ struct D3D12FrameSynthesizer::Impl {
          fg_diag_bind_uav(slot, false);
          FgDiagTrigger& trigger = FgDiagTrigger::get();
          if (!trigger.enabled()) return;
@@ -645,7 +647,7 @@ index aec6407..a112431 100644
          const FgDiagSession session = trigger.current();
          const std::int64_t now = FgDiagTrigger::now();
          if (session.id != fg_diag_session) {
-@@ -6584,7 +6726,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -6584,7 +6729,7 @@ struct D3D12FrameSynthesizer::Impl {
                  "\"cell\":%u,\"grid\":[%u,%u],\"useGameMotion\":%u,\"qualityBits\":%u,\"motionFlags\":%u,"
                  "\"targetRect\":%s,\"targetTangents\":%s,\"targetToPrevious\":%s,\"sourceRect\":%s,\"sourceFov\":%s,"
                  "\"offset\":%s,\"focusRect\":%s,\"focusFov\":%s,\"focusOffset\":[%.9g,%.9g],\"focusFlags\":%u,"
@@ -654,7 +656,7 @@ index aec6407..a112431 100644
                  session.id, session.tag.c_str(), hud_allocation_owner(), index, fg_diag_lines,
                  static_cast<long long>(FgDiagTrigger::now()), static_cast<long long>(FgDiagTrigger::get().frequency()),
                  static_cast<unsigned long long>(image_description.Width), image_description.Height,
-@@ -6597,7 +6739,7 @@ struct D3D12FrameSynthesizer::Impl {
+@@ -6597,7 +6742,7 @@ struct D3D12FrameSynthesizer::Impl {
                  f4(p.target_tangents).c_str(), f4(p.target_to_previous).c_str(), f4(p.source_rect).c_str(),
                  f4(p.source_fov).c_str(), f4(p.offset).c_str(), f4(p.focus_rect).c_str(), f4(p.focus_fov).c_str(),
                  p.focus_offset[0], p.focus_offset[1], p.focus_flags, p.periphery_cell, pair_mask_bound ? 1 : 0,
@@ -664,7 +666,7 @@ index aec6407..a112431 100644
              e.used = 0;
              e.busy.store(true, std::memory_order_release);
 diff --git a/src/d3d12/dcs_motion.hlsl b/src/d3d12/dcs_motion.hlsl
-index 47f6d25..7ddae63 100644
+index 47f6d25..f22c0f0 100644
 --- a/src/d3d12/dcs_motion.hlsl
 +++ b/src/d3d12/dcs_motion.hlsl
 @@ -61,6 +61,29 @@
@@ -697,7 +699,7 @@ index 47f6d25..7ddae63 100644
  
  SamplerState LinearClamp : register(s0);
  Texture2D<float2> MotionSource : register(t0);
-@@ -101,9 +124,24 @@ cbuffer DcsMotionParameters : register(b0) {
+@@ -101,9 +124,27 @@ cbuffer DcsMotionParameters : register(b0) {
      float2 FocusOffset;
      uint FocusFlags;
      uint PeripheryCell;
@@ -710,6 +712,9 @@ index 47f6d25..7ddae63 100644
 +// DCS Control (0130): dcs_motion_cover.
 +static const uint kResampleCover = 4u;
 +static const uint kScatterNearBit = 0x80000000u;
++// DCS Control (0130, live round 2): the cover's reach in MV texels. Live the visible aircraft reached beyond its model
++// texels by one to three texels (DLSS spreads it), one texel left most of it on the sky.
++static const int kCoverReach = 2;
 +
 +bool cover_on() {
 +    return (Flags & kResampleCover) != 0u;
@@ -722,7 +727,7 @@ index 47f6d25..7ddae63 100644
  
  float3 rotate_by_quaternion(float4 quaternion, float3 input_vector) {
      return input_vector + 2.0 * cross(
-@@ -164,9 +202,35 @@ bool target_residual(float2 pixel, float2 position, float2 motion, out float2 re
+@@ -164,9 +205,35 @@ bool target_residual(float2 pixel, float2 position, float2 motion, out float2 re
      return front && finite2(residual) && length(residual) <= 1024.0;
  }
  
@@ -735,8 +740,8 @@ index 47f6d25..7ddae63 100644
 +    int2 pick = nearest;
 +    [branch] if ((load_class(nearest) & 0x80u) != 0u) {
 +        float best = 1.0e9;
-+        [unroll] for (int y = -1; y <= 1; ++y) {
-+            [unroll] for (int x = -1; x <= 1; ++x) {
++        [unroll] for (int y = -kCoverReach; y <= kCoverReach; ++y) {
++            [unroll] for (int x = -kCoverReach; x <= kCoverReach; ++x) {
 +                int2 texel = nearest + int2(x, y);
 +                bool inside = all(texel >= 0) && all(texel < int2(SourceRect.zw));
 +                float2 offset = float2(texel) + 0.5 - position;
@@ -759,7 +764,7 @@ index 47f6d25..7ddae63 100644
      int2 nearest = int2(floor(position));
      klass = load_class(nearest);
      float2 at = position - 0.5;
-@@ -181,6 +245,23 @@ float2 motion_around(float2 position, out uint klass) {
+@@ -181,6 +248,23 @@ float2 motion_around(float2 position, out uint klass) {
      return one ? lerp(lerp(a, b, weight.x), lerp(c, d, weight.x), weight.y) : load_motion(nearest);
  }
  
@@ -783,7 +788,7 @@ index 47f6d25..7ddae63 100644
  // The cell `thread_id` of a grid of `grid` cells of `cell_size` pixels from the
  // periphery's MVs: `result` the current frame's own field, `solved` each
  // output's fixed point (DCS Control 0128: the body of the resample before it,
-@@ -191,8 +272,16 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
+@@ -191,8 +275,16 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
      float2 position;
      uint klass = 0u;
      bool interior = false;
@@ -800,7 +805,7 @@ index 47f6d25..7ddae63 100644
          klass = load_class(nearest);
          float2 motion = load_motion(nearest);
          // One surface around: every texel a neighbouring cell's sample can
-@@ -205,7 +294,7 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
+@@ -205,7 +297,7 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
              abs(float2(TargetTangents.y - TargetTangents.x, TargetTangents.w - TargetTangents.z)) /
              max(TargetRect.zw, float2(1.0, 1.0));
          int reach = int(clamp(ceil(max(texels_per_pixel.x, texels_per_pixel.y) * float(cell_size)), 1.0, 2.0));
@@ -809,7 +814,7 @@ index 47f6d25..7ddae63 100644
              thread_id.x + 1u < grid.x && thread_id.y + 1u < grid.y &&
              all(nearest - reach >= 0) && all(nearest + reach < int2(SourceRect.zw));
          [loop] for (int y = -reach; y <= reach && interior; ++y) {
-@@ -222,8 +311,9 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
+@@ -222,8 +314,9 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
              motion = motion_around(position, unused);
          }
          float2 residual;
@@ -820,7 +825,7 @@ index 47f6d25..7ddae63 100644
          }
      }
      // Each output's instant: the current pixel c whose content is at this
-@@ -252,7 +342,7 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
+@@ -252,7 +345,7 @@ void periphery_cell(uint2 thread_id, uint2 grid, uint cell_size, out float4 resu
              }
              bool uniform_field = length(motion - result.xy) < 1.0;
              solved = float4(motion, result.z, 1.0 + (interior && uniform_field ? 2.0 : 0.0) +
@@ -829,7 +834,7 @@ index 47f6d25..7ddae63 100644
          }
          solved_out[output] = solved;
      }
-@@ -307,7 +397,10 @@ bool focus_position(float2 pixel, out float2 position) {
+@@ -307,7 +400,10 @@ bool focus_position(float2 pixel, out float2 position) {
  // The residual motion in target pixels of a focus MV (as target_residual).
  bool focus_residual(float2 pixel, float2 position, float2 motion, out float2 residual) {
      residual = float2(0.0, 0.0);
@@ -841,7 +846,7 @@ index 47f6d25..7ddae63 100644
      float2 previous_position = position + motion;
      float2 previous_tangent = float2(
          left + previous_position.x / FocusRect.z * (right - left),
-@@ -337,7 +430,44 @@ float focus_texels_per_pixel() {
+@@ -337,7 +433,44 @@ float focus_texels_per_pixel() {
  // the nearest texel's own where none is (a one-texel sliver). Across a
  // silhouette the two sides are never mixed: each side's cells take their own
  // surface's motion at the plane's full resolution.
@@ -860,8 +865,8 @@ index 47f6d25..7ddae63 100644
 +        float own_depth = depth ? focus_load_depth(nearest) : 65504.0;
 +        float best_depth = own_depth;
 +        float best_distance = 1.0e9;
-+        [unroll] for (int y = -1; y <= 1; ++y) {
-+            [unroll] for (int x = -1; x <= 1; ++x) {
++        [unroll] for (int y = -kCoverReach; y <= kCoverReach; ++y) {
++            [unroll] for (int x = -kCoverReach; x <= kCoverReach; ++x) {
 +                int2 texel = nearest + int2(x, y);
 +                bool inside = all(texel >= 0) && all(texel < int2(FocusRect.zw));
 +                float d = depth ? focus_load_depth(texel) : 0.0;
@@ -887,7 +892,7 @@ index 47f6d25..7ddae63 100644
      int2 nearest = int2(floor(position));
      klass = focus_load_class(nearest);
      float reference_depth = focus_load_depth(nearest);
-@@ -360,6 +490,23 @@ float2 focus_motion_around(float2 position, float tolerance, out uint klass) {
+@@ -360,6 +493,23 @@ float2 focus_motion_around(float2 position, float tolerance, out uint klass) {
      return total > 1.0e-4 ? sum / total : reference;
  }
  
@@ -911,7 +916,7 @@ index 47f6d25..7ddae63 100644
  // The fine grid's cell inside the focus inset: as periphery_cell, from the
  // focus view's MVs, with the edge-aware filter and the one-surface test by
  // class, depth and a tolerance of about one target pixel of motion.
-@@ -368,11 +515,18 @@ void focus_cell(uint2 index, float2 pixel, float2 position, out float4 result, o
+@@ -368,11 +518,18 @@ void focus_cell(uint2 index, float2 pixel, float2 position, out float4 result, o
      float texels_per_pixel = focus_texels_per_pixel();
      float tolerance = max(0.5, texels_per_pixel);
      int2 nearest = int2(floor(position));
@@ -931,7 +936,7 @@ index 47f6d25..7ddae63 100644
          index.x + 1u < OutputWidth && index.y + 1u < OutputHeight &&
          all(nearest - reach >= 0) && all(nearest + reach < int2(FocusRect.zw));
      [loop] for (int y = -reach; y <= reach && interior; ++y) {
-@@ -389,7 +543,7 @@ void focus_cell(uint2 index, float2 pixel, float2 position, out float4 result, o
+@@ -389,7 +546,7 @@ void focus_cell(uint2 index, float2 pixel, float2 position, out float4 result, o
      motion = finite2(motion) ? focus_motion_around(position, tolerance, unused) : motion;
      float2 residual;
      if (focus_residual(pixel, position, motion, residual)) {
@@ -940,7 +945,7 @@ index 47f6d25..7ddae63 100644
      }
      [unroll] for (uint output = 0u; output < 2u; ++output) {
          float4 solved = float4(0.0, 0.0, 0.0, 0.0);
-@@ -414,7 +568,7 @@ void focus_cell(uint2 index, float2 pixel, float2 position, out float4 result, o
+@@ -414,7 +571,7 @@ void focus_cell(uint2 index, float2 pixel, float2 position, out float4 result, o
              }
              bool uniform_field = length(moving - result.xy) < 1.0;
              solved = float4(moving, result.z, 1.0 + (interior && uniform_field ? 2.0 : 0.0) +
@@ -949,7 +954,7 @@ index 47f6d25..7ddae63 100644
          }
          solved_out[output] = solved;
      }
-@@ -508,3 +662,44 @@ void DcsMotionScatterCS(uint3 thread_id : SV_DispatchThreadID) {
+@@ -508,3 +665,44 @@ void DcsMotionScatterCS(uint3 thread_id : SV_DispatchThreadID) {
          }
      }
  }
@@ -995,7 +1000,7 @@ index 47f6d25..7ddae63 100644
 +    }
 +}
 diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
-index 85d4be4..fb5386b 100644
+index 85d4be4..e4ac888 100644
 --- a/src/d3d12/frame_synthesis.hlsl
 +++ b/src/d3d12/frame_synthesis.hlsl
 @@ -103,6 +103,7 @@ static const uint kQualityLinearInput = 1u << 17;
@@ -1028,7 +1033,7 @@ index 85d4be4..fb5386b 100644
      return (UseGameMotion & bit) != 0u;
  #else
      return false;
-@@ -1556,6 +1568,77 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
+@@ -1556,6 +1568,116 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
      return taken;
  }
  
@@ -1051,9 +1056,48 @@ index 85d4be4..fb5386b 100644
 +static const float kCoverDiffer = 2.0 / 255.0;
 +static const float kCoverStill = 2.0 / 255.0;
 +
++// DCS Control (0130, live round 2): the fixed point's class test of
++// quality_object_here, near rather than exact. Live (fg-cover runs
++// 20261126-0507) 99.97 % of the aircraft candidates' fixed points fell on a
++// cell whose class is the sky, 65 % within two cells of a cell of the
++// aircraft with the same vector: DCS's class and MVs cover only part of what
++// is drawn of a distant aircraft (DLSS spreads its edges), so the current end
++// lands on drawn aircraft the G-buffer calls sky. A fixed point within two
++// cells of such a cell (the candidate's class, its vector within a pixel)
++// counts, but then only where the two frames' samples agree: on the
++// aircraft both show it; behind or ahead of it one shows the sky, and the
++// one-frame rule below decides as before.
 +bool quality_cover_object(float2 pixel, float4 candidate, inout bool seen, out float4 color, out float2 used) {
 +    used = candidate.xy;
-+    return quality_object_here(pixel, candidate, seen, color);
++    color = float4(0.0, 0.0, 0.0, 1.0);
++    bool found = quality_object_here(pixel, candidate, seen, color);
++    uint klass = uint(candidate.z + 0.5);
++    [branch] if (!found && candidate.w > 0.5 && (klass & 0x80u) == 0u && dcs_motion_class_use(klass) != 0u) {
++        float t = synthesis_fraction();
++        float2 m = candidate.xy;
++        float2 end = pixel - (1.0 - t) * m;
++        float reach = dcs_motion_reach_cell();
++        bool near = false;
++        static const float2 around[8] = {
++            float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0),
++            float2(1.0, 1.0), float2(-1.0, 1.0), float2(1.0, -1.0), float2(-1.0, -1.0)};
++        [loop] for (uint ring = 1u; ring <= 2u && !near; ++ring) {
++            [loop] for (uint i = 0u; i < 8u && !near; ++i) {
++                float4 at = dcs_motion_field(end + around[i] * reach * float(ring), ViewIndex * 3u);
++                near = at.w > 0.5 && uint(at.z + 0.5) == klass && length(at.xy - m) < 1.0;
++            }
++        }
++        [branch] if (near) {
++            CameraSample before = sample_previous_target(pixel + t * m, Slice, ViewIndex);
++            CameraSample after = sample_current_target(end, Slice, ViewIndex);
++            [branch] if (before.valid >= 0.5 && after.valid >= 0.5 &&
++                max3(abs(quality_encoded_rgb(before.color.rgb) - quality_encoded_rgb(after.color.rgb))) <= 8.0 / 255.0) {
++                color = lerp(before.color, after.color, t);
++                found = true;
++            }
++        }
++    }
++    return found;
 +}
 +
 +bool quality_cover_sky(float2 pixel, float2 motion, float4 previous, float4 current, out float4 color, out float2 used,
@@ -1106,7 +1150,7 @@ index 85d4be4..fb5386b 100644
  // DCS Control (0129, dev only): the frame-generation diagnosis dump. With
  // UseGameMotion bit 28 (set by the synthesizer only for a pair it dumps, and
  // only with the _extras twin bound: XRFG_FG_EXTRAS) every pixel of the dump
-@@ -1578,10 +1661,16 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
+@@ -1578,10 +1700,16 @@ bool quality_sky_occlusion(float2 pixel, float2 motion, float4 previous, float4
  //           the mask value.
  // Without the bit (every pair the synthesizer does not dump, and every
  // composition built without the _extras twin) nothing here runs.
@@ -1125,7 +1169,7 @@ index 85d4be4..fb5386b 100644
      [branch] if ((UseGameMotion & kDcsMotionDiagBit) != 0u) {
          uint4 rect = DcsMotionCounters.Load4(128);
          uint4 info = DcsMotionCounters.Load4(144);
-@@ -1590,7 +1679,8 @@ void dcs_motion_diag_write(uint2 pixel, uint output, uint word0, float weight, f
+@@ -1590,7 +1718,8 @@ void dcs_motion_diag_write(uint2 pixel, uint output, uint word0, float weight, f
              uint index = (output * rect.w + (pixel.y - rect.y)) * rect.z + (pixel.x - rect.x);
              uint packed = uint(round(saturate(weight) * 255.0)) | (uint(round(saturate(check_weight) * 255.0)) << 8) |
                  (uint(round(saturate(disagreement) * 255.0)) << 16) | (uint(round(saturate(mask) * 255.0)) << 24);
@@ -1135,7 +1179,7 @@ index 85d4be4..fb5386b 100644
          }
      }
  }
-@@ -1605,6 +1695,8 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+@@ -1605,6 +1734,8 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
      float diag_check = 0.0;
      float diag_disagreement = 0.0;
      float diag_mask = 0.0;
@@ -1144,7 +1188,7 @@ index 85d4be4..fb5386b 100644
      uint2 integer_pixel = uint2(position);
      [branch] if (dcs_motion_bound() && cockpit_mask_bound() && repeated_capture_flag() == 0 &&
          integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize) {
-@@ -1635,6 +1727,13 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+@@ -1635,6 +1766,13 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
              float2 rect_cells = ceil(PreviousMappings[ViewIndex].TargetRect.zw / dcs_motion_cell());
              int2 cell = int2(floor((pixel - PreviousMappings[ViewIndex].TargetRect.xy + 0.5) / dcs_motion_cell()));
              uint key = DcsMotionScatter.Load(int4(cell, int(ViewIndex * 2u + output), 0));
@@ -1158,7 +1202,7 @@ index 85d4be4..fb5386b 100644
              [branch] if (key != 0u) {
                  uint index = key & ((1u << kDcsMotionScatterIndexBits) - 1u);
                  uint priority = key >> kDcsMotionScatterIndexBits;
-@@ -1667,10 +1766,16 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+@@ -1667,10 +1805,16 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
                  [branch] if (previous.valid >= 0.5 && current.valid >= 0.5) {
                      eligible = true;
                      diag_word = (diag_word & ~0xFu) | (scattered ? 5u : 4u); // DCS Control (0129)
@@ -1175,7 +1219,7 @@ index 85d4be4..fb5386b 100644
                          bool strict = use == 2u;
                          const bool sky_gather = !scattered && (here_class & 0x80u) != 0u; // 0104
                          float disagreement = quality_mv_check_error(previous.color, current.color, sky_gather);
-@@ -1709,8 +1814,25 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+@@ -1709,8 +1853,25 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
                          [branch] if (band) {
                              weight = min(weight, quality_mask_band_weight(previous.color, current.color));
                          }
@@ -1202,7 +1246,7 @@ index 85d4be4..fb5386b 100644
                              float4 sky_color;
                              if (quality_sky_occlusion(pixel, motion, previous.color, current.color, sky_color)) {
                                  color = saturate(sky_color);
-@@ -1722,8 +1844,9 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
+@@ -1722,8 +1883,9 @@ float dcs_motion_pixel(float2 position, uint output, bool count, out float4 colo
                  }
              }
          }
@@ -1215,7 +1259,7 @@ index 85d4be4..fb5386b 100644
          // One pixel in 256, spread over 16 buckets.
          [branch] if (count && eligible && ((integer_pixel.x | integer_pixel.y) & 15u) == 0u) {
 diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
-index 2063a6e..33e526b 100644
+index 2063a6e..c1a6bb6 100644
 --- a/tests/d3d12_history_tests.cpp
 +++ b/tests/d3d12_history_tests.cpp
 @@ -4355,6 +4355,7 @@ void test_nvidia_serialized_eye_context_stress(
@@ -1226,7 +1270,7 @@ index 2063a6e..33e526b 100644
  #define XRFG_BENCH_FG_EXTRAS 1 // DCS Control (0123): this tree has the quality keys
  #include "fg_triple_bench.inc" // DCS Control (0123)
  #include "fg_extras_async.inc" // DCS Control (0125)
-@@ -6970,6 +6971,16 @@ int main() {
+@@ -6970,6 +6971,23 @@ int main() {
              std::cout << "D3D12 FG focus motion tests passed\n";
              return 0;
          }
@@ -1235,6 +1279,13 @@ index 2063a6e..33e526b 100644
 +            if (!nvidia_hardware_present()) {
 +                std::cout << "D3D12 FG cover tests skipped: no NVIDIA hardware adapter\n";
 +                return kSkipped;
++            }
++            // DCS Control (0130, live round 2): XRFG_TEST_FG_COVER_LIVE=<dir>: the exported live pairs.
++            char live_dir[512]{};
++            if (GetEnvironmentVariableA("XRFG_TEST_FG_COVER_LIVE", live_dir, sizeof(live_dir)) != 0) {
++                run_fg_cover_live(live_dir);
++                std::cout << "D3D12 FG cover live pairs done\n";
++                return 0;
 +            }
 +            run_fg_cover_fixtures();
 +            std::cout << "D3D12 FG cover tests passed\n";
@@ -1245,10 +1296,10 @@ index 2063a6e..33e526b 100644
              bench_dcs_motion_composition(bench_fixture, 5424, 5356);
 diff --git a/tests/fg_cover.inc b/tests/fg_cover.inc
 new file mode 100644
-index 0000000..c083733
+index 0000000..6e01242
 --- /dev/null
 +++ b/tests/fg_cover.inc
-@@ -0,0 +1,702 @@
+@@ -0,0 +1,837 @@
 +// DCS Control (0130): fixtures for [ofxr] dcs_motion_cover (lever 1: a
 +// distant aircraft's vector and class spread over its edge; lever 2: a sky
 +// gather with an aircraft within reach accepted only after the aircraft's own
@@ -1949,6 +2000,141 @@ index 0000000..c083733
 +                "fg cover " + scene.name + ": the cross-fade fraction does not go down");
 +        }
 +    }
++    fixture.require_no_debug_errors();
++}
++
++// DCS Control (0130, live round 2): XRFG_TEST_FG_COVER_LIVE=<dir> composes the live pairs exported by
++// artifacts\motion-study\fg-diag\analysis\export_live_fixture.py (<dir>\pair<k>: the frame's own MV and class atlases
++// as OFXR copied them in flight, the two real frames taken back into the synthesizer's target pixels, the measured
++// aircraft displacement d (B -> A, target pixels) and the aircraft's region in either frame), at the live cell (4 px),
++// through an sRGB view, without and with dcs_motion_cover. Measured against the composition along d (the reference,
++// t = 0.5): the cross-fade fraction and the share of region pixels within 4 codes of a composition along d +- 1 px.
++bool fc_read_file(const std::string& path, std::vector<std::uint8_t>& bytes) {
++    std::ifstream in(path, std::ios::binary);
++    if (!in) return false;
++    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
++    return true;
++}
++
++void run_fg_cover_live(const std::string& root) {
++    D3D12WarpFixture fixture(true);
++    int done = 0;
++    for (int k = 0; k < 32; ++k) {
++        const std::string dir = root + "\\pair" + std::to_string(k);
++        std::ifstream meta(dir + "\\meta.txt");
++        if (!meta) break;
++        UINT width = 0, height = 0, atlas_w = 0, atlas_h = 0;
++        std::array<float, 4> source_rect{}, source_fov{}, tangents{};
++        float off_x = 0, off_y = 0, dx = 0, dy = 0;
++        meta >> width >> height >> atlas_w >> atlas_h;
++        for (auto& v : source_rect) meta >> v;
++        for (auto& v : source_fov) meta >> v;
++        for (auto& v : tangents) meta >> v;
++        meta >> off_x >> off_y >> dx >> dy;
++        std::string capture, stem;
++        meta >> capture >> stem;
++        std::vector<std::uint8_t> a_bytes, b_bytes, mv, cls, mask;
++        require(fc_read_file(dir + "\\a.rgba", a_bytes) && fc_read_file(dir + "\\b.rgba", b_bytes) &&
++                    fc_read_file(dir + "\\mv.bin", mv) && fc_read_file(dir + "\\class.bin", cls) &&
++                    fc_read_file(dir + "\\mask.bin", mask),
++            "fg cover live: files of " + dir);
++        require(a_bytes.size() == std::size_t(width) * height * 4U && mv.size() == std::size_t(atlas_w) * atlas_h * 4U &&
++                    cls.size() == std::size_t(atlas_w) * atlas_h && mask.size() == std::size_t(width) * height,
++            "fg cover live: sizes of " + dir);
++        StereoPattern a, b;
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            a[eye] = a_bytes;
++            b[eye] = b_bytes;
++        }
++        ReprojectionViews views = make_reprojection_views();
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            views[eye].pose.position.x = 0.0F;
++            views[eye].fov.angle_left = std::atan(tangents[0]);
++            views[eye].fov.angle_right = std::atan(tangents[1]);
++            views[eye].fov.angle_up = std::atan(tangents[2]);
++            views[eye].fov.angle_down = std::atan(tangents[3]);
++        }
++        auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
++        const auto frame_of = [&](std::int64_t display_time, std::int64_t previous_time) {
++            auto frame = make_cockpit_mask_frame(fixture, width, height, {}, 8, views);
++            frame->display_time = display_time;
++            frame->counters = counters;
++            frame->motion_texture = upload_depth_test_texture(fixture, atlas_w, atlas_h, DXGI_FORMAT_R16G16_FLOAT, 4, mv);
++            frame->motion_class_texture = upload_depth_test_texture(fixture, atlas_w, atlas_h, DXGI_FORMAT_R8_UINT, 1, cls);
++            frame->motion = true;
++            frame->motion_class = true;
++            frame->motion_previous_display_time = previous_time;
++            frame->motion_slot_flags = 0x80U | 0x40U | 0x3U;
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                auto& view = frame->motion_views[eye];
++                view.valid = true;
++                view.x = static_cast<std::uint32_t>(source_rect[0]);
++                view.y = static_cast<std::uint32_t>(source_rect[1]);
++                view.width = static_cast<std::uint32_t>(source_rect[2]);
++                view.height = static_cast<std::uint32_t>(source_rect[3]);
++                view.fov_tan = source_fov;
++                view.offset_px = {off_x, off_y};
++            }
++            return frame;
++        };
++        const auto previous = frame_of(1000, 500);
++        const auto current = frame_of(2000, 1000);
++        // The reference: the composition along d at t = 0.5 (bilinear in each frame).
++        const auto ref_at = [&](UINT x, UINT y, int c, double ex, double ey) {
++            const double ta = fc_sample(a_bytes, width, height, x + 0.5 + 0.5 * ex, y + 0.5 + 0.5 * ey, c);
++            const double tb = fc_sample(b_bytes, width, height, x + 0.5 - 0.5 * ex, y + 0.5 - 0.5 * ey, c);
++            return 0.5 * (ta + tb);
++        };
++        std::cout << "fc live " << capture << " " << stem << " " << width << "x" << height << " d " << dx << "," << dy;
++        for (const std::uint32_t quality : {0U, xrfg::kFgQualityCover}) {
++            xrfg::D3D12NvidiaOpticalFlowOptions options{};
++            options.occlusion_aware = 1;
++            options.dcs_motion = true;
++            options.fg_quality = quality;
++            SetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_CELL", "4");
++            const StereoPattern out = synthesize_nvidia_pair(fixture, a, b, width, height, options, {previous, current},
++                xrfg::D3D12OpticalFlowBackend::nvidia, true, &views, &views, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++            SetEnvironmentVariableA("XRFG_TEST_DCS_MOTION_CELL", nullptr);
++            double num = 0.0, den = 0.0, mae = 0.0;
++            std::size_t n = 0, good = 0;
++            for (UINT y = 0; y < height; ++y) {
++                for (UINT x = 0; x < width; ++x) {
++                    const std::size_t i = std::size_t(y) * width + x;
++                    if (!mask[i]) continue;
++                    for (int c = 0; c < 3; ++c) {
++                        const double r = ref_at(x, y, c, dx, dy);
++                        const double o = out[0][i * 4U + c];
++                        num += std::abs(o - r);
++                        den += std::abs(0.5 * (double(a_bytes[i * 4U + c]) + double(b_bytes[i * 4U + c])) - r);
++                        mae += std::abs(o - r);
++                    }
++                    double best = 1.0e9;
++                    for (int j = -1; j <= 1; ++j) {
++                        for (int q = -1; q <= 1; ++q) {
++                            double worst = 0.0;
++                            for (int c = 0; c < 3; ++c) {
++                                worst = std::max(worst, std::abs(double(out[0][i * 4U + c]) - ref_at(x, y, c, dx + q, dy + j)));
++                            }
++                            best = std::min(best, worst);
++                        }
++                    }
++                    good += best <= 4.0 ? 1U : 0U;
++                    ++n;
++                }
++            }
++            char text[200]{};
++            std::snprintf(text, sizeof(text), " | %s: mae %.2f xfade %.2f within1 %.2f (%zu px; MV pairs %llu, along %llu, flow %llu)", quality ? "cover" : "off",
++                n ? mae / (3.0 * n) : 0.0, den > 0 ? num / den : 0.0, n ? double(good) / n : 0.0, n,
++                static_cast<unsigned long long>(counters->motion_pairs.exchange(0)),
++                static_cast<unsigned long long>(counters->motion_pixels.exchange(0)),
++                static_cast<unsigned long long>(counters->motion_fallback_pixels.exchange(0)));
++            std::cout << text;
++            fm_dump("fc live pair" + std::to_string(k) + " - " + (quality ? "cover" : "off"), out, width, height);
++        }
++        std::cout << std::endl;
++        ++done;
++    }
++    require(done > 0, "fg cover live: no pair in " + root);
 +    fixture.require_no_debug_errors();
 +}
 diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
