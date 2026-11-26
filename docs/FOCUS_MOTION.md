@@ -467,10 +467,33 @@ Verdict, against the targets (within 1 px > 0.8, cross-fade < 0.4, ghostW clearl
   ghostW ON - OFF +0.104 [-0.223, 0.431], -0.050 [-0.323, 0.222], -0.113 [-0.327, 0.102]: NOT JUDGEABLE, as in round
   2; objErr lower in g1 / g2 (-4.1 / -3.7 codes), ringErr +0.06..+0.09 higher in every group.
 
+- **Close F2 orbit by day and dusk** (offline the cover's best case: orbit d10 cross-fade 6.30 -> 0.98, d2 3.93 ->
+  0.98; `fg-diaguns61126-1259`, validation-08's orbitday / orbitdusk missions, same 20 deg/s orbit, cover ABBA x3
+  live, 0129 dumps across the captures; 18 + 16 captures, every one complete, no crash in either dcs.log). Validation-08's
+  `fg_orbit.py` (ORBIT-STATUS.md rules, ratio ON / OFF [95 % CI], BETTER = CI hi < 0.95, WORSE = CI lo > 1.05):
+
+  | Scene | Group | errBand OFF -> ON, ratio | trailing | leading | errFar (control) | Verdict band / trail / lead |
+  |---|---|---|---|---|---|---|
+  | day | g1 | 13.5 -> 13.9, 1.28 [1.04, 1.50] | 1.25 [0.98, 1.52] | 1.26 [1.09, 1.44] | 1.34 [1.10, 1.62] | SAME / SAME / WORSE |
+  | day | g2 | 14.1 -> 11.5, 0.77 [0.70, 0.85] | 0.78 [0.72, 0.86] | 0.77 [0.70, 0.87] | 0.87 [0.68, 1.08] | BETTER / BETTER / BETTER |
+  | day | g3 | 14.7 -> 16.0, 1.14 [1.04, 1.24] | 1.16 [1.06, 1.26] | 1.12 [1.03, 1.22] | 0.87 [0.63, 1.14] | SAME / WORSE / SAME |
+  | dusk | g1 | 3.6 -> 2.8, 0.73 [0.61, 0.90] | 0.77 [0.66, 0.94] | 0.68 [0.54, 0.89] | 0.87 [0.80, 0.94] | BETTER / BETTER / BETTER |
+  | dusk | g2 | 4.3 -> 3.2, 0.72 [0.61, 0.84] | 0.59 | 0.88 | 1.01 | NOT JUDGED (captures 1 / 3) |
+  | dusk | g3 | 2.7 -> 3.1, 1.40 [1.21, 1.60] | 1.38 | 1.37 | 0.94 | NOT JUDGED (captures 1 / 3) |
+
+  Class-located band (`orbit_band.py`, periphery, off -> cover): day band error 8.3 -> 10.4 codes, cross-fade
+  fraction 0.45 -> 0.68 (silhouette +54 codes over its band); dusk 3.6 -> 4.0 codes, 0.59 -> 0.62. Pacing PASS in every
+  group of both flights: comp + pack day fast 280 -> 278 / 286 / 272 us, slow 331 -> 346 and 360 -> 291 us; dusk fast
+  218 -> 231, 229 -> 234, 218 -> 219 us; late frames per minute no higher with the cover (day 17.2 -> 15.1, 23.5 -> 1.7,
+  8.1 -> 5.4; dusk 8.2 -> 6.8, 14.7 -> 8.4, 10.9 -> 3.2). One group better and one group worse in each scene, and the
+  control area away from the aircraft swings as much (day g1 errFar 1.34): the close orbit is NOT clearly better with
+  the cover by day or by dusk, so the option's description does not claim it.
+
 Final verdict (targets: within 1 px > 0.8, cross-fade < 0.4, ghostW clearly lower, no pacing regression):
 - Lever 1 (spreading the aircraft's MV / class over its edge): offline it meets the targets (fixtures and the
   live-condition pairs); live, 600 m and 1200 m crossings by day improve, but ghostW is not clearly lower in three A/B
-  rounds, and in the night orbit the cover is not better (cross-fade 0.38 -> 0.47, error under one code either way).
+  rounds, in the night orbit the cover is not better (cross-fade 0.38 -> 0.47, error under one code either way), and the
+  close orbit by day and dusk is mixed (one group BETTER, one SAME / WORSE per scene, the far control moving as much).
   Pacing within the gate (the 318 us group was noise). NO-GO as a default; stays an EXPERIMENTAL option, off.
 - Lever 2 (the aircraft vector before a sky gather): fires live since round 2 (8-12 % of the trail); no separate live
   gain beyond lever 1's. NO-GO as a default (part of the same option).
