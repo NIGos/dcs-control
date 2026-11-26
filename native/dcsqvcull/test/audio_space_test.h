@@ -428,26 +428,22 @@ void Budget() {
   audiofake::g_spinUs = 0;
   Tick();
   const bool earlyOff = !audiofake::g_roomLastFrame.early && audio::g_cnt.limitNow.load() == binaural::kMaxSources;
-  // Calm: the early reflections come back after 10 s under half the budget (shortened here: the window that still
-  // held slow blocks closes first, then 9.5 s are taken as already calm).
-  t0 = GetTickCount64();
-  while (GetTickCount64() - t0 < 1200) {
-    SimFrame(r);
-    Block(r, a.data(), b.data(), 480);
+  // Drive ten complete quiet windows with the budget meter's normal inputs. Scheduling
+  // delays on the build PC must not turn the simulated recovery into another overload.
+  auto& binding = *audio::g_binding.load();
+  constexpr int64_t freq = 1000000;
+  binding.secStart = 1;
+  binding.secBlocks = binding.secHalf = binding.secOver = 0;
+  bool stayedOff = true;
+  for (int block = 1; block <= 1000; ++block) {
+    audr::BudgetTick(binding, audio::g_cnt, audio::g_ev, {5, 16}, 480, 100, 1 + block * 10000, freq);
+    if (block < 1000) stayedOff &= binding.earlyOff;
   }
-  // A calm second needs every block under half of the 5 % budget (0.25 ms of wall time): on a PC busy with other
-  // builds or tests one slow block restarts it, so up to three tries.
-  bool earlyOn = false;
-  for (int attempt = 0; attempt < 3 && !earlyOn; ++attempt) {
-    audio::g_binding.load()->calmSeconds = 9.5;
-    t0 = GetTickCount64();
-    while (GetTickCount64() - t0 < 1300) {
-      SimFrame(r);
-      Block(r, a.data(), b.data(), 480);
-    }
-    Tick();
-    earlyOn = audiofake::g_roomLastFrame.early;
-  }
+  binding.secStart = 0;  // the next mixed block starts a window on the real clock
+  SimFrame(r);
+  Block(r, a.data(), b.data(), 480);
+  Tick();
+  const bool earlyOn = stayedOff && audiofake::g_roomLastFrame.early;
   const std::string log = StopReportCapture();
   const size_t off = log.find("audio: cockpit space: early reflections off (CPU budget)");
   const size_t down = log.find("audio: CPU budget: at most");
