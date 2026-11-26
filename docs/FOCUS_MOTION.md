@@ -26,6 +26,14 @@ Engine details a reader may rely on:
   `CockpitMotionFocus=1`, since the consumer has nothing to read without it; it does not turn on the depth plane.
 - Integration branch `feat/fmv` (contract + engine + OFXR 0128) is built and tested offline only. The live A/B plan is
   in "Live A/B plan (validation-08)" below.
+- `[Perception] CockpitMotionDump=N` writes the focus views' records too ("view 2" / "view 3" lines; they live in
+  `Header::focusView[slot]`, not in the `MotionSlot`), and, when the slot publishes the depth plane, the plane as raw
+  R16_FLOAT rows (`cockpit_motion_<seq>.r16f`, same size and rects as the MV atlas).
+- Diagnosis (dev only, branch `dev/fg-diag`): OFXR patch 0129 dumps, per pixel of chosen pairs, what the MV
+  composition decided (path, cell flags, class, scatter candidate, weights, colour-check error), the resampled grid,
+  the scatter and the frame's MV / class atlases. Off unless the process has `XRFG_DEV_FG_DIAG=1` and a folder
+  (`XRFG_DEV_FG_DIAG_DIR` or the capture layer's `RIGTAP_DIR`); armed by `<folder>\fgdiag.txt` (the rig writes it with
+  the capture's own delay). The patch header has the record layout.
 
 Before the work started, the motion study measured two things:
 

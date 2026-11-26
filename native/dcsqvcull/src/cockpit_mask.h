@@ -2786,19 +2786,36 @@ std::vector<DumpFile> g_ddumpOut;  // under g_dbgMutex
 // (cockpit_motion_<seq>.r16g16f), the class atlas as raw bytes (.r8) and a text file (the slot, its views, and for the
 // live checks DCS's submitted pose / FOV of this frame and of the previous committed one per view).
 std::atomic<int> g_mdumpLeft{0};
+// Revision 4 (review HIGH-2): the focus views' records (Header::focusView[slot], views 2 / 3, not in the MotionSlot)
+// are written too ("view 2" / "view 3" lines), and with the depth plane published for the slot the plane as raw
+// R16_FLOAT rows (cockpit_motion_<seq>.r16f, same atlas size and rects as the MV atlas).
 struct MotionDumpSlot {
   ID3D11Texture2D* st = nullptr;
   ID3D11Texture2D* stc = nullptr;
+  ID3D11Texture2D* stp = nullptr;  // revision 4: the depth plane's staging copy
   UINT w = 0, h = 0;
   bool busy = false;
+  bool plane = false;              // revision 4: stp holds this slot's plane
   uint64_t at = 0;
   cmv::MotionSlot meta{};
+  cmv::MotionView focus[2]{};      // revision 4: Header::focusView[slot] at the copy
   std::string poses;
   uint32_t gen = 0;
 };
 MotionDumpSlot g_mdump[3];
 std::vector<DumpFile> g_mdumpOut;  // under g_dbgMutex; DumpFile.pgm holds the MV bytes, .text the record
 std::vector<std::vector<uint8_t>> g_mdumpCls;  // the class bytes of g_mdumpOut's entries (same order)
+std::vector<std::vector<uint8_t>> g_mdumpPlane;  // revision 4: the depth plane bytes (same order; empty: none)
+
+// The text line of one motion view record (views 0-3).
+std::string MotionViewLine(int v, const cmv::MotionView& mv) {
+  char b2[400];
+  sprintf_s(b2, "view %d flags 0x%x rect %u,%u %ux%u src %ux%u fov L %+.6f R %+.6f U %+.6f D %+.6f jitterCur %+.4f %+.4f "
+                "jitterPrev %+.4f %+.4f\n",
+            v, mv.flags, mv.x, mv.y, mv.w, mv.h, mv.srcW, mv.srcH, mv.fovTan[0], mv.fovTan[1], mv.fovTan[2],
+            mv.fovTan[3], mv.jitterCurPx[0], mv.jitterCurPx[1], mv.jitterPrevPx[0], mv.jitterPrevPx[1]);
+  return b2;
+}
 
 void FgRelease();  // R71 (below)
 void ReleaseDumps() {
@@ -2814,6 +2831,7 @@ void ReleaseDumps() {
   for (MotionDumpSlot& d : g_mdump) {  // R70
     RelP(d.st);
     RelP(d.stc);
+    RelP(d.stp);  // revision 4
     d = MotionDumpSlot{};
   }
 }
@@ -2931,6 +2949,14 @@ void PollDumps() {
         cls.insert(cls.end(), cb + static_cast<size_t>(y) * m.RowPitch, cb + static_cast<size_t>(y) * m.RowPitch + d.w);
       c->Unmap(d.stc, 0);
     }
+    std::vector<uint8_t> plane;  // revision 4: the depth plane, raw R16_FLOAT rows
+    if (d.plane && d.stp && SUCCEEDED(c->Map(d.stp, 0, D3D11_MAP_READ, 0, &m))) {
+      const uint8_t* pb = static_cast<const uint8_t*>(m.pData);
+      for (UINT y = 0; y < d.h; ++y)
+        plane.insert(plane.end(), pb + static_cast<size_t>(y) * m.RowPitch,
+                     pb + static_cast<size_t>(y) * m.RowPitch + static_cast<size_t>(d.w) * 2);
+      c->Unmap(d.stp, 0);
+    }
     d.busy = false;
     wchar_t name[96];
     swprintf_s(name, L"cockpit_motion_%06llu", static_cast<unsigned long long>(d.meta.seq));
@@ -2945,19 +2971,19 @@ void PollDumps() {
     std::string t = line;
     for (int v = 0; v < 2; ++v) {
       if (!(d.meta.viewMask & (1u << v))) continue;
-      const cmv::MotionView& mv = d.meta.view[v];
-      char b2[400];
-      sprintf_s(b2, "view %d flags 0x%x rect %u,%u %ux%u src %ux%u fov L %+.6f R %+.6f U %+.6f D %+.6f jitterCur %+.4f %+.4f "
-                    "jitterPrev %+.4f %+.4f\n",
-                v, mv.flags, mv.x, mv.y, mv.w, mv.h, mv.srcW, mv.srcH, mv.fovTan[0], mv.fovTan[1], mv.fovTan[2],
-                mv.fovTan[3], mv.jitterCurPx[0], mv.jitterCurPx[1], mv.jitterPrevPx[0], mv.jitterPrevPx[1]);
-      t += b2;
+      t += MotionViewLine(v, d.meta.view[v]);
     }
+    for (int v = 2; v < 4; ++v) {  // revision 4 (review HIGH-2): the focus views' records
+      if (!(d.meta.viewMask & (1u << v))) continue;
+      t += MotionViewLine(v, d.focus[v - 2]);
+    }
+    if (!plane.empty()) t += "depth plane R16_FLOAT (.r16f), linear view depth in metres, 65504 = sky\n";
     f.text = t + d.poses;
     std::lock_guard<std::mutex> lock(g_dbgMutex);
     if (g_mdumpOut.size() < 64) {
       g_mdumpOut.push_back(std::move(f));
       g_mdumpCls.push_back(std::move(cls));
+      g_mdumpPlane.push_back(std::move(plane));
     }
   }
 }
@@ -3096,6 +3122,7 @@ void DebugCommitMotion(int slot, const cmv::MotionSlot& sl, const XrFrameInfo* x
   if (!d->st || d->w != g_r.mW || d->h != g_r.mH) {
     RelP(d->st);
     RelP(d->stc);
+    RelP(d->stp);  // revision 4: made again below when the plane is there
     D3D11_TEXTURE2D_DESC td{};
     td.Width = g_r.mW;
     td.Height = g_r.mH;
@@ -3112,6 +3139,27 @@ void DebugCommitMotion(int slot, const cmv::MotionSlot& sl, const XrFrameInfo* x
   }
   g_s.ctx->CopyResource(d->st, g_r.mtex[slot]);
   if (d->stc && g_r.ctex[slot]) g_s.ctx->CopyResource(d->stc, g_r.ctex[slot]);
+  // Revision 4 (review HIGH-2): the plane when this slot publishes it (same size as the MV atlas), and the focus records.
+  d->plane = false;
+  if ((sl.flags & cmv::slot_flags::depth_plane) && g_r.ptex[slot]) {
+    if (!d->stp) {
+      D3D11_TEXTURE2D_DESC pd{};
+      pd.Width = g_r.mW;
+      pd.Height = g_r.mH;
+      pd.MipLevels = pd.ArraySize = 1;
+      pd.Format = DXGI_FORMAT_R16_FLOAT;
+      pd.SampleDesc.Count = 1;
+      pd.Usage = D3D11_USAGE_STAGING;
+      pd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      if (FAILED(g_r.dev->CreateTexture2D(&pd, nullptr, &d->stp))) d->stp = nullptr;
+    }
+    if (d->stp) {
+      g_s.ctx->CopyResource(d->stp, g_r.ptex[slot]);
+      d->plane = true;
+    }
+  }
+  d->focus[0] = g_mhdr.focusView[slot][0];
+  d->focus[1] = g_mhdr.focusView[slot][1];
   d->busy = true;
   d->at = g_commitN;
   d->meta = sl;
@@ -4655,6 +4703,7 @@ void Tick() {
   CloseBuried(false);
   std::vector<DumpFile> files, dfiles, mfiles;
   std::vector<std::vector<uint8_t>> mcls;
+  std::vector<std::vector<uint8_t>> mplane;  // revision 4: the depth planes of mfiles (same order)
   std::vector<std::string> lines;
   std::vector<FgOut> fgOuts;  // R71
   {
@@ -4664,6 +4713,7 @@ void Tick() {
     dfiles.swap(g_ddumpOut);
     mfiles.swap(g_mdumpOut);
     mcls.swap(g_mdumpCls);
+    mplane.swap(g_mdumpPlane);  // revision 4
     lines.swap(g_logOut);
   }
   if (!fgOuts.empty()) FgWrite(fgOuts);  // R71: CockpitFgDump
@@ -4682,6 +4732,11 @@ void Tick() {
       if (i < mcls.size() && !mcls[i].empty())
         if (FILE* o = _wfsopen((base + L".r8").c_str(), L"wb", _SH_DENYWR)) {
           fwrite(mcls[i].data(), 1, mcls[i].size(), o);
+          fclose(o);
+        }
+      if (i < mplane.size() && !mplane[i].empty())  // revision 4 (review HIGH-2)
+        if (FILE* o = _wfsopen((base + L".r16f").c_str(), L"wb", _SH_DENYWR)) {
+          fwrite(mplane[i].data(), 1, mplane[i].size(), o);
           fclose(o);
         }
       if (FILE* o = _wfsopen((base + L".txt").c_str(), L"wb", _SH_DENYWR)) {
