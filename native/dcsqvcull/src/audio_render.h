@@ -158,6 +158,10 @@ inline void RoomRender(binaural::Room* r, float* out, uint32_t frames, const flo
 }
 inline void RoomEnd(binaural::Room* r) { r->EndBlock(); }
 inline bool RoomIdle(const binaural::Room* r) { return r->Idle(); }
+inline void RoomSectionsUs(const binaural::Room* r, double out[binaural::kRoomSections]) {
+  const binaural::RoomStats s = r->GetStats();
+  for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = s.sectionUs[k];
+}
 inline void RoomMatchDb(const binaural::Room* r, float out[3]) {
   const binaural::RoomStats s = r->GetStats();
   for (int b = 0; b < 3; ++b) out[b] = s.matchDb[b];
@@ -192,6 +196,9 @@ inline void RoomRender(binaural::Room*, float* out, uint32_t frames, const float
 inline void RoomEnd(binaural::Room*) {}
 inline bool RoomIdle(const binaural::Room*) { return true; }
 inline void RoomMatchDb(const binaural::Room*, float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
+inline void RoomSectionsUs(const binaural::Room*, double out[binaural::kRoomSections]) {
+  for (uint32_t k = 0; k < binaural::kRoomSections; ++k) out[k] = 0.0;
+}
 inline binaural::RoomDirectState RoomDirectStateOf(const binaural::Room*) { return binaural::RoomDirectState{}; }
 inline float RoomDirect(const binaural::RoomParams&, float, float, float, const float*, uint32_t) { return 1.0f; }
 inline float RoomSendGain(const binaural::RoomParams&, const float*, uint32_t) { return 1.0f; }
@@ -355,6 +362,11 @@ struct Counters {
   // and the block energies around it (render thread adds, the running line takes them): the dry direct sound, `out`
   // before the Render (DCS's voices and the re-panned shares) and `out` after it.
   std::atomic<uint64_t> roomFlushInMix{0}, roomFlushAfterMix{0}, roomRenders{0};
+  // blocks whose room output was dropped (no voice rendered inside the mix, nothing in `dry`), and the flushes after the
+  // mix of those with sound in `dry` (scaled by the measured master gain), with the wet weight above 0
+  std::atomic<uint64_t> roomDropped{0}, roomAfterWet{0};
+  std::atomic<double> roomSendUs{0.0};  // the per-voice room work in ProcessVoice (sends, d, send gain), summed
+  std::atomic<float> masterGainDb{0.0f};
   std::atomic<double> roomEDry{0.0}, roomEOutBefore{0.0}, roomEOutAfter{0.0};
   std::atomic<uint64_t> roomEBlocks{0};
   std::atomic<uint32_t> roomFrameValid{0}, roomEarly{1};
@@ -693,6 +705,12 @@ struct Binding {
   float* side = nullptr;     // kMaxFrames: SideDelayed's u (same allocation)
   float* sideHist = nullptr; // kSlots x kSideHist: each slot's delayed side history (same allocation; null: undelayed)
   float* dry = nullptr;      // 2 x kMaxFrames: cockpit space, the owned voices' direct sound of a block (same allocation)
+  // Cockpit space, render thread: the last block's voice-render calls and its last caller (where to flush when the
+  // list's last voice is not rendered), and ed_sound's master gain as measured (out after the mix over out at the flush,
+  // amplitude, smoothed), for the rare block that can only be flushed after the mix.
+  uint32_t lastCalls = 0;
+  void* lastCaller = nullptr;
+  float masterGain = 1.0f;
   uint32_t* overrun = nullptr;  // ED's overrun counter of this WASAPI renderer
   uint32_t lastOverrun = 0;
   bool haveOverrun = false;
@@ -750,6 +768,13 @@ struct Block {
   // mix, before ed_sound's master processing (limiter, global gain); else after the mix (main/audio.inc RoomFlush).
   bool roomFlushed = false;
   int64_t roomRenderTicks = 0;  // QPC ticks of that Render and EndBlock
+  // The voice-render calls of this block inside the mix (any voice) and the last one: the flush point's guess for the
+  // next block when the list's last voice is not rendered (main/audio.inc RoomFlush).
+  uint32_t calls = 0;
+  void* lastCaller = nullptr;
+  bool dryUsed = false;     // an owned voice's direct sound went into `dry`
+  double ePreMaster = 0.0;  // `out`'s energy right after a flush at the list's last voice (the master gain's measure)
+  bool measured = false;    // this block's flush measured the energies (every 8th room block)
 };
 
 // QPC ticks (the module's clock, as Qpc() in main/audio.inc): the room's per-voice share of a block's time.
@@ -909,7 +934,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
     float posA[3] = {u.position[0], u.position[1], u.position[2]};
     uint32_t rflags = 0;
     float send = 0.0f;
-    if (blk.roomOn) {
+    if (blk.roomOn && !blk.roomFlushed) {
       const int64_t r0 = Ticks();
       if (blk.roomFrameValid) {
         const float ci[4] = {-blk.roomC[0], -blk.roomC[1], -blk.roomC[2], blk.roomC[3]};
@@ -943,13 +968,14 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
       audr::CoreBegin(b.core, frames);
       blk.coreBegun = true;
     }
+    if (blk.dry) blk.dryUsed = true;
     if (audr::CoreRender(b.core, static_cast<uint32_t>(slot), u, in, frames, cw0, cw1, blk.dry ? blk.dry : out)) {
       rs.live = true;
       hrtfDone = true;
       cnt.hrtfCalls.fetch_add(1, std::memory_order_relaxed);
       if (pm.flags & audv::meta_flags::kStereo) cnt.stereoCalls.fetch_add(1, std::memory_order_relaxed);
       ++blk.hrtfVoices;
-      if (blk.roomOn) {
+      if (blk.roomOn && !blk.roomFlushed) {
         // The room gets exactly the core's input and weights: it follows every fade of the direct path. A voice that
         // was not sent in the last block starts a fresh tap line.
         binaural::RoomSource src{};
@@ -996,7 +1022,7 @@ inline void ProcessVoice(Block& blk, Counters& cnt, int slot, void* voice, float
   if (!roomSent && rs.roomLive) {
     // Not sent in this block (its HRTF share ended, or the room was skipped): the room's tap line plays out what it
     // holds with zero input weight, once, then starts afresh at the voice's next send.
-    if (blk.roomOn) {
+    if (blk.roomOn && !blk.roomFlushed) {
       binaural::RoomSource src{};
       memcpy(src.posAircraft, rs.roomPos, sizeof(src.posAircraft));
       src.send = rs.roomSend;
@@ -1181,6 +1207,10 @@ inline void RoomBlockEnd(Block& blk, Counters& cnt, int64_t roomTicks, int64_t f
   cnt.roomCanopy.store(b.canopy, std::memory_order_relaxed);
   if (!blk.roomOn) return;
   cnt.roomBlocks.fetch_add(1, std::memory_order_relaxed);
+  if (freq)
+    cnt.roomSendUs.store(cnt.roomSendUs.load(std::memory_order_relaxed) +
+                             static_cast<double>(blk.roomTicks) * 1e6 / static_cast<double>(freq),
+                         std::memory_order_relaxed);
   cnt.roomFrameValid.store(blk.roomFrameValid ? 1u : 0u, std::memory_order_relaxed);
   {
     float m[3];

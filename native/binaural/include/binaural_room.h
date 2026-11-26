@@ -57,6 +57,13 @@ constexpr float kRoomEarlyFadeMs = 50.0f;            // early reflections on/off
 constexpr float kRoomCanopyTauS = 0.3f;              // canopy smoothing time constant
 constexpr float kRoomSpeedOfSound = 343.0f;
 constexpr std::uint32_t kRoomBusTaps48 = 64;         // the buses' HRTF filters are cut to this (at 48 kHz; scaled)
+// Voices with their own early reflections per block: the loudest kRoomOwnTaps (by the last block's send energy); the
+// others, once 6 dB under the last of those (back at 3 dB), are summed into one shared tap line excited at their
+// energy-weighted mean position (their tails stay their own sends). Each own voice costs a pass over the block per tap.
+// Shipped off (every voice its own taps): a lossy option, measured in C17 with kRoomOwnTapsOption.
+constexpr std::uint32_t kRoomOwnTaps = kMaxSources;
+constexpr std::uint32_t kRoomOwnTapsOption = 16;
+constexpr float kRoomTapMinShare = 0.0f;             // a voice's taps under this share of its early energy are left out (0: none; 0.04 measured +-0.74 dB, C17)
 
 namespace room_flags {
 constexpr std::uint32_t kReset = 1u;          // a new voice in this slot (tap lines and filter states cleared)
@@ -93,6 +100,7 @@ constexpr float kRoomMatchMaxDb = 2.0f;            // and stays within +-this
 constexpr float kRoomMatchLowHz = 200.0f;          // band edges: below, between (200-1000 Hz), above
 constexpr float kRoomMatchHighHz = 1000.0f;
 constexpr std::uint32_t kRoomMatchBands = 3;
+constexpr std::uint32_t kRoomSections = 6;  // RoomStats::sectionUs
 
 // What the direct gain d must follow in this block (Room::DirectState): the room's own values at the block's end, so
 // d ramps with the room it makes room for. params: the parameters as crossfaded now (kRoomParamsCrossfadeMs); earlyMix:
@@ -109,6 +117,9 @@ struct RoomStats {
     std::uint64_t lastBlockNs, worstBlockNs;
     float lastWet, lastCanopy;
     float matchDb[kRoomMatchBands];  // the level match's gains (below 200 Hz, 200-1000 Hz, above 1 kHz), at full wet
+    // Render's time per section since Init (microseconds): drain, wall filters, bus HRTF renders, early high-pass,
+    // tail, output and level match.
+    double sectionUs[kRoomSections];
 };
 
 class Room {

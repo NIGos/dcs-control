@@ -351,6 +351,9 @@ const Renderer& Bus(const Room& r);                          // the bus Renderer
 void BusHead(const Room& r, std::uint32_t b, float out[3]);  // bus b's head-frame direction of the last block
 float Kappa(const Room& r);                                  // late calibration factor
 void ForceRoomKernels(int which);                            // 0: by the CPU (AVX2/FMA when present), 1: SSE2; read at Init
+void ForceBusTaps(int taps48);                               // 0: kRoomBusTaps48; read at SetHrtf
+void ForceTapMinShare(float share);                          // < 0: kRoomTapMinShare; read per AddSource
+void ForceOwnTaps(int voices);                               // < 0: kRoomOwnTaps (0: every voice its own); per block
 float HNorm(const Room& r);                                  // early (bus) calibration gain
 float EFront(const Room& r);
 float EDiff(const Room& r);

@@ -548,7 +548,9 @@ static Timing RunRoomLoad(const std::vector<std::uint32_t>& file, std::uint32_t 
             const float dist = inside ? 0.35f + 0.1f * (s % 5) : 30.0f;
             const float x = static_cast<float>(std::cos(el * kPi / 180) * std::cos(az * kPi / 180)), y = static_cast<float>(std::sin(el * kPi / 180)),
                         z = static_cast<float>(-std::cos(el * kPi / 180) * std::sin(az * kPi / 180));
-            RoomSource rs{{x * dist, y * dist, z * dist}, 1.0f, (inside ? 0u : room_flags::kThroughCanopy) | (b == 0 ? room_flags::kReset : 0u), 0.99f};
+            // levels spread over 30 dB, as DCS's voices are (the shared tap line takes the quieter ones)
+            const float send = static_cast<float>(std::pow(10.0, -2.0 * (s % 16) / 20.0));
+            RoomSource rs{{x * dist, y * dist, z * dist}, send, (inside ? 0u : room_flags::kThroughCanopy) | (b == 0 ? room_flags::kReset : 0u), 0.99f};
             MonoInput mi{in[s].data() + (b % 3) * frames, nullptr, 1, 1.0f};
             rig.room.AddSource(s, rs, mi, frames, 1.0f, 1.0f);
         }
@@ -562,7 +564,7 @@ static Timing RunRoomLoad(const std::vector<std::uint32_t>& file, std::uint32_t 
         addNs.push_back(static_cast<double>(cm - c0) / cpn), renderNs.push_back(static_cast<double>(c1 - cm) / cpn);
     }
     {
-        // Where Render's time goes (TSC, mean per block over the whole run).
+        // Where Render's time goes (TSC, mean per block over the whole run; the rig is this run's own).
         static double tscPerNs = 0.0;
         if (tscPerNs == 0.0) {
             LARGE_INTEGER q0, q1, f;
@@ -676,6 +678,19 @@ static void TestCpu(const std::vector<std::uint32_t>& file) {
             t.p50 = std::min(t.p50, r.p50), t.p99 = std::min(t.p99, r.p99);
         }
         std::printf("C9/R8 room CPU, 48 voices, early reflections off (CPU back-off step 1, late tail only): p50 %.3f ms, p99 %.3f ms\n", t.p50, t.p99);
+    }
+    {
+        // What the lossy options would save (not shipped): the buses at 32 taps and the shared tap line, static.
+        room_probe::ForceOwnTaps(static_cast<int>(kRoomOwnTapsOption));
+        room_probe::ForceBusTaps(32);
+        Timing t{1e9, 1e9, 0};
+        for (int rep = 0; rep < 5; ++rep) {
+            const Timing r = RunRoomLoad(file, 48, 0, 1050);
+            t.p50 = std::min(t.p50, r.p50), t.p99 = std::min(t.p99, r.p99);
+        }
+        room_probe::ForceOwnTaps(-1);
+        room_probe::ForceBusTaps(0);
+        std::printf("C9/R8 room CPU, 48 voices, static, with the lossy options (not shipped: 32-tap buses, shared tap line): p50 %.3f ms, p99 %.3f ms\n", t.p50, t.p99);
     }
     // The module calls RoomDirectGain and RoomSendDistanceGain per voice per block.
     {
@@ -1323,6 +1338,90 @@ static void TestMatchDynamics(const std::vector<std::uint32_t>& file) {
     CHECK(fin);
 }
 
+// ---- C17: the CPU cuts' trade-offs against the design (round 3) -------------------------------------------------------
+// The early reflections (tail at -40 dB) of the cockpit sources and the flight's engine positions, Normal, bubble:
+// the buses' filters at 32 taps against 64, and the weak taps left out (kRoomTapMinShare) against all eight. Per source
+// the early part's energy difference and the largest third-octave difference (200 Hz-12.5 kHz), the worst over the
+// sources, and the same for the whole output (direct + early, what is heard).
+static void TestCpuTradeoffs(const std::vector<std::uint32_t>& file, const char* label) {
+    std::vector<NamedPos> srcs = CockpitSources();
+    srcs.push_back({"engine above-behind 0.44 m", {-0.134f, 0.419f, 0.0f}});
+    srcs.push_back({"engine behind-below 1.0 m", {-0.834f, -0.581f, 0.0f}});
+    RoomParams p = Params(Family::Bubble, 2);
+    p.lateDb = -40.0f;
+    auto irs = [&](int busTaps, float share) {
+        room_probe::ForceBusTaps(busTaps);
+        room_probe::ForceTapMinShare(share);
+        RoomRig rig(file);
+        std::vector<Irs> out;
+        for (const NamedPos& s : srcs) out.push_back(ImpulseResponses(rig, p, s.p, 0, kIdentity, 0.1));
+        room_probe::ForceBusTaps(0);
+        room_probe::ForceTapMinShare(-1.0f);
+        return out;
+    };
+    const auto ref = irs(64, 0.0f), taps32 = irs(32, 0.0f), both = irs(32, 0.04f);
+    auto compare = [&](const std::vector<Irs>& a, const char* what, double* worstE, double* worstBand, double* worstTotal) {
+        *worstE = *worstBand = *worstTotal = 0;
+        for (std::size_t i = 0; i < srcs.size(); ++i) {
+            const double e = Db(Energy(a[i].room)) - Db(Energy(ref[i].room));
+            const auto ba = ThirdOctaves(a[i].room, 48000), br = ThirdOctaves(ref[i].room, 48000);
+            double band = 0;
+            for (std::size_t k = 0; k < ba.size(); ++k) band = std::max(band, std::fabs(Db(ba[k]) - Db(br[k])));
+            const auto ta = ThirdOctaves(Add(a[i].direct, a[i].room), 48000), tr = ThirdOctaves(Add(ref[i].direct, ref[i].room), 48000);
+            double total = 0;
+            for (std::size_t k = 0; k < ta.size(); ++k) total = std::max(total, std::fabs(Db(ta[k]) - Db(tr[k])));
+            *worstE = std::max(*worstE, std::fabs(e)), *worstBand = std::max(*worstBand, band), *worstTotal = std::max(*worstTotal, total);
+        }
+        std::printf("C17 trade-off %s %s: early reflections' energy within %.2f dB, third octaves within %.2f dB; direct + early "
+                    "third octaves within %.2f dB (worst of %zu sources)\n", label, what, *worstE, *worstBand, *worstTotal, srcs.size());
+    };
+    double e1, b1, t1, e2, b2, t2;
+    compare(taps32, "(not shipped) bus filters 32 taps vs 64", &e1, &b1, &t1);
+    compare(both, "(not shipped) 32 taps and taps under 4 % of a voice's early energy out vs 64, all taps", &e2, &b2, &t2);
+    (void)t1, (void)t2;  // lossy options, reported (not shipped)
+    // The shared tap line: 48 voices (24 in the cockpit at the sources' positions, 24 outside through the canopy,
+    // independent noises, levels spread over 30 dB), the room's whole output (early + tail) and what is heard (direct +
+    // room), every voice its own taps against the loudest kRoomOwnTaps.
+    {
+        const std::uint32_t n = 48000 * 2, warm = 24000;
+        std::vector<Vec> sig;
+        for (unsigned k = 0; k < 48; ++k) sig.push_back(Pink(n, 500 + k, 0.1f));
+        std::vector<SceneSource> src(48);
+        for (int i = 0; i < 48; ++i) {
+            const NamedPos& np = srcs[i % srcs.size()];
+            const bool inside = i < 24;
+            const double a = i * 0.7;
+            const float o[3] = {static_cast<float>(30 * std::cos(a)), 2.0f, static_cast<float>(30 * std::sin(a))};
+            std::memcpy(src[i].pos, inside ? np.p : o, sizeof(o));
+            if (inside) src[i].pos[0] += 0.01f * (i / static_cast<int>(srcs.size()));
+            src[i].signal = sig[i].data();
+            src[i].flags = inside ? 0u : room_flags::kThroughCanopy;
+            src[i].gain = static_cast<float>(std::pow(10.0, -1.5 * (i % 16) / 20.0));
+        }
+        auto render = [&](int own) {
+            room_probe::ForceOwnTaps(own);
+            RoomRig rig(file);
+            SceneState st;
+            st.params = Params(Family::Bubble, 2);
+            const SceneOut o = RenderScene(rig, st, src, n, 480);
+            room_probe::ForceOwnTaps(-1);
+            return o;
+        };
+        const SceneOut all = render(0), cut = render(static_cast<int>(kRoomOwnTapsOption));
+        auto cutFrom = [&](const Vec& v) { return Vec(v.begin() + 2 * std::ptrdiff_t(warm), v.end()); };
+        const auto ra = ThirdOctaves(cutFrom(all.room), 48000), rc = ThirdOctaves(cutFrom(cut.room), 48000);
+        const auto ta = ThirdOctaves(cutFrom(all.Total()), 48000), tc = ThirdOctaves(cutFrom(cut.Total()), 48000);
+        double room = 0, total = 0;
+        for (std::size_t k = 0; k < ra.size(); ++k)
+            room = std::max(room, std::fabs(Db(rc[k]) - Db(ra[k]))), total = std::max(total, std::fabs(Db(tc[k]) - Db(ta[k])));
+        const double eRoom = Db(Energy(cut.room, 2 * warm)) - Db(Energy(all.room, 2 * warm));
+        std::printf("C17 trade-off %s (not shipped) shared tap line (own taps for the loudest %u of 48 voices) vs every voice "
+                    "its own: room energy %+.2f dB, room third octaves within %.2f dB, direct + room within %.2f dB\n", label,
+                    kRoomOwnTapsOption, eRoom, room, total);
+        (void)total;
+    }
+}
+
 // ---- the bundled set -----------------------------------------------------------------------------------------------------------
 static std::vector<std::uint32_t> ReadFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -1349,6 +1448,7 @@ int main(int argc, char** argv) {
             TestMetrics(real, "(SADIE II KU100)");
             TestLevel(real);
             TestLiveMix(real, "(KU100)");
+            TestCpuTradeoffs(real, "(KU100)");
             TestCoherence(real);
         }
     } else if (mode == "--diag") {
@@ -1378,6 +1478,7 @@ int main(int argc, char** argv) {
         TestLevel(file);             // C8, R4
         TestLiveMix(file, "(synthetic)");  // C16
         TestMatchDynamics(file);     // C16
+        TestCpuTradeoffs(file, "(synthetic)");  // C17
         TestMetrics(file, "(synthetic)");  // R1, R2, R3, R9
         TestCrossfades(file, file2); // C10, R6
         TestBlockInvariance(file);

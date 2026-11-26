@@ -1076,11 +1076,86 @@ void LiveMix() {
   g_fakeMasterGain = 1.0f;
 }
 
+// M18: the flush point when the call pattern changes (round 3: 2185 / 3579 blocks of a mission load flushed after the
+// mix). The list's last voice is never rendered (the mix passes it, as ed_sound passes voices that do not play), voices
+// start one by one and end one by one, the master gain is 0.35, block sizes vary. With the room's wet weight above 0 not
+// one block may reach `out` after the master stage; the mix stays at Off's level while the voices come and go.
+void BuildUp() {
+  g_fakeMasterGain = 0.35f;
+  const std::vector<uint32_t> sizes = {480, 441, 512, 448};
+  auto run = [&](int level, uint64_t* after, uint64_t* inMix) {
+    Rig r;
+    RigUp(r, Ini(level).c_str());
+    SetCtxCockpitGain(r, kWorldCtx, true);
+    // voice 0: created first, so the list's tail; never rendered
+    const int quiet = AddBoth(r, kWorldCtx, true, 1, kNoise, 0.01f, 0, 1.0f, 5);
+    PosBoth(r, quiet, 40, 2, 10);
+    W<uint8_t>(r.w.voices[quiet], kVSkip, 1), W<uint8_t>(r.ref.voices[quiet], kVSkip, 1);
+    const int anchor = AddBoth(r, kWorldCtx, true, 1, kSine, 0.02f, 220, 1.0f, 6);
+    PosBoth(r, anchor, 25, 1, -8);
+    CreateVoice(r, quiet), CreateVoice(r, anchor);
+    audio::LuaAircraft("F-16C_50");
+    audio::LuaState(0.0, 1, 1);
+    Bind(r);
+    Tick();
+    const uint64_t a0 = audio::g_cnt.roomAfterWet.load(), i0 = audio::g_cnt.roomFlushInMix.load();
+    std::vector<float> a, b, hooked;
+    std::vector<int> voices;
+    for (int k = 0; k < 700; ++k) {
+      if (k >= 50 && k < 290 && k % 12 == 2) {  // twenty wide engine layers come in, one every 0.12 s
+        const int n = static_cast<int>(voices.size());
+        const float pos[3] = {-0.134f + 0.02f * (n % 5), 0.419f - 0.03f * (n % 3), 0.05f * (n % 4) - 0.075f};
+        const int i = AddBoth(r, kCockpitCtx, true, 2, kEngine, 0.05f, 88, 1.0f, 77);
+        PosBoth(r, i, pos[0], pos[1], pos[2]);
+        r.w.SetOrient(i, kIdentity);
+        CreateVoice(r, i);
+        voices.push_back(i);
+      }
+      if (k >= 420 && k < 660 && k % 12 == 0 && !voices.empty()) {  // and end one by one
+        const int i = voices.back();
+        voices.pop_back();
+        W<int64_t>(r.w.voices[i], kVRemaining, 240), W<int64_t>(r.ref.voices[i], kVRemaining, 240);
+      }
+      SimFrame(r);
+      const uint32_t n = sizes[static_cast<size_t>(k) % sizes.size()];
+      a.resize(2 * size_t(n)), b.resize(2 * size_t(n));
+      Block(r, a.data(), b.data(), n);
+      if (k == 100) Tick();
+      hooked.insert(hooked.end(), a.begin(), a.end());
+    }
+    *after = audio::g_cnt.roomAfterWet.load() - a0, *inMix = audio::g_cnt.roomFlushInMix.load() - i0;
+    RigDown(r);
+    return hooked;
+  };
+  uint64_t afterOff = 0, inOff = 0;
+  const std::vector<float> off = run(0, &afterOff, &inOff);
+  bool ok = true, finite = true;
+  for (int level = 1; level <= 3; level += 2) {
+    uint64_t after = 0, inMix = 0;
+    const std::vector<float> on = run(level, &after, &inMix);
+    finite = finite && AllFinite(on);
+    // the level with all twenty playing (blocks 300-400)
+    double eOn = 0, eOff = 0;
+    const size_t from = size_t(300) * 470 * 2, to = std::min(off.size(), size_t(400) * 470 * 2);
+    for (size_t i = from; i < to && i < on.size(); ++i) eOn += double(on[i]) * on[i], eOff += double(off[i]) * off[i];
+    const double db = 10 * std::log10(eOn / eOff);
+    printf("     voices coming and going, the list's last voice never rendered, %s: flushes inside the mix %llu, after it "
+           "with the room wet %llu; level with all playing %+.2f dB vs Off\n", kLevelName[level],
+           static_cast<unsigned long long>(inMix), static_cast<unsigned long long>(after), db);
+    ok = ok && after == 0 && inMix > 0 && std::fabs(db) <= 0.5;
+  }
+  Check(ok, "cockpit space e2e M18: voices coming and going and the list's last voice never rendered: the room and the "
+            "direct sound never reach `out` after the master stage, and the level stays at Off's (0.5 dB)");
+  Check(finite, "cockpit space e2e M18: every output sample finite");
+  g_fakeMasterGain = 1.0f;
+}
+
 void RunAll() {
   printf("---- cockpit space end to end (real Room)\n");
   Externalisation();
   Level();
   LiveMix();
+  BuildUp();
   Clicks();
   OffExact();
   Cpu();

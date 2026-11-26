@@ -438,6 +438,15 @@ the master processing like every other voice; after the mix only when no voice i
 ... after ...` on the running line). The first flight's +0.7 / +1.3 dB had the same cause: the room alone about 9 dB
 louder against the direct sound than designed. The fake ed_sound now applies a master gain after its voices
 (`g_fakeMasterGain`); M17 runs with 0.35 and fails with the room after the mix (+9.12 dB, measured).
+Round 3 (04d505e) found 2185 (F-16) and 3579 (F-4E) blocks of a mission load, and 106 at DCS's close, flushed after the
+mix: blocks without the list's last voice rendered. The flush point is now the list's last voice, or the call that was
+the last in the previous block (its voice, or the same number of calls; a voice rendered after the flush plays its
+direct sound straight into `out`, without the room, for that block). A block with no call inside the mix runs the room
+and drops its output when nothing is in `dry` (a load or a close: silence); with sound in `dry` (not seen) direct +
+room go in after the mix at the master gain measured at the flushes (`master` on the running line, `added` counted).
+M18: the list's last voice never rendered (the fake mix passes voices flagged `kVSkip`), twenty engine layers starting
+and ending one by one, varying blocks: 699 of 700 blocks flushed inside the mix, 0 after it with the room wet, the level
+within 0.04 dB of Off.
 
 **The level match (built after the live flight of 2026-11-26).** The first live run (validation-08, F-16C, about 30
 owned voices) played the space louder than Off: Subtle +0.7 dB, Normal +1.3 dB broadband, +1 / +2 dB at 200-1000 Hz,
@@ -826,6 +835,20 @@ empty otherwise; `ax..az` aircraft-frame position; `dcomp_db` 20 log10 d).
   sharing one tap computation between voices at the same position (DCS plays engine layers six at one point): with
   the taps reused per voice it saves about 0.3 µs per duplicate, not worth a second mixing path; fewer buses or taps
   per voice (a perceptual change).
+- **Round 3 (live on 04d505e: one Render per block, room p50 129-135 µs, p99 0.21-0.29 ms, module +0.15-0.18 ms).**
+  The running line now says where the time goes: `us per block: sends .. walls .. buses .. early hp .. tail ..
+  match ..` (the module's per-voice work, and `RoomStats::sectionUs`). Cuts, each measured against the design (C17,
+  KU100). Live 0.21-0.29 ms p99 is under the 0.30 ms ceiling, so only lossless cuts ship; the lossy options are
+  built, measured and off:
+  - (off) the buses' filters at 32 taps (1.3 -> 0.7 ms): the early reflections' energy within 0.03 dB, their third
+    octaves within 0.96 dB, what is heard (direct + early) within 0.12 dB, worst of 7 sources; bus HRTF 30 -> 25 µs
+    static (the fractional delays and crossfades stay);
+  - (off) a shared tap line for the quieter voices (`kRoomOwnTapsOption` = 16 own; the others, 6 dB under the 16th,
+    summed and excited at their energy-weighted position, 3 dB back; `kRoomOwnTaps` ships at every voice): 48 voices over
+    30 dB, room energy -0.09 dB, room third octaves within 0.19 dB, direct + room within 0.14 dB;
+  - (off) leaving out each voice's taps under 4 % of its early energy (early third octaves up to 3.25 dB, direct + early
+    0.74 dB; R9 and R4 failed);
+  - not built: fewer buses (14 -> 8), the tail at half rate, an ILD/ITD model for the reflections.
 - Room time is inside `dspTicks` (the module's budget measure).
 - Back-off ladder: over budget (> 10 % of the blocks of the last second) → **step 1: early reflections off** (late
   only, logged) → then the existing MaxObjects steps. Recovery in reverse: MaxObjects back to the setting, then after
@@ -876,10 +899,11 @@ override and the arm name per level; `hrtf_audio.py` needs to read `audio_space.
 - the `audio: running` line: `space Subtle|Normal bubble inside 1 ... early on`, its `room p99` under 0.15 ms (0.30 ms is
   the ceiling of the offline gates) and the module's p99 within 0.2 ms of the Off arm;
 - `audio_space.csv`: `inside 1` while in the cockpit, `type` the aircraft's, `frame_src` sound with `spread_deg` under
-  1°, `yaw_deg` following the head sweep (the [A] of section 3.2), `wet 1`, `early 1`, `dcomp_mean_db` between -0.1 and
-  -0.4 dB (first flight: -0.04 / -0.10 dB, the per-voice model alone; since the level match, `dcomp_mean_db` plus
-  `match_mid_db` is the direct cut at 200-1000 Hz and the level against Off is what is judged: broadband and K within
-  0.5 dB, 200-1000 Hz within 1 dB);
+  1°, `yaw_deg` following the head sweep (the [A] of section 3.2), `wet 1`, `early 1`, `dcomp_mean_db` between 0 and
+  -0.5 dB (the per-voice model's fast part only: -0.04 / -0.10 dB at Subtle / Normal in the flights; the measured
+  level match holds the level, so this is informational), `match_*_db` within ±2 dB and steady (under 0.3 dB p-p over
+  a steady block); what is judged is the level against Off: broadband and K within 0.5 dB, 200-1000 Hz within 1 dB
+  (round 3, 04d505e: within 0.21 dB on both aircraft);
 - the `audio: ctx N listener gain=... lowpass=...` probe line logged once (the [A] of section 3.1, read, not judged);
 - no click in the loopback at the kill switch (largest sample step against the steady signal's own, as offline).
 A fourth arm with an F2 view switch in the schedule checks inside 0 and the room idle (`wet 0`, no room time).

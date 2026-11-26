@@ -110,6 +110,11 @@ void RoomMixSse2(const float* src, float* const* acc, const float* gs, const flo
         for (int q = 0; q < nu; ++q) acc[q][i] += (gs[q] + dg[q] * static_cast<float>(i)) * src[i];
 }
 std::atomic<int> g_forceRoomKernels{0};  // harness: 0 by the CPU, 1 SSE2
+// Harness: the buses' filter length at 48 kHz (0: kRoomBusTaps48), read at SetHrtf; the per-voice tap threshold
+// (negative: kRoomTapMinShare), read per AddSource. For the trade-off measures (C17); never set by the module.
+std::atomic<int> g_forceBusTaps{0};
+std::atomic<float> g_forceTapMinShare{-1.0f};
+std::atomic<int> g_forceOwnTaps{-1};
 
 // A seqlock mailbox: the control thread writes (serialised by a mutex), the audio thread reads a consistent copy in a
 // bounded number of tries (and keeps its old copy when it cannot).
@@ -203,6 +208,14 @@ struct Slot {
     std::int32_t drain = 0;
     // The last targets' inputs: a voice that did not move (in a block where nothing else that shapes the taps changed)
     // keeps its taps without computing them again.
+    // The shared tap line (kRoomOwnTaps): this slot's send energy in the last block it was added, its rank among the
+    // block's voices, and whether it went to the shared line (its send ramps then, as for its own line).
+    double lastEnergy = 0.0;
+    std::uint64_t energyBlock = 0;
+    std::uint32_t rank = ~0u;
+    bool shared = false;
+    std::uint64_t sharedBlock = 0;
+    float shSend = 0.0f, shLate = 0.0f;
     bool tapsValid = false;
     float tapPos[3] = {};
     std::uint32_t tapFlags = 0;
@@ -468,9 +481,19 @@ struct Room::Impl {
     rf::BiquadState earlyHp[2][2], lateHp[2];  // the send high-pass on the buses' binaural output [ear][section], the tail's
     LevelMatch match;
     double wSum = 0.0, wdSum = 0.0;
-    // Harness profile (room_probe::Profile): TSC cycles per Render section, summed: drain, pair filters, bus renders,
-    // early high-pass, tail, output / level match.
-    std::uint64_t prof[6] = {};  // this block's voices: direct energy, and direct energy x d^2 (the match's weights)
+    // The shared tap line of the quieter voices: its slot (index maxSources), this block's summed input, and the
+    // energy-weighted position of what went into it (this block), its through-canopy share.
+    std::unique_ptr<float[]> sharedIn;
+    bool sharedThisBlock = false;
+    double shPos[3] = {}, shE = 0.0, shThroughE = 0.0;
+    std::uint32_t ownTaps = kRoomOwnTaps;
+    double ownEnergy = 0.0;  // the last block's send energy of the kRoomOwnTaps-th loudest voice
+    void TapTargets(const RoomParams& p, const float pos[3], std::uint32_t flags, float sd, std::int32_t* delayT,
+                    float (*busT)[kRoomBuses]);
+    // Time per Render section (TSC cycles, summed since Init; RoomStats::sectionUs, room_probe::Profile): drain, wall
+    // filters, bus HRTF renders, early high-pass, tail, output / level match. tscPerUs measured at Init.
+    std::atomic<std::uint64_t> prof[kRoomSections] = {};
+    double tscPerUs = 0.0;
 
     float* AccFor(std::uint32_t k, std::uint32_t j) {
         std::int16_t& ix = accIx[k][j];
@@ -532,7 +555,8 @@ struct Room::Impl {
     bool Ready() const { return inited && haveParams && haveHrtf; }
 
     bool Run(Slot& s, const float* a, const float* b, std::uint32_t stride, float sc, std::uint32_t nf, float w0, float w1,
-             const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT, double* inEnergy = nullptr);
+             const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT, double* inEnergy = nullptr,
+             float* sumTo = nullptr, bool noWet = false);
 
     void ResetSlot(Slot& s) {
         if (s.line) std::memset(s.line, 0, sizeof(float) * lineSize);
@@ -635,7 +659,9 @@ bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error,
     while (m.preSize < static_cast<std::uint32_t>(std::ceil(kPreDelayMaxMs * 1e-3 * sampleRate)) + 2) m.preSize <<= 1;
     m.preMask = m.preSize - 1;
     m.busTail = kMaxDeviceTaps * (sampleRate / 48000 + 1) + static_cast<std::uint32_t>(0.03 * sampleRate);
-    m.lines.reset(new (std::nothrow) float[std::size_t(maxSources) * m.lineSize]());
+    m.lines.reset(new (std::nothrow) float[std::size_t(maxSources + 1) * m.lineSize]());
+    m.sharedIn.reset(new (std::nothrow) float[kMaxFramesPerCall]());
+    if (!m.sharedIn) return fail("out of memory");
     const std::size_t maxStride = PackedStride(kMaxFramesPerCall);
     m.busBuf.reset(new (std::nothrow) float[std::size_t(kRoomBuses) * maxStride]());
     m.wetBuf.reset(new (std::nothrow) float[std::size_t(2) * kMaxFramesPerCall]());
@@ -652,8 +678,8 @@ bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error,
     m.vin.reset(new (std::nothrow) float[kChunk]());
     if (!m.accBuf || !m.accZero || !m.accSink || !m.vin) return fail("out of memory");
     if (!m.lines || !m.busBuf || !m.late || !m.x1 || !m.x2 || !m.tmp || !m.pre || !m.wetBuf || !m.earlyBuf) return fail("out of memory");
-    m.slots.resize(maxSources);
-    for (std::uint32_t i = 0; i < maxSources; ++i) m.slots[i].line = m.lines.get() + std::size_t(i) * m.lineSize;
+    m.slots.resize(maxSources + 1);  // the last one: the shared tap line of the quieter voices
+    for (std::uint32_t i = 0; i <= maxSources; ++i) m.slots[i].line = m.lines.get() + std::size_t(i) * m.lineSize;
     if (!m.fdn.Init(sampleRate)) return fail("out of memory");
     m.mixer.Init(sampleRate);
     const bool avx2 = g_forceRoomKernels.load() != 1 && kernels::CpuHasAvx2Fma();
@@ -668,6 +694,16 @@ bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error,
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     m.qpcToNs = 1e9 / static_cast<double>(f.QuadPart);
+    {
+        // The TSC's rate against QPC over about 2 ms (control thread), for RoomStats::sectionUs.
+        LARGE_INTEGER q0, q1;
+        QueryPerformanceCounter(&q0);
+        const std::uint64_t t0 = __rdtsc();
+        do QueryPerformanceCounter(&q1);
+        while ((q1.QuadPart - q0.QuadPart) * 500 < f.QuadPart);
+        const double us = static_cast<double>(q1.QuadPart - q0.QuadPart) * 1e6 / static_cast<double>(f.QuadPart);
+        m.tscPerUs = us > 0 ? static_cast<double>(__rdtsc() - t0) / us : 0.0;
+    }
     for (std::uint32_t b = 0; b < kRoomBuses; ++b) rm::BusDirection(b, m.busHead[b]);
     m.inited = true;
     return true;
@@ -680,7 +716,9 @@ void Room::SetHrtf(const HrtfSet* set) {
     // The buses render a copy of the set with shorter filters (kBusTaps48); the room never reads `set` on the audio
     // thread, so it is retired as soon as the buses let go of its copy.
     double kept = 1.0;
-    const std::uint32_t taps = static_cast<std::uint32_t>(std::lround(double(kBusTaps48) * set->sampleRate / 48000.0));
+    const int forced = g_forceBusTaps.load();
+    const std::uint32_t taps = static_cast<std::uint32_t>(
+        std::lround(double(forced > 0 ? static_cast<std::uint32_t>(forced) : kBusTaps48) * set->sampleRate / 48000.0));
     HrtfSet* copy = taps < set->taps ? CopyHrtfShortened(*set, taps, &kept) : nullptr;
     const HrtfSet* forBus = copy ? copy : set;
     m.busSets.push_back({set, copy});
@@ -735,6 +773,30 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
     m.frames = frames;
     m.pstride = PackedStride(std::min(frames, kMaxFramesPerCall));
     m.wSum = m.wdSum = 0.0;
+    // The voices' ranks by the last block's send energy (the shared tap line's choice, kRoomOwnTaps).
+    {
+        const int forced = g_forceOwnTaps.load(std::memory_order_relaxed);
+        m.ownTaps = forced >= 0 ? (forced == 0 ? kMaxSources : static_cast<std::uint32_t>(forced)) : kRoomOwnTaps;
+        float e[kMaxSources];
+        std::uint32_t ix[kMaxSources], n = 0;
+        for (std::uint32_t i = 0; i < m.maxSources; ++i) {
+            Slot& s = m.slots[i];
+            s.rank = ~0u;
+            if (s.energyBlock == m.blockIndex - 1) e[n] = static_cast<float>(s.lastEnergy), ix[n++] = i;
+        }
+        if (n > m.ownTaps) {
+            // insertion sort, largest first (at most kMaxSources entries, no allocation)
+            for (std::uint32_t a = 1; a < n; ++a)
+                for (std::uint32_t b = a; b > 0 && e[b] > e[b - 1]; --b) std::swap(e[b], e[b - 1]), std::swap(ix[b], ix[b - 1]);
+            for (std::uint32_t r = 0; r < n; ++r) m.slots[ix[r]].rank = r;
+            m.ownEnergy = e[m.ownTaps - 1];
+        } else {
+            for (std::uint32_t r = 0; r < n; ++r) m.slots[ix[r]].rank = 0;
+            m.ownEnergy = 0.0;
+        }
+        m.sharedThisBlock = false;
+        m.shPos[0] = m.shPos[1] = m.shPos[2] = m.shE = m.shThroughE = 0.0;
+    }
     m.inputThisBlock = m.busInputThisBlock = m.lateInputThisBlock = false;
     m.blockOk = frames > 0 && frames <= kMaxFramesPerCall;
     if (!m.blockOk) {
@@ -839,7 +901,9 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
 // when a filter state went non-finite (the caller resets the slot).
 bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stride, float sc, std::uint32_t nf, float w0,
                      float w1, const std::int32_t* delayT, const float (*busT)[kRoomBuses], float sendT, float lateT,
-                     double* inEnergy) {
+                     double* inEnergy, float* sumTo, bool noWet) {
+    // sumTo: the weighted input is added there (the shared tap line's input) instead of this slot's line, no taps.
+    // noWet: the wet weight is not applied (the shared line's input carries it already).
     bool early = false;
     for (std::uint32_t k = 0; k < kRoomTaps && !early; ++k)
         for (std::uint32_t j = 0; j < kRoomBuses; ++j)
@@ -849,7 +913,8 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
             }
     const float invF = 1.0f / static_cast<float>(nf);
     const float s0 = s.send, ds = sendT - s.send, l0 = s.late, dl = lateT - s.late;
-    const float we0 = wetPrev, dwe = wetCur - wetPrev, dw = w1 - w0;
+    const float we0 = noWet ? 1.0f : wetPrev, dwe = noWet ? 0.0f : wetCur - wetPrev, dw = w1 - w0;
+    if (sumTo) early = false;
     const std::uint32_t mask = lineMask;
     float* line = s.line;
     float* lateIn = late.get();
@@ -920,6 +985,12 @@ bool Room::Impl::Run(Slot& s, const float* a, const float* b, std::uint32_t stri
                 nz |= x != 0.0f ? 1 : 0;
             }
             any = any || nz != 0;
+            if (sumTo) {
+                std::uint32_t q = 0;
+                for (; q + 4 <= n; q += 4) _mm_storeu_ps(sumTo + o + q, _mm_add_ps(_mm_loadu_ps(sumTo + o + q), _mm_loadu_ps(v + q)));
+                for (; q < n; ++q) sumTo[o + q] += v[q];
+                continue;
+            }
             const std::uint32_t wpos = (base + o) & mask, first = std::min(n, lineSize - wpos);
             std::memcpy(line + wpos, v, sizeof(float) * first);
             if (first < n) std::memcpy(line, v + first, sizeof(float) * (n - first));
@@ -1031,6 +1102,43 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& src, const MonoInput&
             return false;
         }
     }
+    // The quieter voices (kRoomOwnTaps) send to the shared tap line: their weighted input (the same ramps as on their
+    // own line) is summed there, their position into its energy-weighted mean; their own line plays out what it holds.
+    {
+        const bool early = m.earlyCur > 0.0f || m.earlyPrev > 0.0f;
+        const bool known = !(src.flags & room_flags::kReset) && s.energyBlock + 1 == m.blockIndex;
+        const bool wasShared = s.shared && s.sharedBlock + 1 == m.blockIndex;
+        // Past the kRoomOwnTaps loudest, and clearly quieter than the last of them (6 dB to go to the shared line, 3 dB
+        // back): voices of about the same level never swap lines from block to block.
+        const bool share = early && known && !(src.flags & room_flags::kLateOnly) && s.rank != ~0u && s.rank >= m.ownTaps &&
+                           s.lastEnergy < m.ownEnergy * (wasShared ? 0.5 : 0.25);
+        if (share) {
+            const float sendT = std::max(src.send, 0.0f) * ((src.flags & room_flags::kThroughCanopy) ? m.dCur.through : 1.0f);
+            Slot t;  // the ramps' state for the shared line's input (no line, no taps)
+            t.send = wasShared ? s.shSend : sendT;
+            t.late = wasShared ? s.shLate : 1.0f;
+            t.line = nullptr;
+            double inEnergy = 0.0;
+            m.Run(t, in.a, in.b, in.stride, in.scale, frames, w0, w1, t.delay, t.bus, sendT, 1.0f, &inEnergy, m.sharedIn.get());
+            s.shSend = sendT, s.shLate = 1.0f, s.shared = true, s.sharedBlock = m.blockIndex;
+            const double e = inEnergy * double(in.scale) * in.scale * double(sendT) * sendT;
+            if (std::isfinite(e)) {
+                s.lastEnergy = e, s.energyBlock = m.blockIndex;
+                for (int k = 0; k < 3; ++k) m.shPos[k] += e * pos[k];
+                m.shE += e;
+                if (src.flags & room_flags::kThroughCanopy) m.shThroughE += e;
+            }
+            m.sharedThisBlock = true;
+            const float sd = rm::SendDistanceGain(m.eff, pos, src.flags);
+            const float hrtfGain = sd > 1e-6f ? std::max(src.send, 0.0f) / sd : 0.0f;
+            const double w = 0.5 * (double(w0) + w1), ed = inEnergy * double(in.scale) * in.scale * hrtfGain * hrtfGain * w * w;
+            const float dd = (src.direct > 0.0f && std::isfinite(src.direct)) ? std::min(src.direct, 4.0f) : 1.0f;
+            if (std::isfinite(ed)) m.wSum += ed, m.wdSum += ed * dd * dd;
+            m.sAdded.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        s.shared = false;
+    }
     // A new voice, or one that skipped a block (its line holds stale samples): start from a clean slot, no ramps.
     const bool fresh = (src.flags & room_flags::kReset) || !s.active || s.lastBlock + 1 != m.blockIndex;
     if (fresh) m.ResetSlot(s);
@@ -1064,14 +1172,28 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& src, const MonoInput&
     if (!reuse) {
         std::memset(busBufT, 0, sizeof(busBufT));
         delayT = delayBuf, busT = busBufT;
+        // The voice's weak taps (under kRoomTapMinShare of its early energy: usually the floor's and the far front's)
+        // are left out and the others scaled to keep the energy: each tap costs a pass over the block.
+        float g[kRoomTaps], eAll = 0.0f;
         for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
             delayBuf[k] = std::clamp(static_cast<std::int32_t>(std::lround(taps[k].delayS * fsF)), 0, m.maxTapDelay);
-            const float g = rm::CappedTapGain(taps[k].gain * d.K, sd, cap) * m.earlyCur;
-            if (g > 0.0f) {
+            g[k] = rm::CappedTapGain(taps[k].gain * d.K, sd, cap) * m.earlyCur;
+            eAll += g[k] * g[k];
+        }
+        const float forcedShare = g_forceTapMinShare.load(std::memory_order_relaxed);
+        const float minShare = forcedShare >= 0.0f ? forcedShare : kRoomTapMinShare;
+        float eKept = 0.0f;
+        for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+            if (g[k] * g[k] < minShare * eAll) g[k] = 0.0f;
+            eKept += g[k] * g[k];
+        }
+        const float keep = eKept > 0.0f ? std::sqrt(eAll / eKept) : 0.0f;
+        for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+            if (g[k] > 0.0f) {
                 std::uint32_t idx[3];
                 float pg[3];
                 rm::Pan(taps[k].u, idx, pg);
-                for (int j = 0; j < 3; ++j) busBufT[k][idx[j]] += pg[j] * g;
+                for (int j = 0; j < 3; ++j) busBufT[k][idx[j]] += pg[j] * g[k] * keep;
             }
         }
     }
@@ -1094,6 +1216,8 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& src, const MonoInput&
         const double w = 0.5 * (double(w0) + w1), e = inEnergy * double(in.scale) * in.scale * hrtfGain * hrtfGain * w * w;
         const float dd = (src.direct > 0.0f && std::isfinite(src.direct)) ? std::min(src.direct, 4.0f) : 1.0f;
         if (std::isfinite(e)) m.wSum += e, m.wdSum += e * dd * dd;
+        const double es = inEnergy * double(in.scale) * in.scale * double(sendT) * sendT;
+        if (std::isfinite(es)) s.lastEnergy = es, s.energyBlock = m.blockIndex;
     }
     s.drain = 0;
     if (!reuse) {  // kept from the computation, so a slow drift still recomputes once it passes kTapReuseM
@@ -1103,6 +1227,26 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& src, const MonoInput&
     s.tapFlags = tapFlags, s.tapsValid = true;
     m.sAdded.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+// A tap set's targets for a position: whole-sample delays and the VBAP bus gains (the early normalisation, the cap,
+// the early reflections' fade), as AddSource computes them for a voice (the shared tap line's).
+void Room::Impl::TapTargets(const RoomParams& p, const float pos[3], std::uint32_t flags, float sd, std::int32_t* delayT,
+                            float (*busT)[kRoomBuses]) {
+    rm::Tap taps[kRoomTaps];
+    rm::ComputeTaps(p, canCur, pos, flags, taps);
+    std::memset(busT, 0, sizeof(float) * kRoomTaps * kRoomBuses);
+    const float fsF = static_cast<float>(fs);
+    for (std::uint32_t k = 0; k < kRoomTaps; ++k) {
+        delayT[k] = std::clamp(static_cast<std::int32_t>(std::lround(taps[k].delayS * fsF)), 0, maxTapDelay);
+        const float g = rm::CappedTapGain(taps[k].gain * dCur.K, sd, dCur.cap) * earlyCur;
+        if (g > 0.0f) {
+            std::uint32_t idx[3];
+            float pg[3];
+            rm::Pan(taps[k].u, idx, pg);
+            for (int j = 0; j < 3; ++j) busT[k][idx[j]] += pg[j] * g;
+        }
+    }
 }
 
 void Room::ResetSource(std::uint32_t slot) {
@@ -1187,9 +1331,27 @@ void Room::Render(float* outLR, std::uint32_t frames, const float* directLR) {
     std::uint64_t tsc = __rdtsc();
     auto lap = [&](int k) {
         const std::uint64_t t = __rdtsc();
-        m.prof[k] += t - tsc;
+        m.prof[k].store(m.prof[k].load(std::memory_order_relaxed) + (t - tsc), std::memory_order_relaxed);
         tsc = t;
     };
+
+    // ---- the shared tap line of the quieter voices: their summed input, taps at their energy-weighted position ----
+    if (m.sharedThisBlock && m.shE > 0.0) {
+        Slot& s = m.slots[m.maxSources];
+        const float pos[3] = {static_cast<float>(m.shPos[0] / m.shE), static_cast<float>(m.shPos[1] / m.shE),
+                              static_cast<float>(m.shPos[2] / m.shE)};
+        const std::uint32_t flags = m.shThroughE > 0.5 * m.shE ? room_flags::kThroughCanopy : 0u;
+        const bool fresh = !s.active || s.lastBlock + 1 != m.blockIndex;
+        if (fresh) m.ResetSlot(s);
+        std::int32_t delayT[kRoomTaps];
+        float busT[kRoomTaps][kRoomBuses];
+        m.TapTargets(m.eff, pos, flags, rm::SendDistanceGain(m.eff, pos, flags), delayT, busT);
+        if (fresh) std::memcpy(s.delay, delayT, sizeof(s.delay)), std::memcpy(s.bus, busT, sizeof(s.bus)), s.send = 1.0f, s.late = 0.0f;
+        if (!m.Run(s, m.sharedIn.get(), nullptr, 1, 1.0f, frames, 1.0f, 1.0f, delayT, busT, 1.0f, 0.0f, nullptr, nullptr, true))
+            m.ResetSlot(s);
+        s.drain = 0;
+    }
+    std::memset(m.sharedIn.get(), 0, sizeof(float) * frames);
 
     // ---- voices that ended (ResetSource) or were not added this block: their reflections play out with silence ----
     for (Slot& s : m.slots) {
@@ -1560,6 +1722,8 @@ RoomStats Room::GetStats() const {
     s.lastWet = m.sWet.load(std::memory_order_relaxed);
     s.lastCanopy = m.sCanopy.load(std::memory_order_relaxed);
     for (std::uint32_t b = 0; b < kRoomMatchBands; ++b) s.matchDb[b] = m.sMatch[b].load(std::memory_order_relaxed);
+    for (std::uint32_t k = 0; k < kRoomSections; ++k)
+        s.sectionUs[k] = m.tscPerUs > 0 ? static_cast<double>(m.prof[k].load(std::memory_order_relaxed)) / m.tscPerUs : 0.0;
     return s;
 }
 void Room::ResetStats() {
@@ -1627,8 +1791,7 @@ struct RoomAccess {
     static std::uint32_t FdnLength(const Room& r, std::uint32_t l) { return r.impl_->fdn.Length(l); }
     static double BusKept(const Room& r) { return r.impl_->busKeptWorst; }
     static void Profile(Room& r, std::uint64_t out[6]) {
-        std::memcpy(out, r.impl_->prof, sizeof(r.impl_->prof));
-        std::memset(r.impl_->prof, 0, sizeof(r.impl_->prof));
+        for (std::uint32_t k = 0; k < kRoomSections; ++k) out[k] = r.impl_->prof[k].load(std::memory_order_relaxed);
     }
 };
 namespace room_probe {
@@ -1636,6 +1799,9 @@ const Renderer& Bus(const Room& r) { return RoomAccess::Bus(r); }
 void BusHead(const Room& r, std::uint32_t b, float out[3]) { RoomAccess::BusHead(r, b, out); }
 float Kappa(const Room& r) { return RoomAccess::Kappa(r); }
 void ForceRoomKernels(int which) { g_forceRoomKernels.store(which); }
+void ForceBusTaps(int taps48) { g_forceBusTaps.store(taps48); }
+void ForceTapMinShare(float share) { g_forceTapMinShare.store(share); }
+void ForceOwnTaps(int voices) { g_forceOwnTaps.store(voices); }
 float HNorm(const Room& r) { return RoomAccess::HNorm(r); }
 float EFront(const Room& r) { return RoomAccess::EFront(r); }
 float EDiff(const Room& r) { return RoomAccess::EDiff(r); }

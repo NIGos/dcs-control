@@ -269,10 +269,17 @@ void PanWrapB(void* voice) { PanWrapImpl(voice, true); }
 // ---- render thread --------------------------------------------------------------------------------------------------
 // Cockpit space: the room's buses and tail, and the owned voices' direct sound (blk.dry), into the block. ed_sound's mix
 // renders the voices of renderer+0x20 (a list, voice+0 the next one) and THEN runs its master processing over `out`
-// (the limiter and the global gain ramp, docs/BINAURAL_AUDIO_HOOKS.md 2.3). So this runs at the last voice's render,
-// inside the mix, like every other voice's output; after the mix only when no voice was last (an empty list), counted.
+// (the limiter and the global gain ramp, docs/BINAURAL_AUDIO_HOOKS.md 2.3). So this runs inside the mix, like every
+// other voice's output: at the list's last voice, or at the call that was the last one in the previous block (its
+// voice, or the same number of calls: the list's last voice may not be rendered, as during a mission load). A voice
+// rendered after the flush plays its direct sound straight into `out`, without the room, for that block. A block with
+// no call inside the mix: the room runs and its output is dropped when nothing is in `dry` (silence otherwise: a
+// mission loading, DCS closing); with sound in `dry`, it is added after the mix at the master gain measured at the
+// flushes (counted, never seen in the tests).
 // (Run after the mix, the room and the direct sound skipped DCS's master gain: +9 dB on the F-16 in the second flight;
 // in the first flight the room alone came out that much too loud against the direct sound.)
+// The voice is the last of the mix's list (its next pointer, voice+0, is null).
+inline bool LastVoice(void* voice) { return *static_cast<void* const*>(voice) == nullptr; }
 void RoomFlush(audr::Block& blk, float* out, uint32_t frames, bool inMix) {
   if (!blk.roomOn || blk.roomFlushed) return;
   blk.roomFlushed = true;
@@ -280,11 +287,15 @@ void RoomFlush(audr::Block& blk, float* out, uint32_t frames, bool inMix) {
   const int64_t r0 = Qpc();
   {
     audr::MxcsrScope fz;
+    // The energies (a diagnosis on the running line) every 8th room block: they cost three passes over the block.
+    const bool measure = (g_cnt.roomBlocks.load(std::memory_order_relaxed) & 7u) == 0;
+    blk.measured = measure;
     double eDry = 0, eBefore = 0, eAfter = 0;
-    for (uint32_t i = 0; i < 2 * frames; ++i) {
-      eBefore += double(out[i]) * out[i];
-      if (blk.dry) eDry += double(blk.dry[i]) * blk.dry[i];
-    }
+    if (measure)
+      for (uint32_t i = 0; i < 2 * frames; ++i) {
+        eBefore += double(out[i]) * out[i];
+        if (blk.dry) eDry += double(blk.dry[i]) * blk.dry[i];
+      }
     if (blk.dry && (g_testRoomNoMatch.load(std::memory_order_relaxed) || g_devRoomNoMatch.load(std::memory_order_relaxed))) {
       for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += blk.dry[i];
       audr::RoomRender(b->room, out, frames);
@@ -292,18 +303,35 @@ void RoomFlush(audr::Block& blk, float* out, uint32_t frames, bool inMix) {
       audr::RoomRender(b->room, out, frames, blk.dry);
     }
     audr::RoomEnd(b->room);
-    for (uint32_t i = 0; i < 2 * frames; ++i) eAfter += double(out[i]) * out[i];
-    g_cnt.roomEDry.store(g_cnt.roomEDry.load(std::memory_order_relaxed) + eDry, std::memory_order_relaxed);
-    g_cnt.roomEOutBefore.store(g_cnt.roomEOutBefore.load(std::memory_order_relaxed) + eBefore, std::memory_order_relaxed);
-    g_cnt.roomEOutAfter.store(g_cnt.roomEOutAfter.load(std::memory_order_relaxed) + eAfter, std::memory_order_relaxed);
-    g_cnt.roomEBlocks.fetch_add(1, std::memory_order_relaxed);
+    if (measure) {
+      for (uint32_t i = 0; i < 2 * frames; ++i) eAfter += double(out[i]) * out[i];
+      g_cnt.roomEDry.store(g_cnt.roomEDry.load(std::memory_order_relaxed) + eDry, std::memory_order_relaxed);
+      g_cnt.roomEOutBefore.store(g_cnt.roomEOutBefore.load(std::memory_order_relaxed) + eBefore, std::memory_order_relaxed);
+      g_cnt.roomEOutAfter.store(g_cnt.roomEOutAfter.load(std::memory_order_relaxed) + eAfter, std::memory_order_relaxed);
+      g_cnt.roomEBlocks.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   blk.roomRenderTicks += Qpc() - r0;
+  blk.dry = nullptr;  // voices rendered after this point (inside the mix) go straight into `out`
   g_cnt.roomRenders.fetch_add(1, std::memory_order_relaxed);
   (inMix ? g_cnt.roomFlushInMix : g_cnt.roomFlushAfterMix).fetch_add(1, std::memory_order_relaxed);
 }
-// The voice is the last of the mix's list (its next pointer, voice+0, is null).
-inline bool LastVoice(void* voice) { return *static_cast<void* const*>(voice) == nullptr; }
+// After a voice-render call inside the mix: count it and flush the room when this is the block's last call (see above).
+inline void AfterVoiceCall(audr::Block& blk, void* voice, float* out, uint32_t frames) {
+  ++blk.calls;
+  blk.lastCaller = voice;
+  if (!blk.roomOn || blk.roomFlushed) return;
+  const audr::Binding& b = *blk.b;
+  const bool last = LastVoice(voice);
+  if (last || voice == b.lastCaller || (b.lastCalls && blk.calls >= b.lastCalls)) {
+    RoomFlush(blk, out, frames, true);
+    if (last && blk.measured) {  // the real end of the list: what reaches `out` from here on is the master stage's
+      double e = 0;
+      for (uint32_t i = 0; i < 2 * frames; ++i) e += double(out[i]) * out[i];
+      blk.ePreMaster = e;
+    }
+  }
+}
 
 int RenderWrap(void* voice, float* out, uint32_t frames) {
   InflightScope in;
@@ -320,7 +348,7 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
     }
   if (slot < 0) {  // not a candidate: DCS's own call, untouched
     const int r = g_res.voiceRender(voice, out, frames);
-    if (blk->roomOn && LastVoice(voice)) RoomFlush(*blk, out, frames, true);
+    AfterVoiceCall(*blk, voice, out, frames);
     return r;
   }
   audr::Binding& b = *blk->b;
@@ -337,7 +365,7 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
   if (!ok) g_meta.torn.fetch_add(1, std::memory_order_relaxed);
   if (ok && md.voice != voice) {  // the slot was just given to another voice: this one is DCS's
     for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += scratch[i];
-    if (blk->roomOn && LastVoice(voice)) RoomFlush(*blk, out, frames, true);
+    AfterVoiceCall(*blk, voice, out, frames);
     return r;
   }
   {
@@ -346,7 +374,7 @@ int RenderWrap(void* voice, float* out, uint32_t frames) {
   }
   g_cnt.candidateCalls.fetch_add(1, std::memory_order_relaxed);
   blk->dspTicks += (t1 - t0) + (Qpc() - t2);
-  if (blk->roomOn && LastVoice(voice)) RoomFlush(*blk, out, frames, true);
+  AfterVoiceCall(*blk, voice, out, frames);
   return r;
 }
 
@@ -428,11 +456,36 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
     audr::CoreEnd(b->core);
   }
   if (blk.roomOn) {
-    // Normally done at the last voice, inside the mix (RoomFlush); here only when no voice was last.
-    RoomFlush(blk, out, frames, false);
+    // Normally done inside the mix (AfterVoiceCall). Not flushed: nothing in `dry`, the room runs on and its output is
+    // dropped; sound in `dry` (never seen so far), added at the master gain measured at the flushes.
+    if (!blk.roomFlushed) {
+      if (blk.dryUsed && blk.dry) {
+        float* hold = b->scratch;  // direct + room of this block, then at the master gain into `out`
+        memset(hold, 0, sizeof(float) * 2 * frames);
+        RoomFlush(blk, hold, frames, false);
+        const float g = b->masterGain;
+        for (uint32_t i = 0; i < 2 * frames; ++i) out[i] += g * hold[i];
+        if (b->wet > 0.0f) g_cnt.roomAfterWet.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        float* sink = b->scratch;
+        memset(sink, 0, sizeof(float) * 2 * frames);
+        RoomFlush(blk, sink, frames, false);
+        g_cnt.roomDropped.fetch_add(1, std::memory_order_relaxed);
+      }
+    } else if (blk.ePreMaster > 1e-9) {
+      double e = 0;
+      for (uint32_t i = 0; i < 2 * frames; ++i) e += double(out[i]) * out[i];
+      const float g = static_cast<float>(std::sqrt(e / blk.ePreMaster));
+      if (std::isfinite(g) && g > 0.01f && g < 4.0f) {
+        b->masterGain += 0.05f * (g - b->masterGain);
+        g_cnt.masterGainDb.store(20.0f * std::log10(b->masterGain), std::memory_order_relaxed);
+      }
+    }
     roomTicks += blk.roomRenderTicks;
     blk.dspTicks += roomTicks;
   }
+  b->lastCalls = blk.calls;
+  b->lastCaller = blk.lastCaller;
   if (b->room) audr::RoomBlockEnd(blk, g_cnt, roomTicks, freq);
   b->lastUseQpc.store(now, std::memory_order_relaxed);
   g_cnt.armedBlocks.fetch_add(1, std::memory_order_relaxed);
@@ -1480,7 +1533,7 @@ void ControlTick() {
       const uint32_t owned = g_cnt.ownedNow.load(), st = std::min(owned, g_cnt.ownedStereoNow.load());
       // Cockpit space: its level and family, inside, the voices sent to the room in the last block, the early
       // reflections, the room's own p99 and the mean direct-gain compensation (before "; head pose", which ends the line).
-      char space[360] = "Off";
+      char space[520] = "Off";
       if (g_spaceSt.blind) {
         snprintf(space, sizeof(space), "Test");  // a listening test: neither the level nor its room figures
       } else if (g_spaceSt.level > 0) {
@@ -1497,13 +1550,36 @@ void ControlTick() {
                  SpaceLevelName(g_spaceSt.level), cockpit_space::FamilyKey(g_spaceSt.family), g_spaceSt.insideNow,
                  g_cnt.roomVoicesNow.load(), g_cnt.roomEarly.load() ? "on" : "off", p99 / 1000.0, g_cnt.dcompMeanDb.load(),
                  g_cnt.roomMatchDb[0].load(), g_cnt.roomMatchDb[1].load(), g_cnt.roomMatchDb[2].load());
-        const size_t used = strlen(space);
+        size_t used = strlen(space);
         snprintf(space + used, sizeof(space) - used,
-                 ", energy dry %.1f out %.1f -> %.1f dB, renders %llu in mix %llu after %llu, blocks %llu", eDry, eBefore,
+                 ", energy dry %.1f out %.1f -> %.1f dB, renders %llu in mix %llu after %llu (dropped %llu, added %llu), "
+                 "blocks %llu, master %+.1f dB", eDry, eBefore,
                  eAfter, static_cast<unsigned long long>(g_cnt.roomRenders.load()),
                  static_cast<unsigned long long>(g_cnt.roomFlushInMix.load()),
                  static_cast<unsigned long long>(g_cnt.roomFlushAfterMix.load()),
-                 static_cast<unsigned long long>(g_cnt.roomBlocks.load()));
+                 static_cast<unsigned long long>(g_cnt.roomDropped.load()),
+                 static_cast<unsigned long long>(g_cnt.roomAfterWet.load()),
+                 static_cast<unsigned long long>(g_cnt.roomBlocks.load()), g_cnt.masterGainDb.load());
+        // Where the room's time goes since the last line, mean per room block (us): the per-voice sends, the wall
+        // filters, the bus HRTF renders, the tail, the output with the level match.
+        {
+          static double prevSec[binaural::kRoomSections] = {}, prevSend = 0;
+          static uint64_t prevBlocks = 0;
+          double sec[binaural::kRoomSections] = {};
+          if (audr::Binding* bb = g_binding.load(); bb && bb->room) audr::RoomSectionsUs(bb->room, sec);
+          const uint64_t blocksNow = g_cnt.roomBlocks.load();
+          const double nb = static_cast<double>(blocksNow > prevBlocks ? blocksNow - prevBlocks : 1);
+          const double sendNow = g_cnt.roomSendUs.load();
+          double d[binaural::kRoomSections];
+          for (uint32_t k = 0; k < binaural::kRoomSections; ++k)
+            d[k] = sec[k] >= prevSec[k] ? (sec[k] - prevSec[k]) / nb : 0.0, prevSec[k] = sec[k];
+          const double sends = sendNow >= prevSend ? (sendNow - prevSend) / nb : 0.0;
+          prevSend = sendNow, prevBlocks = blocksNow;
+          used = strlen(space);
+          snprintf(space + used, sizeof(space) - used,
+                   ", us per block: sends %.0f walls %.0f buses %.0f early hp %.0f tail %.0f match %.0f", sends, d[1],
+                   d[2], d[3], d[4], d[5]);
+        }
       }
       Log("audio: running, %u sounds, p99 %.2f ms per block (budget %.0f%% of a block, about %.2f ms at 10 ms), limit "
           "%u; mono %u, stereo %u; wide %u (near or diffuse); fades in/out %llu/%llu, fallbacks %llu, refused %llu, torn %llu (snapshots %llu), "
