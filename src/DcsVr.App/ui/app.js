@@ -1546,7 +1546,7 @@ function renderAudio() {
     ['Ears (HRTF)', s.hrtf ? (s.hrtf === 'default' ? 'Generic (KU100)' : s.hrtf === 'personal' ? 'Your own' : s.hrtf) : '—'], ['Follows the head between frames', s.headTracking == null ? '—' : s.headTracking ? 'Yes' : 'No'],
     ['Fewer sounds to stay in budget', s.backoffs ? `${s.backoffs} time${s.backoffs === 1 ? '' : 's'}${s.maxObjectsNow ? ', down to '+s.maxObjectsNow : ''}` : 'No'],
     // Cockpit space, when the module said anything about it (CockpitSpaceStatus).
-    ...(s.cockpitSpace?.level ? [['Cockpit space', [s.cockpitSpace.level, s.cockpitSpace.level !== 'Off' && s.cockpitSpace.inside === false ? 'outside view' : null,
+    ...(s.cockpitSpace?.level ? [['Cockpit space', [s.cockpitSpace.level === 'Test' ? 'Listening test' : s.cockpitSpace.level, s.cockpitSpace.level !== 'Off' && s.cockpitSpace.inside === false ? 'outside view' : null,
       s.cockpitSpace.earlyOffs ? `close reflections left out ${s.cockpitSpace.earlyOffs}× for CPU` : null].filter(Boolean).join(' · ')]] : []),
   ] : [];
   const spaceLine = s?.cockpitSpace?.summary && ['running','switched-off'].includes(s.state) ? `<p class="fine">${escape(s.cockpitSpace.summary)}</p>` : '';
@@ -2164,7 +2164,7 @@ function renderFlight() {
   if (f.audio) {
     const a = f.audio, running = a.state === 'running';
     // Cockpit space: its level and the cockpit it used, and any CPU step that left out its close reflections.
-    const sp = a.cockpitSpace, space = sp?.level && sp.level !== 'Off' ? `cockpit space ${sp.level}${sp.summary ? ' ('+sp.summary.replace(/^In the cockpit: /,'').replace(/\.$/,'')+')' : ''}${sp.earlyOffs ? `, close reflections left out ${sp.earlyOffs}× for CPU` : ''}` : null;
+    const sp = a.cockpitSpace, space = sp?.level && sp.level !== 'Off' ? `cockpit space ${sp.level === 'Test' ? 'listening test' : sp.level}${sp.summary ? ' ('+sp.summary.replace(/^In the cockpit: /,'').replace(/\.$/,'')+')' : ''}${sp.earlyOffs ? `, close reflections left out ${sp.earlyOffs}× for CPU` : ''}` : null;
     rows.push(['3D audio',running ? 'On' : a.state === 'switched-off' ? 'Switched off' : 'Off',running ? [a.sounds != null ? `${a.sounds} sounds` : null, a.costMs != null ? `${fmt(a.costMs,2)} ms p99` : null, a.backoffs ? `fewer sounds ${a.backoffs}× to stay in its CPU budget` : null, space].filter(Boolean).join(' · ') || 'All flight'
       : a.state === 'switched-off' ? (a.switchedOffBy === 'settings' ? 'In the settings; DCS\'s own sound since' : 'With its key; DCS\'s own sound since') : `${a.reason || 'see the module log'}; DCS's own sound played`, running ? (a.backoffs ? true : 'ok') : a.state === 'switched-off' ? 'off' : true]);
   }

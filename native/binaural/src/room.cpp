@@ -416,6 +416,10 @@ struct Room::Impl {
     bool inputThisBlock = false, busInputThisBlock = false, lateInputThisBlock = false;
     std::uint64_t framesSinceInput = ~0ull >> 1, framesSinceBus = ~0ull >> 1, framesSinceLate = ~0ull >> 1;
     bool busActive = false, lateActive = false, busReset = true;
+    // The set the bus Renderer was last given (control thread) and the one it last opened a block with (audio thread):
+    // BeginBlock opens an empty bus block when they differ, so the old set is retired even while the buses do not run.
+    std::atomic<const HrtfSet*> busGiven{nullptr};
+    const HrtfSet* busSeen = nullptr;
 
     std::atomic<std::uint64_t> sBlocks{0}, sAdded{0}, sEarlyOff{0}, sFrameInvalid{0}, sNonFinite{0}, sRejected{0}, sIdle{0};
     std::atomic<std::uint64_t> sLastNs{0}, sWorstNs{0};
@@ -548,6 +552,7 @@ void Room::SetHrtf(const HrtfSet* set) {
     Impl& m = *impl_;
     if (!m.inited || !set) return;
     m.bus.SetHrtf(set);
+    m.busGiven.store(set, std::memory_order_release);
     if (set->sampleRate != m.fs) return;
     m.hrtfBox.Write(ComputeHrtfDerived(*set));
 }
@@ -577,6 +582,14 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
     if (!m.blockOk) {
         m.sRejected.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
+
+    // A new set for the buses while they may not run (early reflections off, no early input): an empty bus block adopts
+    // it, so the old one can be retired and freed (bounded: one BeginBlock / EndBlock per change, no source rendered).
+    if (const HrtfSet* given = m.busGiven.load(std::memory_order_acquire); given != m.busSeen) {
+        m.bus.BeginBlock(frames);
+        m.bus.EndBlock();
+        m.busSeen = given;
     }
 
     // New HRTF data: the diffuse EQ crossfades over this block (both EQ sets run), the gains ramp.
@@ -1124,6 +1137,11 @@ void Room::EndBlock() {
     m.inBlock = false;
 }
 
+RoomDirectState Room::DirectState() const {
+    const Impl& m = *impl_;
+    return RoomDirectState{m.haveParams ? &m.eff : nullptr, m.wetCur, m.canCur, m.earlyCur};
+}
+
 bool Room::Idle() const {
     const Impl& m = *impl_;
     if (!m.Ready()) return true;
@@ -1155,9 +1173,15 @@ void Room::ResetStats() {
 
 // ---- pure ------------------------------------------------------------------------------------------------------------
 float RoomDirectGain(const RoomParams& p, float wet, float canopyOpen, bool early, const float posAircraft[3], std::uint32_t flags) {
+    return RoomDirectGainMix(p, wet, canopyOpen, early ? 1.0f : 0.0f, posAircraft, flags);
+}
+float RoomDirectGainMix(const RoomParams& p, float wet, float canopyOpen, float earlyMix, const float posAircraft[3],
+                        std::uint32_t flags) {
     if (!(wet > 0.0f) || !posAircraft) return 1.0f;
     const float w = std::min(wet, 1.0f);
-    const rm::WetEnergy e = rm::VoiceWetEnergy(p, canopyOpen, early, posAircraft, flags);
+    const float em = std::isfinite(earlyMix) ? std::clamp(earlyMix, 0.0f, 1.0f) : 0.0f;
+    rm::WetEnergy e = rm::VoiceWetEnergy(p, canopyOpen, em > 0.0f, posAircraft, flags);
+    e.early *= em * em;  // the taps' gain is scaled by the mix (Run: CappedTapGain x earlyCur)
     const float share = std::clamp(std::isfinite(p.neutralShare) ? p.neutralShare : cockpit_space::kNeutralShare, 0.0f, 1.0f);
     const float total = share * w * w * (e.early + e.late);
     return std::isfinite(total) && total > 0.0f ? 1.0f / std::sqrt(1.0f + total) : 1.0f;

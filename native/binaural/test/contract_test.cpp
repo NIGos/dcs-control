@@ -227,7 +227,7 @@ static void TestCockpitSpace() {
     CHECK(can && can->type == KeyType::Bool && can->defaultValue == 1 && std::strcmp(can->ui, "advanced") == 0);
     AudioConfig def;
     CHECK(def.cockpitSpace == 1 && std::wcscmp(def.cockpitSpaceFamily, L"auto") == 0 && def.cockpitSpaceCanopy);
-    CHECK(std::wcscmp(kTestSection, L"AudioTest") == 0 && sizeof(kTestKeys) / sizeof(kTestKeys[0]) == 3 &&
+    CHECK(std::wcscmp(kTestSection, L"AudioTest") == 0 && sizeof(kTestKeys) / sizeof(kTestKeys[0]) == 4 &&
           sizeof(kTestHotkeys) / sizeof(kTestHotkeys[0]) == 8);
     CHECK(IsValidCockpitSpaceFamily(L"auto") && IsValidCockpitSpaceFamily(L" Bubble ") && IsValidCockpitSpaceFamily(L"transport"));
     CHECK(!IsValidCockpitSpaceFamily(L"") && !IsValidCockpitSpaceFamily(L"bubbles") && !IsValidCockpitSpaceFamily(nullptr) &&

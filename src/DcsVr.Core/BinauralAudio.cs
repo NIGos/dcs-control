@@ -377,14 +377,14 @@ public sealed record AudioStatus(string State, string Summary, string? Reason = 
 
 /// <summary>
 /// Cockpit space in the module's log (docs/COCKPIT_SPACE.md section 8.5):
-///   audio: cockpit space: &lt;Off|Subtle|Normal|Strong&gt; (&lt;family&gt; &lt;auto|setting&gt;, aircraft &lt;type|unknown&gt;)
+///   audio: cockpit space: &lt;Off|Subtle|Normal|Strong|Test&gt; (&lt;family&gt; &lt;auto|setting&gt;, aircraft &lt;type|unknown&gt;)
 ///   audio: cockpit space: inside &lt;0|1&gt;, canopy &lt;0.00..1.00|unknown&gt; (&lt;mech|arg38|none&gt;)
 ///   audio: cockpit space: early reflections off (CPU budget) | early reflections on again
 ///   audio: running, ...; space &lt;level&gt; &lt;family&gt; inside &lt;0|1&gt; wet voices &lt;n&gt; early &lt;on|off&gt; room p99 &lt;ms&gt; ms, direct &lt;dB&gt; dB
 /// </summary>
 public sealed partial record CockpitSpaceStatus
 {
-    /// <summary>"Off", "Subtle", "Normal" or "Strong".</summary>
+    /// <summary>"Off", "Subtle", "Normal", "Strong", or "Test" while the listening test plays a level it does not name.</summary>
     public string? Level { get; init; }
     /// <summary>The family in use (cockpit_space.h id: bubble, framed, helicopter, warbird, transport, generic).</summary>
     public string? Family { get; init; }
@@ -429,7 +429,7 @@ public sealed partial record CockpitSpaceStatus
         }
         : this;
 
-    [GeneratedRegex(@"^(Off|Subtle|Normal|Strong) \((\w+) (auto|setting), aircraft (.*)\)\s*$")] private static partial Regex LevelRegex();
+    [GeneratedRegex(@"^(Off|Subtle|Normal|Strong|Test) \((\w+) (auto|setting), aircraft (.*)\)\s*$")] private static partial Regex LevelRegex();
     [GeneratedRegex(@"^inside ([01]), canopy (\d+(?:\.\d+)?|unknown) \((?:mech|arg38|none)\)")] private static partial Regex StateRegex();
     [GeneratedRegex(@"\bspace (Off|Subtle|Normal|Strong) (\w+) inside ([01]) wet voices (\d+) early (on|off) room p99 (\d+(?:\.\d+)?) ms")] private static partial Regex RunningRegex();
 }

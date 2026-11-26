@@ -48,6 +48,8 @@ extern binaural::RoomFrame g_roomLastFrame;
 extern binaural::RoomParams g_roomLastParams;
 extern float g_roomLastAdded[2 * binaural::kMaxFramesPerCall];  // what the last Render added
 extern uint32_t g_roomLastFrames;
+extern std::atomic<uint32_t> g_roomAddSpinUs;  // AddSource busy-waits this long (a slow room, per voice)
+extern float g_roomLastEarlyMix, g_roomLastDirectCanopy;  // the last RoomDirectGainMix's early mix and canopy (-1: none)
 void ResetRoom();                                // counters and views back to zero (not the Room objects)
 }  // namespace audiofake
 

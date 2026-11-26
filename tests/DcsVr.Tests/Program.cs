@@ -7209,6 +7209,10 @@ Test("Cockpit space: the module's lines give the status line, the Audio page's r
     Require(Binaural.ParseStatus([on, "audio: cockpit space: Strong (helicopter setting, aircraft UH-1H)"], true, true).CockpitSpace?.Summary == "In the cockpit: UH-1H, helicopter cabin (your choice).", "the pilot's cockpit type");
     Require(Binaural.ParseStatus([on, "audio: cockpit space: Normal (bubble auto, aircraft F-86F Sabre)"], true, true).CockpitSpace?.Aircraft == "F-86F Sabre", "a type name with a space");
     Require(Binaural.ParseStatus([on, "audio: cockpit space: Off (bubble auto, aircraft F-16C_50)"], true, true).CockpitSpace is { Level: "Off", Summary: null }, "off: no line");
+    // The listening test: the module names no level, and the running line's "space Test" leaves it so (blind).
+    var blind = Binaural.ParseStatus([on, "audio: cockpit space: Subtle (bubble auto, aircraft F-16C_50)", "audio: cockpit space: Test (bubble auto, aircraft F-16C_50)",
+        "audio: running, 12 sounds, p99 0.31 ms per block (budget 25% of a block, about 2.50 ms at 10 ms), limit 48; fades in/out 3/1, fallbacks 0, refused 0, torn 0, pan solves 40 (median 40, mismatch 0), overruns 0; space Test; head pose on"], true, true);
+    Require(blind.CockpitSpace is { Level: "Test", Aircraft: "F-16C_50", RoomCostMs: null, WetVoices: null } && blind.HeadTracking == true, "listening test: the level is not named");
     var budget = Binaural.ParseStatus([on, "audio: cockpit space: Subtle (framed auto, aircraft F-14B)", "audio: cockpit space: early reflections off (CPU budget)", "audio: cockpit space: early reflections on again",
         "audio: cockpit space: early reflections off (CPU budget)"], true, true);
     Require(budget.CockpitSpace is { EarlyOffs: 2, EarlyOff: true }, "CPU steps");

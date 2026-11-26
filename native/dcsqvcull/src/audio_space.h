@@ -6,13 +6,19 @@
 // that moves them turns these reads off, never binaural.
 //
 //  - inside / outside: ctx+0xe1 (use cockpit gain) of every non-2D context: 1 in the cockpit, 0 in external views.
-//    Known only once a context reported 1 in this session (before that the Lua bridge's camera check decides).
+//    Known only once a context reported 1 in this session (before that the Lua bridge's camera check decides); a camera
+//    check that says outside wins over it (Inside below).
 //  - through the canopy: an owned voice whose context uses cockpit gain and whose host allows it (sound+0x1a8); DCS's
 //    damping sound+0x1b0 (the sdef's constant cockpit_gain) is logged.
-//  - the cockpit context: the context whose 3D sounds are nearer than 1.5 m most of the time (vote, about 2 s).
+//  - the cockpit context: the context whose 3D sounds are nearer than 1.5 m most of the time (vote, about 2 s). When no
+//    context wins (a big cabin: engines and cargo beyond 1.5 m), the 3D context without use-cockpit-gain while another
+//    one has it (the live layout: the cockpit context 0, the world context 1).
 //  - the aircraft frame C_dcs: sound+0xe8 (a source's orientation in the listener frame) of the cockpit context's 3D
-//    sounds; the first of a frame gives C, the others its spread. Spread over 1 deg, or a jump over 30 deg between frames
-//    while the head pose did not turn that much: unreliable (the last good one is kept, counted).
+//    sounds. The frame's C is the largest cluster of them within 1 deg of one sound; it counts when it holds at least two
+//    thirds of them (the others are outliers: a host not tied to the airframe, a moving part; counted). A jump over
+//    30 deg from the last good frame while the head pose did not turn that much is refused, unless the new C holds
+//    steady (within 1 deg) for kRejumpS: a view snap or a new pose base, not a glitch. Refused frames keep the last good
+//    one (counted); with no head pose, a good frame older than kFrameMaxAgeS is dropped (the next C starts afresh).
 //  - the listener-parameter probe: the world context's listener gain, pitch and low-pass (ctx+0x58, +0x5c, +0x60).
 #pragma once
 
@@ -42,6 +48,9 @@ constexpr float kVoteShare = 0.5f;
 constexpr double kMaxSpreadRad = 1.0 * 3.14159265358979 / 180.0;
 constexpr double kMaxJumpRad = 30.0 * 3.14159265358979 / 180.0;
 constexpr double kFrameMaxAgeS = 1.0;     // no cockpit sound for this long: no frame (unless the pose carries it)
+constexpr double kRejumpS = 0.4;          // a jumped C that holds this long is the new frame
+constexpr int kMaxOrient = 16;            // cockpit sounds' orientations kept per frame for the cluster
+constexpr float kFallbackMinShare = 0.05f;  // the big-cabin fallback needs some near sounds (unless it is the only one)
 
 namespace flags {
 constexpr uint32_t kInside = 1;          // the listener is in the cockpit (valid with kInsideKnown)
@@ -61,8 +70,9 @@ struct SpaceData {
   int64_t frameQpc;     // when c was taken (QPC)
   uint8_t cockpitCtx = 8;  // context id voted as cockpit (8 unknown)
   uint8_t worldCtx = 8;    // the context the listener probe read (8 none)
-  float spreadDeg;      // the last frame's spread of C between the cockpit sounds
+  float spreadDeg;      // the last frame's spread of C between the cockpit sounds (outliers included)
   uint32_t unreliable;  // frames whose C was refused, in the session
+  uint32_t outliers;    // cockpit sounds left out of accepted frames (not within 1 deg of C), in the session
   float lgGain, lgPitch, lgLowpass;  // the listener probe
 };
 
@@ -90,6 +100,16 @@ inline bool SpaceRead(const SpaceSlot& s, SpaceData* out) {
     return true;
   }
   return false;
+}
+
+// Inside / outside from both signals: ed_sound's use-cockpit-gain flag (kInside, once a context reported it) and the
+// Lua bridge's camera check (luaInside 1 cockpit, 0 external view, -1 unknown). The flag's drop in external views is
+// not proven live yet (docs/COCKPIT_SPACE.md 10.1), so a camera check that says outside wins over a flag that says
+// inside; with neither known: the cockpit.
+inline bool Inside(const SpaceData* sd, int luaInside) {
+  const bool known = sd && (sd->flags & flags::kReads) && (sd->flags & flags::kInsideKnown);
+  if (known) return (sd->flags & flags::kInside) != 0 && luaInside != 0;
+  return luaInside != 0;
 }
 
 // ---- quaternions (x, y, z, w), double ------------------------------------------------------------------------------
@@ -131,9 +151,8 @@ struct SimSpace {
   bool orientReads = false;  // sound+0xe8 (Resolved::spaceOrient, cockpit space on)
   // the frame being accumulated
   uint32_t nearN[audv::off::kMaxContexts] = {}, total[audv::off::kMaxContexts] = {};
-  bool haveC = false;
-  double c[4] = {0, 0, 0, 1};
-  double spread = 0;
+  double orient[kMaxOrient][4] = {};  // the cockpit sounds' orientations (the first kMaxOrient of the frame)
+  int orientN = 0;
   bool accPose = false;
   float accQ[4] = {0, 0, 0, 1};
   uint64_t accBase = 0;
@@ -147,9 +166,11 @@ struct SimSpace {
   bool goodPose = false;
   float goodQ[4] = {0, 0, 0, 1};
   uint64_t goodBase = 0;
-  bool havePrevHead = false;
-  float prevHead[4] = {0, 0, 0, 1};
+  bool haveCand = false;     // a jumped C waiting to hold steady (kRejumpS)
+  double cand[4] = {0, 0, 0, 1};
+  int64_t candSince = 0;
   uint32_t unreliable = 0;
+  uint32_t outliers = 0;
   bool insideSeen = false;   // a context reported use-cockpit-gain in this session
   int64_t lastPublish = 0;
   float lastSpreadDeg = 0;
@@ -169,14 +190,32 @@ inline void Accumulate(SimSpace& sp, uint32_t ctxId, const void* sound, double d
   const double n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
   if (!(n2 > 0.81 && n2 < 1.21)) return;  // not a unit quaternion: not an orientation
   QNorm(q);
-  if (!sp.haveC) {
-    memcpy(sp.c, q, sizeof(q));
-    sp.haveC = true;
-    sp.spread = 0;
-  } else {
-    const double a = QAngle(sp.c, q);
-    if (a > sp.spread) sp.spread = a;
+  if (sp.orientN < kMaxOrient) memcpy(sp.orient[sp.orientN++], q, sizeof(q));
+}
+
+// The frame's C from its cockpit sounds: the sound with the most others within kMaxSpreadRad (the first on a tie).
+// *members: that count (itself included); *spread: the largest angle of any sound from it. Bounded: kMaxOrient^2.
+inline int Cluster(const SimSpace& sp, int* members, double* spread) {
+  // QAngle(a, b) <= kMaxSpreadRad  <=>  |a . b| >= cos(kMaxSpreadRad / 2) (no acos in the pair loop)
+  const double minDot = std::cos(0.5 * kMaxSpreadRad);
+  int best = 0, bestN = 0;
+  for (int i = 0; i < sp.orientN; ++i) {
+    int n = 0;
+    const double* a = sp.orient[i];
+    for (int j = 0; j < sp.orientN; ++j) {
+      const double* b = sp.orient[j];
+      if (std::fabs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]) >= minDot) ++n;
+    }
+    if (n > bestN) best = i, bestN = n;
   }
+  double s = 0;
+  for (int j = 0; j < sp.orientN; ++j) {
+    const double a = QAngle(sp.orient[best], sp.orient[j]);
+    if (a > s) s = a;
+  }
+  *members = bestN;
+  *spread = s;
+  return best;
 }
 
 // Through-canopy class of an owned voice (meta flag kThroughCanopy): its context uses cockpit gain and its host allows
@@ -198,6 +237,17 @@ inline void BeginFrame(SimSpace& sp, const uint8_t* ctxArray, int ctxCount, uint
   d.frame = frame;
   d.cockpitCtx = 8;
   d.worldCtx = 8;
+  // The contexts' use-cockpit-gain flags (ctx+0xe1), for the vote's fallback and inside / outside.
+  int8_t gainFlag[audv::off::kMaxContexts];  // -1: not read (no gain reads, 2D, or not in the array)
+  bool anyGain = false;
+  for (int i = 0; i < audv::off::kMaxContexts; ++i) {
+    gainFlag[i] = -1;
+    if (!sp.gainReads || !ctxArray || i >= ctxCount) continue;
+    const uint8_t* c = ctxArray + audv::off::kCtxStride * i;
+    if (Rd<uint8_t>(c, audv::off::kCtxIs2D)) continue;
+    gainFlag[i] = Rd<uint8_t>(c, audv::off::kCtxCockpitGain) ? 1 : 0;
+    if (gainFlag[i] == 1) anyGain = true;
+  }
   // The cockpit vote (exponential, kVoteTauS).
   const double dt = sp.lastPublish && freq ? static_cast<double>(now - sp.lastPublish) / static_cast<double>(freq) : 0.0;
   const double k = dt > 0 ? 1.0 - std::exp(-(dt < 1.0 ? dt : 1.0) / kVoteTauS) : 0.0;
@@ -213,35 +263,65 @@ inline void BeginFrame(SimSpace& sp, const uint8_t* ctxArray, int ctxCount, uint
     }
     if (sp.seen[i] && sp.share[i] > kVoteShare && (best < 0 || sp.share[i] > sp.share[best])) best = i;
   }
+  if (best < 0 && anyGain) {
+    // A big cabin (most cockpit sounds beyond 1.5 m): the 3D context with sounds that does not use cockpit gain while
+    // another one does; with several, the one with the most near sounds (some needed).
+    int n = 0, pick = -1;
+    for (int i = 0; i < audv::off::kMaxContexts; ++i)
+      if (sp.seen[i] && gainFlag[i] == 0) {
+        ++n;
+        if (pick < 0 || sp.share[i] > sp.share[pick]) pick = i;
+      }
+    if (pick >= 0 && (n == 1 || sp.share[pick] >= kFallbackMinShare)) best = pick;
+  }
   sp.cockpitCtx = best < 0 ? 8 : static_cast<uint8_t>(best);
   d.cockpitCtx = sp.cockpitCtx;
+  // A good frame with no head pose to carry it goes stale: dropped, so the next C is not held against it.
+  if (sp.haveGood && !(sp.goodPose && sp.accPose) && freq &&
+      now - sp.goodQpc > static_cast<int64_t>(kFrameMaxAgeS * static_cast<double>(freq))) {
+    sp.haveGood = false;
+    sp.haveCand = false;
+  }
   // The frame: the finished frame's C, checked.
-  float spreadDeg = 0;
-  if (sp.haveC) {
-    spreadDeg = static_cast<float>(sp.spread * 57.29577951);
-    bool ok = sp.spread <= kMaxSpreadRad;
+  if (sp.orientN > 0) {
+    int members = 0;
+    double spread = 0;
+    const double* c = sp.orient[Cluster(sp, &members, &spread)];
+    sp.lastSpreadDeg = static_cast<float>(spread * 57.29577951);
+    bool ok = members * 3 >= sp.orientN * 2;
     if (ok && sp.haveGood) {
-      const double jump = QAngle(sp.c, sp.good);
+      const double jump = QAngle(c, sp.good);
       double headTurn = 0;
       if (sp.accPose && sp.goodPose) {
         const double a[4] = {sp.accQ[0], sp.accQ[1], sp.accQ[2], sp.accQ[3]};
         const double b[4] = {sp.goodQ[0], sp.goodQ[1], sp.goodQ[2], sp.goodQ[3]};
         headTurn = QAngle(a, b);
       }
-      if (jump > kMaxJumpRad && headTurn < 0.5 * jump) ok = false;
+      if (jump > kMaxJumpRad && headTurn < 0.5 * jump) {
+        // Refused, unless the new C held steady for kRejumpS (a view snap, a new pose base).
+        if (sp.haveCand && QAngle(c, sp.cand) <= kMaxSpreadRad) {
+          ok = freq && now - sp.candSince >= static_cast<int64_t>(kRejumpS * static_cast<double>(freq));
+        } else {
+          memcpy(sp.cand, c, sizeof(sp.cand));
+          sp.haveCand = true;
+          sp.candSince = now;
+          ok = false;
+        }
+      }
     }
     if (ok) {
-      memcpy(sp.good, sp.c, sizeof(sp.good));
+      memcpy(sp.good, c, sizeof(sp.good));
       sp.haveGood = true;
+      sp.haveCand = false;
       sp.goodQpc = now;
       sp.goodPose = sp.accPose;
       memcpy(sp.goodQ, sp.accQ, sizeof(sp.goodQ));
       sp.goodBase = sp.accBase;
+      sp.outliers += static_cast<uint32_t>(sp.orientN - members);
       d.flags |= flags::kFrameFromSound;
     } else {
       ++sp.unreliable;
     }
-    sp.lastSpreadDeg = spreadDeg;
   }
   if (sp.haveGood) {
     d.flags |= flags::kFrameValid;
@@ -255,19 +335,16 @@ inline void BeginFrame(SimSpace& sp, const uint8_t* ctxArray, int ctxCount, uint
   }
   d.spreadDeg = sp.lastSpreadDeg;
   d.unreliable = sp.unreliable;
+  d.outliers = sp.outliers;
   // Inside / outside and the listener probe (ctx+0xe1, +0x58..+0x60).
   if (sp.gainReads && ctxArray) {
     d.flags |= flags::kReads;
-    bool inside = false;
+    const bool inside = anyGain;
     int world = -1, first3d = -1;
-    for (int i = 0; i < ctxCount && i < audv::off::kMaxContexts; ++i) {
-      const uint8_t* c = ctxArray + audv::off::kCtxStride * i;
-      if (Rd<uint8_t>(c, audv::off::kCtxIs2D)) continue;
+    for (int i = 0; i < audv::off::kMaxContexts; ++i) {
+      if (gainFlag[i] < 0) continue;
       if (first3d < 0) first3d = i;
-      if (Rd<uint8_t>(c, audv::off::kCtxCockpitGain)) {
-        inside = true;
-        if (world < 0) world = i;
-      }
+      if (gainFlag[i] == 1 && world < 0) world = i;
     }
     if (inside) sp.insideSeen = true;
     if (sp.insideSeen) d.flags |= flags::kInsideKnown | (inside ? flags::kInside : 0u);
@@ -286,8 +363,7 @@ inline void BeginFrame(SimSpace& sp, const uint8_t* ctxArray, int ctxCount, uint
   // This frame's accumulators.
   memset(sp.nearN, 0, sizeof(sp.nearN));
   memset(sp.total, 0, sizeof(sp.total));
-  sp.haveC = false;
-  sp.spread = 0;
+  sp.orientN = 0;
   sp.accPose = poseValid;
   memcpy(sp.accQ, q, sizeof(sp.accQ));
   sp.accBase = poseBase;

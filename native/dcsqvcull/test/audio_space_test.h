@@ -15,7 +15,8 @@ void SetCtxCockpitGain(Rig& r, int ctx, bool on) { W<uint8_t>(r.im.base + kCtxAr
 
 // Two cockpit voices (context 2, under 1.5 m), one outside voice (context 3, 20 m, its host allows cockpit gain, DCS
 // damps it to 0.5) and the radio (context 7, 2D).
-void SpaceRig(Rig& r, const char* ini = kIniSpace) {
+// third: a third cockpit voice (index 4, 0.5 m), for the frame's cluster.
+void SpaceRig(Rig& r, const char* ini = kIniSpace, bool third = false) {
   RigUp(r, ini);
   SetContext2D(r, kRadioCtx, true);
   AddBoth(r, kCockpitCtx, true, 1, kSine, 0.4f, 440, 1.0f, 3);
@@ -28,7 +29,11 @@ void SpaceRig(Rig& r, const char* ini = kIniSpace) {
   PosBoth(r, 3, 1, 0, 0);
   r.w.SetCockpitGain(2, true, 0.5f);
   r.ref.SetCockpitGain(2, true, 0.5f);
-  for (int i = 0; i < 4; ++i) CreateVoice(r, i);
+  if (third) {
+    AddBoth(r, kCockpitCtx, true, 1, kSine, 0.2f, 660, 0.9f, 7);
+    PosBoth(r, 4, 0.3, 0.1, 0.4);
+  }
+  for (int i = 0; i < (third ? 5 : 4); ++i) CreateVoice(r, i);
   Bind(r);
 }
 
@@ -99,9 +104,15 @@ void InsideOutside() {
   // DCS's world context uses cockpit gain: inside, known from DCS.
   SetCtxCockpitGain(r, kWorldCtx, true);
   Frames(r, 5);
-  audio::LuaState(-1, 0, 0);  // the camera check says outside: DCS's own flag wins once it was seen
+  // The camera check says outside while the flag says inside: outside (the flag's drop in external views is not
+  // proven live yet), then the camera back in the cockpit: inside again.
+  audio::LuaState(-1, 0, 0);
   Tick();
-  Frames(r, 5);
+  Frames(r, 40);
+  const bool cameraOut = audiofake::g_roomLastFrame.wet == 0.0f;
+  audio::LuaState(-1, 0, 1);
+  Tick();
+  Frames(r, 40);
   const bool dcsWins = audiofake::g_roomLastFrame.wet == 1.0f;
   // F2: DCS clears the flag: the space fades out in 0.3 s (linear, small steps), then the room idles (no call at all).
   SetCtxCockpitGain(r, kWorldCtx, false);
@@ -127,7 +138,11 @@ void InsideOutside() {
   const std::string log = StopReportCapture();
   printf("     inside/outside: out in %d blocks (worst step %.4f), idle %d\n", blocks, worstStep, idle ? 1 : 0);
   Check(unknownInside, "cockpit space: with no signal yet the listener counts as in the cockpit (wet 1)");
-  Check(dcsWins, "cockpit space: once DCS reported its use-cockpit-gain flag, it decides inside / outside (not the camera)");
+  Check(cameraOut && dcsWins, "cockpit space: DCS's use-cockpit-gain flag and the camera check must both say inside (a camera "
+                              "outside wins until the flag is verified live)");
+  Check(log.find("audio: cockpit space: inside signals: ed_sound inside, camera outside") != std::string::npos &&
+            log.find("audio: cockpit space: inside signals: ed_sound inside, camera inside") != std::string::npos,
+        "cockpit space log: both inside signals are logged on change");
   Check(blocks >= 29 && blocks <= 31 && worstStep < 0.034f && idle && insideLogged && back,
         "cockpit space: an external view fades the space out over 0.3 s in steps of one block, the room then costs no "
         "call at all; back in the cockpit it fades in again");
@@ -155,18 +170,11 @@ void Canopy() {
   const bool closed = audiofake::g_roomLastFrame.canopyOpen == 0.0f;
   audio::LuaState(1.0, 1, 1);
   Tick();
-  float last = 0.0f, firstStep = -1.0f;
-  bool monotonic = true;
-  std::vector<float> a(960), b(960);
-  for (int i = 0; i < 150; ++i) {
-    SimFrame(r);
-    Block(r, a.data(), b.data(), 480);
-    const float c = audiofake::g_roomLastFrame.canopyOpen;
-    if (firstStep < 0) firstStep = c - last;
-    monotonic = monotonic && c >= last;
-    last = c;
-  }
-  const bool open = last > 0.99f;
+  // The room gets the canopy as it is and smooths it once itself (native/binaural C15); d takes the room's value.
+  Frames(r, 1);
+  const bool raw = audiofake::g_roomLastFrame.canopyOpen == 1.0f && audiofake::g_roomLastDirectCanopy == 1.0f;
+  Frames(r, 149);
+  const bool open = audiofake::g_roomLastFrame.canopyOpen == 1.0f;
   WriteIni(r.dir, "[Audio]\r\nBinaural=1\r\nLateHeadTracking=0\r\nCockpitSpaceCanopy=0\r\n");
   Tick();
   Frames(r, 150);
@@ -179,9 +187,9 @@ void Canopy() {
   Frames(r, 150);
   const bool unknownClosed = audiofake::g_roomLastFrame.canopyOpen < 0.01f;
   const std::string log = StopReportCapture();
-  printf("     canopy: first step %.4f, open after 1.5 s %.3f\n", firstStep, last);
-  Check(closed && open && monotonic && firstStep > 0.0f && firstStep < 0.05f,
-        "cockpit space: the canopy opening reaches the room smoothed over 0.3 s (no step)");
+  Check(closed && raw && open,
+        "cockpit space: the canopy reaches the room as the Lua bridge has it (the room smooths it once) and d uses "
+        "the room's canopy");
   Check(ignored, "cockpit space: CockpitSpaceCanopy=0 keeps the space closed whatever the canopy does (Live)");
   Check(unknownClosed && log.find("canopy 1.00 (mech)") != std::string::npos &&
             log.find("canopy 0.50 (arg38)") != std::string::npos && log.find("canopy unknown (none)") != std::string::npos,
@@ -294,6 +302,7 @@ void Frame() {
   audspace::SpaceRead(audio::g_space, &sd);
   const binaural::RoomFrame f = audiofake::g_roomLastFrame;
   const bool got = (sd.flags & audspace::flags::kFrameValid) && sd.cockpitCtx == kCockpitCtx && f.frameValid &&
+                   audiofake::g_roomLastEarlyMix == 1.0f &&
                    std::fabs(f.aircraftToHead[1] - static_cast<float>(q[1])) < 1e-6f &&
                    std::fabs(f.aircraftToHead[3] - static_cast<float>(q[3])) < 1e-6f;
   // The voice's aircraft-frame position: conj(C) applied to its head-frame position.
@@ -315,11 +324,12 @@ void Frame() {
   Frames(r, 2);
   Sleep(1100);
   Frames(r, 2);
-  const bool lost = !audiofake::g_roomLastFrame.frameValid;
+  const bool lost = !audiofake::g_roomLastFrame.frameValid && audiofake::g_roomLastEarlyMix == 0.0f;
   Check(got && posA, "cockpit space: the aircraft frame comes from the cockpit context's sounds (sound+0xe8); the room "
                      "gets each voice in the aircraft frame");
   Check(spread, "cockpit space: cockpit sounds disagreeing by more than 1 deg make a frame unreliable (the last good one kept)");
-  Check(lost, "cockpit space: no cockpit sound for 1 s and no head pose: no frame (the early reflections fade out)");
+  Check(lost, "cockpit space: no cockpit sound for 1 s and no head pose: no frame (the early reflections fade out, and d "
+              "no longer makes room for them)");
   RigDown(r);
   // Late rotation (pure): C_dcs identity, the head turned 30 deg left since DCS's frame: the aircraft's forward axis is
   // seen 30 deg to the right; another base space: C_dcs as it is.
@@ -449,7 +459,9 @@ void LogAndCsv() {
   const char* phrases[] = {"\"audio: cockpit space: %s (%ls %s, aircraft %s)\"",
                            "\"audio: cockpit space: inside %d, canopy %.2f (%s)\"",
                            "\"audio: cockpit space: inside %d, canopy unknown (none)\"",
-                           "\"audio: cockpit space: frame from %s, cockpit ctx %d, spread %.2f deg, unreliable frames %u\"",
+                           "\"audio: cockpit space: frame from %s, cockpit ctx %d, spread %.2f deg, unreliable frames %u, "
+                           "outlier sounds %u\"",
+                           "\"audio: cockpit space: inside signals: ed_sound %s, camera %s\"",
                            "\"audio: cockpit space: early reflections off (CPU budget)\"",
                            "\"audio: cockpit space: early reflections on again\"",
                            "\"audio: ctx %d listener gain=%.4g pitch=%.4g lowpass=%.4g\"",
@@ -618,6 +630,163 @@ void NoAllocRoom() {
   RigDown(r);
 }
 
+// M16: [AudioTest] Active=1 with Level plays that level in place of CockpitSpace (Live: the listening test's Part B),
+// and the module never names it while the test is on (the pilot rates blind).
+void TestLevel() {
+  StartReportCapture();
+  Rig r;
+  SpaceRig(r);
+  audio::LuaAircraft("F-16C_50");
+  Tick();
+  auto ini = [&](const char* test) {
+    const std::string t = std::string(kIniSpace) + test;
+    WriteIni(r.dir, t.c_str());
+    Tick();
+  };
+  ini("[AudioTest]\r\nActive=1\r\nSeed=7\r\nTrials=12\r\nLevel=2\r\n");
+  const bool two = audio::g_cfgRead.space.level == 1 && audio::g_cfgRead.space.Effective() == 2 &&
+                   audiofake::g_roomLastParams.strength == 2;
+  Frames(r, 40);
+  const bool playing = audiofake::g_roomLastFrame.wet == 1.0f;
+  audio::g_loop.lastStats = 0;
+  Tick();
+  ini("[AudioTest]\r\nActive=1\r\nSeed=7\r\nTrials=12\r\nLevel=0\r\n");
+  Frames(r, 40);
+  const bool off = audiofake::g_roomLastFrame.wet == 0.0f;
+  ini("[AudioTest]\r\nActive=1\r\nSeed=7\r\nTrials=12\r\nLevel=3\r\n");
+  const bool three = audiofake::g_roomLastParams.strength == 3;
+  ini("[AudioTest]\r\nActive=0\r\nSeed=7\r\nTrials=12\r\nLevel=3\r\n");
+  const bool own = audio::g_cfgRead.space.Effective() == 1 && audiofake::g_roomLastParams.strength == 1;
+  ini("[AudioTest]\r\nActive=1\r\nLevel=5\r\n");
+  const bool bad = audio::g_cfgRead.space.Effective() == 1 && !audio::g_cfgRead.space.Blind();
+  ini("[AudioTest]\r\nActive=1\r\nSeed=7\r\nTrials=12\r\n");  // started, no trial yet: the pilot's own level
+  const bool noLevel = audio::g_cfgRead.space.Effective() == 1 && !audio::g_cfgRead.space.Blind();
+  const std::string log = StopReportCapture();
+  const bool named = log.find("Normal (bubble") != std::string::npos || log.find("Strong (bubble") != std::string::npos ||
+                     log.find("space Normal") != std::string::npos || log.find("space Strong") != std::string::npos;
+  Check(two && playing && off && three,
+        "cockpit space test: [AudioTest] Level plays that level in place of CockpitSpace (Live; 0 fades the space out)");
+  Check(own && bad && noLevel,
+        "cockpit space test: Active=0, no Level or a Level out of 0-3 leave the pilot's own level");
+  Check(!named && log.find("audio: cockpit space: Test (bubble auto, aircraft F-16C_50)") != std::string::npos &&
+            log.find("; space Test; head pose ") != std::string::npos &&
+            log.find("listening test level in use (not named)") != std::string::npos,
+        "cockpit space test: while the test is on the log never names the level it plays (blind)");
+  RigDown(r);
+}
+
+// The aircraft frame's robustness: one stray cockpit sound does not cost the frame (outliers counted); a jumped frame
+// that holds for 0.4 s is taken (a view snap with no head pose); with no head pose a frame older than 1 s is dropped, so
+// the next one is not held against it.
+void FrameRobust() {
+  Rig r;
+  SpaceRig(r, kIniSpace, true);
+  const double id[4] = {0, 0, 0, 1};
+  const double off5[4] = {0, 0.043619387365336, 0, 0.999048221581858};  // 5 deg about y
+  const double turn[4] = {0, 0.707106781186548, 0, 0.707106781186548};  // 90 deg about y
+  const double zero[4] = {0, 0, 0, 0};
+  const int cockpit[3] = {0, 1, 4};
+  r.w.SetOrient(0, id);
+  r.w.SetOrient(1, id);
+  r.w.SetOrient(4, off5);
+  Frames(r, 6);
+  audspace::SpaceData sd{};
+  audspace::SpaceRead(audio::g_space, &sd);
+  const bool outlier = (sd.flags & audspace::flags::kFrameFromSound) && (sd.flags & audspace::flags::kFrameValid) &&
+                       sd.c[3] > 0.99999f && sd.outliers >= 3 && sd.unreliable == 0 && sd.spreadDeg > 4.0f;
+  for (int i : cockpit) r.w.SetOrient(i, turn);
+  Frames(r, 3);
+  audspace::SpaceRead(audio::g_space, &sd);
+  const bool held = sd.c[3] > 0.99999f && sd.unreliable >= 2;
+  Sleep(450);
+  Frames(r, 3);
+  audspace::SpaceRead(audio::g_space, &sd);
+  const bool taken = (sd.flags & audspace::flags::kFrameValid) && std::fabs(sd.c[1] - 0.70710678f) < 1e-5f;
+  for (int i : cockpit) r.w.SetOrient(i, zero);
+  Frames(r, 3);
+  Sleep(1100);
+  for (int i : cockpit) r.w.SetOrient(i, id);  // 90 deg from the last good frame
+  Frames(r, 3);
+  audspace::SpaceRead(audio::g_space, &sd);
+  const bool fresh = (sd.flags & audspace::flags::kFrameValid) && sd.c[3] > 0.99999f;
+  printf("     frame: outliers %u, unreliable %u, spread %.2f deg\n", sd.outliers, sd.unreliable, sd.spreadDeg);
+  Check(outlier, "cockpit space frame: two of three cockpit sounds agreeing give the frame (the stray one counted, "
+                 "not a refused frame)");
+  Check(held && taken, "cockpit space frame: a jump over 30 deg is refused at first, taken once it held 0.4 s");
+  Check(fresh, "cockpit space frame: with no head pose a frame older than 1 s is dropped; the next one is taken at once");
+  RigDown(r);
+}
+
+// The cockpit vote in a big cabin: every cockpit sound beyond 1.5 m wins no vote; the 3D context without
+// use-cockpit-gain while the world context has it is then the cockpit.
+void BigCabin() {
+  Rig r;
+  RigUp(r, kIniSpace);
+  SetContext2D(r, kRadioCtx, true);
+  AddBoth(r, kCockpitCtx, true, 1, kSine, 0.4f, 440, 1.0f, 3);
+  AddBoth(r, kCockpitCtx, true, 1, kNoise, 0.3f, 0, 0.8f, 5);
+  AddBoth(r, kWorldCtx, true, 1, kSine, 0.3f, 97, 0.9f);
+  PosBoth(r, 0, 3.0, 0.2, 0.5);
+  PosBoth(r, 1, -2.6, 0.3, 1.0);
+  PosBoth(r, 2, 20, 0, 5);
+  for (int i = 0; i < 3; ++i) CreateVoice(r, i);
+  Bind(r);
+  Frames(r, 6);
+  audspace::SpaceData sd{};
+  audspace::SpaceRead(audio::g_space, &sd);
+  const bool none = sd.cockpitCtx == 8;
+  SetCtxCockpitGain(r, kWorldCtx, true);
+  Frames(r, 4);
+  audspace::SpaceRead(audio::g_space, &sd);
+  const bool fallback = sd.cockpitCtx == kCockpitCtx;
+  Check(none && fallback, "cockpit space vote: in a big cabin (no sound within 1.5 m) the context without "
+                          "use-cockpit-gain while the world context has it is the cockpit");
+  RigDown(r);
+}
+
+// The room's cost in the log and CSV counts its per-voice work (the sends' taps in AddSource, the direct and send
+// gains), not only BeginBlock / Render / EndBlock.
+void RoomCost() {
+  Rig r;
+  SpaceRig(r);
+  const double q[4] = {0, 0, 0, 1};
+  for (int i = 0; i < 2; ++i) r.w.SetOrient(i, q);
+  Frames(r, 10);
+  audiofake::g_roomAddSpinUs = 300;
+  Frames(r, 40);
+  audiofake::g_roomAddSpinUs = 0;
+  double p50 = 0, p99 = 0;
+  audio::RoomTimes(&p50, &p99);
+  printf("     room cost with 3 x 0.3 ms per-voice sends: p50 %.0f us, p99 %.0f us\n", p50, p99);
+  Check(p50 >= 800.0, "cockpit space cost: the room's p50 / p99 include its per-voice sends");
+  RigDown(r);
+}
+
+// A new HRTF set while the room idles (CockpitSpace=0, outside): one empty block lets it adopt the set (so the old one
+// is retired by both renderers and freed); no output, no further call.
+void IdleSetAdopt() {
+  audr::Binding b;
+  b.rate = 48000;
+  b.room = audr::RoomNew();
+  char err[64];
+  audr::RoomInit(b.room, 48000, 64, err, sizeof(err));
+  audr::Block blk;
+  blk.b = &b;
+  blk.frames = 480;
+  blk.on = true;
+  audr::SpaceCtl ctl;  // level 0: the room idles
+  const uint64_t b0 = audiofake::g_roomBegins.load(), e0 = audiofake::g_roomEnds.load(), r0 = audiofake::g_roomRenders.load();
+  for (int i = 0; i < 5; ++i) audr::RoomBlockBegin(blk, nullptr, ctl, audio::Qpc(), audio::QpcFreq());
+  const bool skipped = audiofake::g_roomBegins.load() == b0 && !blk.roomOn;
+  b.roomSetGen.fetch_add(1);
+  for (int i = 0; i < 5; ++i) audr::RoomBlockBegin(blk, nullptr, ctl, audio::Qpc(), audio::QpcFreq());
+  const bool once = audiofake::g_roomBegins.load() == b0 + 1 && audiofake::g_roomEnds.load() == e0 + 1 &&
+                    audiofake::g_roomRenders.load() == r0 && !blk.roomOn;
+  audr::RoomDelete(b.room);
+  Check(skipped && once, "cockpit space: a new HRTF set while the room idles is shown to it in one empty block (the old "
+                         "set can be freed); otherwise the idle room is never called");
+}
+
 inline void Run() {
   printf("---- cockpit space (audio module side)\n");
   Families();
@@ -632,6 +801,11 @@ inline void Run() {
   LogAndCsv();
   LuaBridge();
   NoAllocRoom();
+  TestLevel();
+  FrameRobust();
+  BigCabin();
+  RoomCost();
+  IdleSetAdopt();
 }
 
 }  // namespace spacetest

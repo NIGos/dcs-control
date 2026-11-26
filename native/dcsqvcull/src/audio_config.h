@@ -27,15 +27,23 @@ using binaural_config::AudioConfig;
 // Cockpit space (docs/COCKPIT_SPACE.md 7): [Audio] CockpitSpace 0..3 (Off, Subtle, Normal, Strong; default 1),
 // CockpitSpaceFamily auto | a family key (default auto), CockpitSpaceCanopy 0/1 (default 1). All Live. The keys are in
 // binaural_config.h's table (kKeys); the ranges spelt out here are the same.
+//
+// The listening test (docs/COCKPIT_SPACE.md 11): [AudioTest] Active=1 with Level 0..3 plays that level in place of
+// CockpitSpace (testLevel; -1 none: the pilot's own). Live like the rest. While it is set the module never names the
+// level it plays (log lines, running line): the pilot rates blind.
 struct SpaceConfig {
   int level = 1;
   bool familyAuto = true;
   cockpit_space::Family family = cockpit_space::Family::Generic;  // with familyAuto false
   bool canopy = true;
+  int testLevel = -1;  // [AudioTest] Level while Active=1, else -1
+  int Effective() const { return testLevel >= 0 ? testLevel : level; }
+  bool Blind() const { return testLevel >= 0; }
 };
 constexpr int kSpaceLevelDefault = 1, kSpaceLevelMax = 3;
 inline bool SameSpace(const SpaceConfig& a, const SpaceConfig& b) {
-  return a.level == b.level && a.familyAuto == b.familyAuto && a.family == b.family && a.canopy == b.canopy;
+  return a.level == b.level && a.familyAuto == b.familyAuto && a.family == b.family && a.canopy == b.canopy &&
+         a.testLevel == b.testLevel;
 }
 
 struct Read {
@@ -162,6 +170,15 @@ inline Read ReadIni(const wchar_t* ini) {
       const double v = wcstod(buf, &end);
       if (end == buf || !std::isfinite(v)) Note(r, "audio: config: CockpitSpaceCanopy=%ls is not a number, 1", buf);
       else s.canopy = v != 0;
+    }
+    // [AudioTest] (binaural_config::kTestSection): Level counts only with Active=1 and a whole number 0..3; anything
+    // else is the pilot's own level (never noted: the app writes the section, and a note would name the level).
+    GetPrivateProfileStringW(binaural_config::kTestSection, L"Active", L"", buf, 64, ini);
+    if (!wcscmp(buf, L"1")) {
+      GetPrivateProfileStringW(binaural_config::kTestSection, L"Level", L"", buf, 64, ini);
+      wchar_t* end = nullptr;
+      const long l = buf[0] ? wcstol(buf, &end, 10) : -1;
+      if (buf[0] && end && !*end && l >= 0 && l <= kSpaceLevelMax) s.testLevel = static_cast<int>(l);
     }
   }
   {

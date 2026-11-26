@@ -78,6 +78,16 @@ struct RoomSource {
     std::uint32_t flags;       // room_flags
 };
 
+// What the direct gain d must follow in this block (Room::DirectState): the room's own values at the block's end, so
+// d ramps with the room it makes room for. params: the parameters as crossfaded now (kRoomParamsCrossfadeMs); earlyMix:
+// the early reflections' fade (0 off .. 1 on: frameValid, early and a rotation seen, over kRoomEarlyFadeMs).
+struct RoomDirectState {
+    const RoomParams* params;  // valid on the audio thread until the next BeginBlock; null before any parameters
+    float wet;
+    float canopyOpen;          // smoothed once, by the room (kRoomCanopyTauS)
+    float earlyMix;
+};
+
 struct RoomStats {
     std::uint64_t blocks, sourcesAdded, earlyOffBlocks, frameInvalidBlocks, nonFinite, rejected, idleBlocks;
     std::uint64_t lastBlockNs, worstBlockNs;
@@ -110,6 +120,7 @@ public:
     void Render(float* outLR, std::uint32_t frames);
     void EndBlock();
     bool Idle() const;                           // wet 0, every tap line and the tail silent: the module may skip the room
+    RoomDirectState DirectState() const;         // after BeginBlock: the values d must use for this block
 
     // ---- any thread -------------------------------------------------------------------------------------------
     RoomStats GetStats() const;
@@ -125,6 +136,10 @@ private:
 // voice's aircraft-frame position and flags. 1 when wet = 0.
 float RoomDirectGain(const RoomParams& p, float wet, float canopyOpen, bool early, const float posAircraft[3],
                      std::uint32_t flags);
+// Pure: the same with the early reflections' mix (RoomDirectState::earlyMix, 0..1) in place of the flag: their energy
+// scales with its square (the taps' gain is scaled by it). RoomDirectGain(.., early, ..) is this with 1 or 0.
+float RoomDirectGainMix(const RoomParams& p, float wet, float canopyOpen, float earlyMix, const float posAircraft[3],
+                        std::uint32_t flags);
 // Pure: the send's distance law of section 4.2 (clamp(r / kRoomRefDistanceM, 0.5, 2) inside the box, 1 outside).
 float RoomSendDistanceGain(const RoomParams& p, const float posAircraft[3], std::uint32_t flags);
 

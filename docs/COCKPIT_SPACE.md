@@ -157,8 +157,10 @@ the head at audio rate.
   `canopy = {status, value}`). Fallback: `Export.LoGetAircraftDrawArgumentValue(38)` (draw argument 38 is the canopy
   on most DCS models [A]). In multiplayer, ownship exports can be forbidden by the server: then the canopy is unknown
   and treated as closed.
-- **Inside (fallback):** the loader's existing camera check (camera within 15 m of the ownship, `DcsQvCull.lua`
-  `inCockpit`), used only when no context ever reported use-cockpit-gain in this session.
+- **Inside (fallback and cross-check):** the loader's existing camera check (camera within 15 m of the ownship,
+  `DcsQvCull.lua` `inCockpit`) decides while no context ever reported use-cockpit-gain in this session. After that,
+  inside needs both: the flag set and the camera check not saying outside (`audio_space.h` `Inside`), until the flag's
+  drop in F2 / F10 / replay views is verified live (10.1). Both signals are logged on change (`inside signals:`).
 
 ## 4. DSP design
 
@@ -284,11 +286,15 @@ a reverberated low end only adds boom and loudness. Externalisation cues live ab
 ### 4.4 Head rotation: the aircraft frame
 
 - **From DCS (always):** for each 3D sound of the cockpit context (the context whose owned voices are nearer than
-  1.5 m most of the time over the last 2 s, found by vote; logged), the sim thread reads `sound+0xe8`. The first such
-  sound of the frame gives `C_dcs` (aircraft → listener frame); every further one is compared with it (angle). The
-  frame's `C_dcs` is published with the head pose DCS used (`qUsed`, `poseBase`, as for voices).
-- **Consistency:** if the angle spread of a frame exceeds 1°, or the rotation moves more than 30° between frames while
-  the head pose does not, `C_dcs` is "unreliable" for that frame and the last good one is kept (counted).
+  1.5 m most of the time over the last 2 s, found by vote; logged; when no context wins, as in a big cabin, the 3D
+  context without use-cockpit-gain while another one has it), the sim thread reads `sound+0xe8` (up to 16 per frame).
+  The frame's `C_dcs` (aircraft → listener frame) is the sound with the most others within 1° of it; it counts when
+  that cluster holds at least two thirds of the frame's sounds (the rest are outliers, counted: a host not tied to the
+  airframe, a moving part). It is published with the head pose DCS used (`qUsed`, `poseBase`, as for voices).
+- **Consistency:** a frame without such a cluster, or whose rotation moves more than 30° from the last good one while
+  the head pose does not, is "unreliable" and the last good one is kept (counted). A jumped `C_dcs` that holds steady
+  (within 1°) for 0.4 s is taken as the new frame (a view snap, a new pose base). Without a head pose to carry it, a good
+  frame older than 1 s is dropped, so the next one is not held against it.
 - **At audio rate:** the render thread computes `C_now = R_late ⋅ C_dcs`, with `R_late` the late head correction from
   `qUsed` to the current pose (the same `ComputeLateCorrection` and plausibility limits as `CorrectedPosition`). Without
   head pose (LateHeadTracking off, or a monitor) `C_now = C_dcs`, at the sim rate.
@@ -579,7 +585,7 @@ bool Preset(Family f, int strength, RoomParams* out);     // section 5.2 x 5.3
 {L"CockpitSpaceFamily", KeyType::Text, 0, 0, 0, "advanced"},      // "auto" or a family key
 {L"CockpitSpaceCanopy", KeyType::Bool, 1, 0, 1, "advanced"},      // the space opens with the canopy
 // AudioConfig: int cockpitSpace = 1; wchar_t cockpitSpaceFamily[16] = L"auto"; bool cockpitSpaceCanopy = true;
-constexpr const wchar_t* kTestSection = L"AudioTest";             // Active, Seed, Trials (listening test, section 11)
+constexpr const wchar_t* kTestSection = L"AudioTest";             // Active, Seed, Trials, Level (listening test, section 11)
 ```
 
 Built (CORE), additions to the API above, nothing removed or renamed:
@@ -592,7 +598,7 @@ Built (CORE), additions to the API above, nothing removed or renamed:
 - `cockpit_space.h`: `kNeutralShare`, `kStrengthOff/Subtle/Normal/Strong`, `FamilyName` (the UI name, for log lines),
   `Sanitize` (the clamps `SetParams` applies: distances 0.1-3 m, reflection 0-0.95, levels -40-0 dB, RT60 0.03-1 s,
   pre-delay 0-10 ms, send high-pass 20-1000 Hz, through -40-+6 dB, share 0-1), the tables `kTypes` and `kPrefixes`.
-- `binaural_config.h`: `kTestKeys` (`Active`, `Seed`, `Trials`), `kTestHotkeys` (the eight test hotkeys),
+- `binaural_config.h`: `kTestKeys` (`Active`, `Seed`, `Trials`, `Level`), `kTestHotkeys` (the eight test hotkeys),
   `IsValidCockpitSpaceFamily`; it now includes `cockpit_space.h`.
 - The `[Audio]` table has 13 keys: the module's test that every key is read (`audio_test.h`) fails until MODULE reads
   the three new ones, as planned (merge order CORE, MODULE, APP); the payload compiles BinauralCore from its sources,
@@ -668,16 +674,20 @@ sends (voices keep playing in external views).
 - On config load / Live change / family change / aircraft change: `cockpit_space::Preset(family, strength)` →
   `Room::SetParams`; `CockpitSpace=0` → wet 0 (no SetParams).
 - On HRTF change: `Room::SetHrtf` with the voices' new set; retire as for voices (both renderers must release a set
-  before it is freed).
+  before it is freed). A room that idles (no call at all) gets one empty BeginBlock / EndBlock so it adopts the set; the
+  room itself opens an empty bus block when its buses do not run (late only), so the old set is never kept for the session.
 - Budget ladder (section 9).
 - `[AudioTest] Active`/`Level` (section 7): the effective level is `Level` while the test is on, else `CockpitSpace`.
+  While a test level is set the module never names it: the level line reads `Test (...)`, the running line `space Test`,
+  the config line adds `listening test level in use (not named)` (audio_space.csv keeps the real level for the analysis).
 
 ### 8.5 Log lines (`DcsQvCull.log`; the app reads the first two)
 
 ```
-audio: cockpit space: <Off|Subtle|Normal|Strong> (<family> <auto|setting>, aircraft <type|unknown>)
+audio: cockpit space: <Off|Subtle|Normal|Strong|Test> (<family> <auto|setting>, aircraft <type|unknown>)
 audio: cockpit space: inside <0|1>, canopy <0.00..1.00|unknown> (<mech|arg38|none>)          (on change; canopy steps >= 0.1)
-audio: cockpit space: frame from <sound|none>, cockpit ctx <i>, spread <deg> deg, unreliable frames <n>   (on change, and once per minute while unreliable)
+audio: cockpit space: inside signals: ed_sound <inside|outside|unknown>, camera <inside|outside|unknown>   (on change)
+audio: cockpit space: frame from <sound|none>, cockpit ctx <i>, spread <deg> deg, unreliable frames <n>, outlier sounds <n>   (on change, and once per minute while unreliable)
 audio: cockpit space: early reflections off (CPU budget) | early reflections on again
 audio: ctx <i> listener gain=<f> pitch=<f> lowpass=<f>                                       (probe: at enable and on any change > 1 %)
 audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB; head pose <on|off|unused>
@@ -685,7 +695,10 @@ audio: cockpit space: ed_sound's cockpit fields not found (<why>); <what is off>
 ```
 
 As built, the space's part of the running line sits before `; head pose ...` (the app's parser expects the line to end
-with it), and reads `space Off` while the space is off.
+with it), and reads `space Off` while the space is off. Its `room p99` is the room's whole share of a block: BeginBlock,
+Render, EndBlock and the per-voice sends (AddSource, the direct and send gains). The direct gain d follows the room's
+own state after its BeginBlock (`Room::DirectState`: the crossfading preset, the wet weight, the canopy smoothed once by
+the room, the early reflections' fade), so d never makes room for early reflections the room is not playing.
 
 The probe line answers [A] of section 3.1: open and close the canopy once in the first live flight and see whether the
 world context's listener gain or low-pass moves with it.
@@ -1026,15 +1039,16 @@ direct path) run with `CockpitSpace=0`.
 | Kill-switch halves vs DCS's own | 0.000 dB | 0.05 dB |
 | R6: 13 live changes 0.4 s apart, head turning 90°/s | largest second difference 5.1e-4 (at the kill switch), steady 2.6e-4 | steady + 1e-3 |
 | R7: `CockpitSpace=0` vs the module without a Room | bit-identical | bit-identical |
-| R8: 48 voices (24 cockpit, 24 through the canopy), head 90°/s, Normal / Strong | module p99 0.57 / 0.61 ms per 10 ms block; room p50 0.087 ms, p99 0.115 / 0.121 ms; 48 owned and sent, early on, no back-off, 0 allocations | budget 2.5 ms; room 0.5 ms (gate), 0.15 ms (target) |
+| R8: 48 voices (24 cockpit, 24 through the canopy), head 90°/s, Normal / Strong | module p99 0.57 / 0.61 ms per 10 ms block; room p50 0.209 ms, p99 0.239 / 0.235 ms (with its per-voice sends; 0.115 / 0.121 ms before they were counted); 48 owned and sent, early on, no back-off, 0 allocations | budget 2.5 ms; room 0.5 ms (gate), 0.15 ms (target) |
 
 Notes:
 - The above-front source's least-squares fit reads +0.3 to +0.55 dB against d: its canopy reflection arrives within
   the direct sound's own correlation time and the fit counts it as direct. The DRRs use the module's d (exact with one
   voice), not the fit.
-- R8 here is wall time inside the module's room calls with this scene (QPC, the module's own `room p99`); CORE's C9
-  (0.19-0.22 ms p99, section 9) is thread CPU time with its own scene, best of 5. Both under the 0.30 ms gate; the 0.15
-  ms target is met here and missed in C9, so the live `room p99` decides (section 10.1).
+- R8 here is wall time inside all of the module's room work with this scene (QPC, the module's own `room p99`:
+  BeginBlock, Render, EndBlock and the per-voice AddSource and gains); CORE's C9 (0.19-0.22 ms p99, section 9) is thread
+  CPU time with its own scene, best of 5. The two now agree: under the 0.30 ms gate, over the 0.15 ms target. The earlier
+  0.115 ms left out the per-voice sends. The live `room p99` decides (section 10.1).
 - The "stereo above" sound of the mix reads -1.47 dB against DCS's own output already with the space Off: that is the
   direct path of a stereo voice 0.36 m above the head, not the space (which changes it by at most +0.10 dB).
 - The other suites: `build-binaural.ps1` 7/7 ctest, `build-dcsqvcull.ps1` 6/6 ctest (`DcsQvCullTests` now reads back

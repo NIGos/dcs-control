@@ -842,9 +842,9 @@ void PublishRt() {
   r.maxObjects = c.maxObjects;
   r.cpuBudget = c.cpuBudgetPercent;
   r.exclude = c.excludeContextMask;
-  r.spaceLevel = c.binaural ? g_cfgRead.space.level : 0;
+  r.spaceLevel = c.binaural ? g_cfgRead.space.Effective() : 0;
   WriteRt(r);
-  g_luaWanted.store(c.binaural && g_cfgRead.space.level > 0, std::memory_order_relaxed);
+  g_luaWanted.store(c.binaural && g_cfgRead.space.Effective() > 0, std::memory_order_relaxed);
 }
 
 std::wstring g_devDirAudio;
@@ -877,8 +877,9 @@ void ReadConfig(bool force) {
         c.binaural ? 1 : 0, LogSetName(c.hrtf), c.headCircumferenceCm, c.lateHeadTracking ? 1 : 0, c.nearField ? 1 : 0, c.maxObjects,
         c.levelTrimDb, c.cpuBudgetPercent, c.excludeContextMask, c.logVoices ? 1 : 0);
   if (first || !audcfg::SameSpace(prevSpace, r.space))
-    Log("audio: config: CockpitSpace=%d CockpitSpaceFamily=%ls CockpitSpaceCanopy=%d", r.space.level,
-        r.space.familyAuto ? L"auto" : cockpit_space::FamilyKey(r.space.family), r.space.canopy ? 1 : 0);
+    Log("audio: config: CockpitSpace=%d CockpitSpaceFamily=%ls CockpitSpaceCanopy=%d%s", r.space.level,
+        r.space.familyAuto ? L"auto" : cockpit_space::FamilyKey(r.space.family), r.space.canopy ? 1 : 0,
+        r.space.Blind() ? "; listening test level in use (not named)" : "");
   // Live changes the core takes directly (each ramps inside the next block).
   if (audr::Binding* b = g_binding.load()) {
     bool newSet = false;
@@ -889,7 +890,10 @@ void ReadConfig(bool force) {
       binaural::HrtfSet* set = SetFor(c.hrtf, b->rate, &why, &used);
       if (set && used != g_hrtfName) {
         audr::CoreSetHrtf(b->core, set);
-        if (b->room) audr::RoomSetHrtf(b->room, set);  // the room's buses use the voices' set (retired by both)
+        if (b->room) {  // the room's buses use the voices' set (retired by both; an idle room is shown it once)
+          audr::RoomSetHrtf(b->room, set);
+          b->roomSetGen.fetch_add(1, std::memory_order_release);
+        }
         g_curSet = set;
         newSet = true;
         g_hrtfName = used;
@@ -1100,6 +1104,7 @@ void RoomTimes(double* p50Us, double* p99Us) {
 struct SpaceState {
   bool havePub = false;
   int level = 0;
+  bool blind = false;           // a listening test level: the level is never named
   cockpit_space::Family family = cockpit_space::Family::Generic;
   bool familyAuto = true;
   std::string type;
@@ -1114,6 +1119,7 @@ struct SpaceState {
   float probe[3] = {};
   bool stubLogged = false;
   int insideNow = 1;           // what the render side uses (for the running line and audio_space.csv)
+  int sigDcs = -2, sigCam = -2;  // the two inside signals last logged (ed_sound's flag, the camera check; -1 unknown)
   ULONGLONG lastCsv = 0;
 };
 SpaceState g_spaceSt;
@@ -1123,11 +1129,12 @@ SpaceState g_spaceSt;
 void SpaceTick() {
   SpaceState& S = g_spaceSt;
   const audcfg::SpaceConfig& sc = g_cfgRead.space;
-  const int level = g_cfgRead.cfg.binaural ? sc.level : 0;
+  const int level = g_cfgRead.cfg.binaural ? sc.Effective() : 0;
   const std::string type = LuaType();
   const cockpit_space::Family fam = sc.familyAuto ? cockpit_space::FamilyForType(type.c_str()) : sc.family;
   audr::SpaceCtl& ctl = g_spaceCtlNow;
-  const bool changed = !S.havePub || level != S.level || fam != S.family || sc.familyAuto != S.familyAuto || type != S.type;
+  const bool changed = !S.havePub || level != S.level || sc.Blind() != S.blind || fam != S.family ||
+                       sc.familyAuto != S.familyAuto || type != S.type;
   if (changed) {
     // A new preset for every room (crossfaded inside the room); level 0 publishes none: the room fades out and idles.
     if (level > 0) {
@@ -1140,28 +1147,35 @@ void SpaceTick() {
       }
     }
     ctl.level = level;
-    Log("audio: cockpit space: %s (%ls %s, aircraft %s)", SpaceLevelName(level), cockpit_space::FamilyKey(fam),
-        sc.familyAuto ? "auto" : "setting", type.empty() ? "unknown" : type.c_str());
+    // A listening test's level is never named (the pilot rates blind; the app shows what the log says).
+    Log("audio: cockpit space: %s (%ls %s, aircraft %s)", sc.Blind() ? "Test" : SpaceLevelName(level),
+        cockpit_space::FamilyKey(fam), sc.familyAuto ? "auto" : "setting", type.empty() ? "unknown" : type.c_str());
     if (level > 0 && !audr::kHaveRoom && !S.stubLogged) {
       S.stubLogged = true;
       Log("audio: cockpit space: this build has no room renderer yet; the sound is unchanged");
     }
     S.havePub = true;
-    S.level = level, S.family = fam, S.familyAuto = sc.familyAuto, S.type = type;
+    S.level = level, S.blind = sc.Blind(), S.family = fam, S.familyAuto = sc.familyAuto, S.type = type;
   }
   const float luaCanopy = g_luaCanopy.load(std::memory_order_relaxed);
   ctl.canopy = sc.canopy ? luaCanopy : -1.0f;
   ctl.luaInside = g_luaInside.load(std::memory_order_relaxed);
   audr::WriteCtl(g_spaceCtl, ctl);
-  if (!g_installed.load() || level == 0) return;
+  if (!g_installed.load() || (level == 0 && !S.blind)) return;  // a test's Off keeps its lines (blind)
   // inside / canopy (on change; canopy steps of 0.1)
   audspace::SpaceData sd{};
   const bool haveSd = audspace::SpaceRead(g_space, &sd);
   const bool reads = haveSd && (sd.flags & audspace::flags::kReads);
-  const int inside = reads && (sd.flags & audspace::flags::kInsideKnown) ? ((sd.flags & audspace::flags::kInside) ? 1 : 0)
-                     : ctl.luaInside >= 0                                  ? ctl.luaInside
-                                                                           : 1;
+  const int inside = audspace::Inside(haveSd ? &sd : nullptr, ctl.luaInside) ? 1 : 0;
   S.insideNow = inside;
+  // Both signals, on change: ed_sound's flag (once seen) and the camera check (until the flag is verified live, an
+  // outside camera wins; docs/COCKPIT_SPACE.md 10.1).
+  const int sigDcs = reads && (sd.flags & audspace::flags::kInsideKnown) ? ((sd.flags & audspace::flags::kInside) ? 1 : 0) : -1;
+  if (sigDcs != S.sigDcs || ctl.luaInside != S.sigCam) {
+    auto name = [](int v) { return v < 0 ? "unknown" : v ? "inside" : "outside"; };
+    Log("audio: cockpit space: inside signals: ed_sound %s, camera %s", name(sigDcs), name(ctl.luaInside));
+    S.sigDcs = sigDcs, S.sigCam = ctl.luaInside;
+  }
   const int csrc = ctl.canopy >= 0 ? g_luaCanopySrc.load(std::memory_order_relaxed) : 0;
   if (inside != S.inside || csrc != S.canopySrc || (ctl.canopy >= 0) != (S.canopy >= 0) ||
       (ctl.canopy >= 0 && std::fabs(ctl.canopy - S.canopy) >= 0.1f)) {
@@ -1178,8 +1192,8 @@ void SpaceTick() {
     const ULONGLONG now = GetTickCount64();
     const bool refusing = sd.unreliable != S.unreliable && now - S.unreliableAt >= 60000;
     if (src != S.frameSrc || sd.cockpitCtx != S.cockpitCtx || refusing) {
-      Log("audio: cockpit space: frame from %s, cockpit ctx %d, spread %.2f deg, unreliable frames %u",
-          src ? "sound" : "none", sd.cockpitCtx, sd.spreadDeg, sd.unreliable);
+      Log("audio: cockpit space: frame from %s, cockpit ctx %d, spread %.2f deg, unreliable frames %u, outlier sounds %u",
+          src ? "sound" : "none", sd.cockpitCtx, sd.spreadDeg, sd.unreliable, sd.outliers);
       S.frameSrc = src, S.cockpitCtx = sd.cockpitCtx;
       if (refusing || sd.unreliable != S.unreliable) S.unreliableAt = now;
       S.unreliable = sd.unreliable;
@@ -1413,7 +1427,9 @@ void ControlTick() {
       // Cockpit space: its level and family, inside, the voices sent to the room in the last block, the early
       // reflections, the room's own p99 and the mean direct-gain compensation (before "; head pose", which ends the line).
       char space[200] = "Off";
-      if (g_spaceSt.level > 0) {
+      if (g_spaceSt.blind) {
+        snprintf(space, sizeof(space), "Test");  // a listening test: neither the level nor its room figures
+      } else if (g_spaceSt.level > 0) {
         double p50 = 0, p99 = 0;
         RoomTimes(&p50, &p99);
         snprintf(space, sizeof(space), "%s %ls inside %d wet voices %u early %s room p99 %.2f ms, direct %.1f dB",

@@ -976,6 +976,74 @@ static void TestHrtfSwap(const std::vector<std::uint32_t>& file, const std::vect
     rig.set = second;  // the rig frees it
 }
 
+// ---- C15: what the direct gain follows, and a set adopted while the buses do not run -----------------------------------------
+static void TestDirectState(const std::vector<std::uint32_t>& file, const std::vector<std::uint32_t>& file2) {
+    RoomRig rig(file);
+    CHECK(rig.ok);
+    if (!rig.ok) return;
+    const RoomParams p2 = Params(Family::Generic, 2), p3 = Params(Family::Generic, 3);
+    rig.room.SetParams(p2);
+    Vec out(960);
+    auto block = [&](bool valid, float canopy, int n) {
+        for (int b = 0; b < n; ++b) {
+            RoomFrame f{};
+            f.aircraftToHead[3] = 1, f.frameValid = valid, f.wet = 1, f.early = true, f.canopyOpen = canopy;
+            rig.room.BeginBlock(480, f);
+            const Vec x = White(480, 77 + b);
+            MonoInput mi{x.data(), nullptr, 1, 1.0f};
+            RoomSource rs{{0.4f, 0.1f, 0.2f}, 1.0f, 0};
+            rig.room.AddSource(0, rs, mi, 480, 1, 1);
+            rig.room.Render(out.data(), 480);
+            rig.room.EndBlock();
+        }
+    };
+    block(true, 0.0f, 10);
+    RoomDirectState s = rig.room.DirectState();
+    const bool steady = s.params && std::fabs(s.params->earlyDb - p2.earlyDb) < 1e-3f && s.wet == 1.0f && s.earlyMix == 1.0f && s.canopyOpen == 0.0f;
+    // The pure gain with the mix: 1 and 0 are the flag's two values; a half mix lies between.
+    const float pos[3] = {0.5f, 0.0f, 0.1f};
+    const float g1 = RoomDirectGainMix(p2, 1, 0, 1.0f, pos, 0), g0 = RoomDirectGainMix(p2, 1, 0, 0.0f, pos, 0),
+                gh = RoomDirectGainMix(p2, 1, 0, 0.5f, pos, 0);
+    const bool mixOk = g1 == RoomDirectGain(p2, 1, 0, true, pos, 0) && g0 == RoomDirectGain(p2, 1, 0, false, pos, 0) &&
+                       g1 < gh && gh < g0 && g0 < 1.0f;
+    // The canopy is smoothed once, here: a step to 1 is 1 - exp(-10 ms / 0.3 s) after one block.
+    block(true, 1.0f, 1);
+    const float c1 = rig.room.DirectState().canopyOpen, want = 1.0f - std::exp(-0.01f / kRoomCanopyTauS);
+    block(true, 0.0f, 200);
+    // A preset change: d follows the crossfade (100 ms), not the target.
+    rig.room.SetParams(p3);
+    block(true, 0.0f, 3);
+    const float mid = rig.room.DirectState().params->earlyDb;
+    block(true, 0.0f, 10);
+    const bool xfade = (mid - p2.earlyDb) * (p3.earlyDb - mid) > 0.0f && std::fabs(rig.room.DirectState().params->earlyDb - p3.earlyDb) < 1e-3f;
+    // No frame: the early reflections fade over 50 ms and d's mix with them.
+    block(false, 0.0f, 1);
+    const float e1 = rig.room.DirectState().earlyMix;
+    block(false, 0.0f, 5);
+    const float e6 = rig.room.DirectState().earlyMix;
+    std::printf("C15 direct state: d %.3f (early on) %.3f (half) %.3f (off); canopy after one block %.4f (want %.4f); preset "
+                "mid-crossfade earlyDb %.2f; early mix %.2f then %.2f with no frame\n",
+                g1, gh, g0, c1, want, mid, e1, e6);
+    CHECK(steady && mixOk);
+    CHECK(std::fabs(c1 - want) < 1e-4f);
+    CHECK(xfade);
+    CHECK(e1 > 0.0f && e1 < 1.0f && e6 == 0.0f);
+    // The buses stopped (no frame for a while): a new set is still adopted, so the old one is retired.
+    block(false, 0.0f, 100);
+    CHECK(!room_probe::BusActive(rig.room));
+    char err[64];
+    HrtfSet* second = LoadHrtf(file2.data(), file2.size() * 4, 48000, err, sizeof(err));
+    CHECK(second != nullptr);
+    if (!second) return;
+    rig.room.SetHrtf(second);
+    block(false, 0.0f, 2);
+    const HrtfSet* retired = rig.room.TakeRetiredHrtf();
+    std::printf("C15 set swap with the buses idle: old set retired %s\n", retired == rig.set ? "yes" : "NO");
+    CHECK(retired == rig.set);
+    if (retired) ReleaseHrtf(const_cast<HrtfSet*>(retired));
+    rig.set = second;  // the rig frees it
+}
+
 // ---- R10: stability over 10 minutes --------------------------------------------------------------------------------------------
 static void TestLongRun(const std::vector<std::uint32_t>& file, int minutes) {
     RoomRig rig(file);
@@ -1101,6 +1169,7 @@ int main(int argc, char** argv) {
         TestNonFinite(file);         // C12
         TestIdle(file);              // C13
         TestHrtfSwap(file, file2);   // C14
+        TestDirectState(file, file2);  // C15
         TestCpu(file);               // C9, R8
         TestLongRun(file, 2);        // R10 (10 minutes with --long)
     }

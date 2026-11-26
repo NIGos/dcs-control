@@ -82,11 +82,12 @@ struct AudioConfig {
     bool cockpitSpaceCanopy = true;
 };
 
-// The listening test (docs/COCKPIT_SPACE.md 11): [AudioTest] Active (0/1), Seed (uint32), Trials (count), written only by
-// the app's `audio-test start`, removed by `audio-test stop` and Back to stock; the test hotkeys live in [Hotkeys]
-// (default none).
+// The listening test (docs/COCKPIT_SPACE.md 11): [AudioTest] Active (0/1), Seed (uint32), Trials (count), Level (0..3:
+// the level the module plays in place of [Audio] CockpitSpace while Active=1; absent: the pilot's own), written only by
+// the app's `audio-test start|level|watch`, removed by `audio-test stop` and Back to stock; the test hotkeys live in
+// [Hotkeys] (default none).
 constexpr const wchar_t* kTestSection = L"AudioTest";
-constexpr const wchar_t* kTestKeys[] = {L"Active", L"Seed", L"Trials"};
+constexpr const wchar_t* kTestKeys[] = {L"Active", L"Seed", L"Trials", L"Level"};
 constexpr const wchar_t* kTestHotkeys[] = {L"AudioTestNext",  L"AudioTestA",     L"AudioTestB",     L"AudioTestRate0",
                                            L"AudioTestRate1", L"AudioTestRate2", L"AudioTestRate3", L"AudioTestRate4"};
 

@@ -213,7 +213,11 @@ binaural::RoomFrame g_roomLastFrame{};
 binaural::RoomParams g_roomLastParams{};
 float g_roomLastAdded[2 * binaural::kMaxFramesPerCall];
 uint32_t g_roomLastFrames = 0;
+float g_roomLastEarlyMix = -1.0f, g_roomLastDirectCanopy = -1.0f;
+std::atomic<uint32_t> g_roomAddSpinUs{0};
 void ResetRoom() {
+  g_roomAddSpinUs = 0;
+  g_roomLastEarlyMix = g_roomLastDirectCanopy = -1.0f;
   for (std::atomic<uint64_t>* c : {&g_roomInits, &g_roomBegins, &g_roomAdds, &g_roomAddsWeighted, &g_roomResets,
                                    &g_roomRenders, &g_roomEnds, &g_roomSetParams, &g_roomSetHrtf, &g_roomRejected})
     c->store(0);
@@ -233,6 +237,9 @@ struct Room::Impl {
   bool inBlock = false;
   uint32_t frames = 0;
   float wet = 0;
+  float canopy = 0, earlyMix = 0;  // the last frame's (the fake does not smooth)
+  bool haveParams = false;
+  RoomParams params{};
   uint32_t quietBlocks = 1000;  // blocks since the last one with a wet weight above 0 (the fake's tail)
   std::atomic<const HrtfSet*> set{nullptr}, retired{nullptr};
 };
@@ -264,6 +271,8 @@ void Room::SetHeadRadius(float) {}
 void Room::SetParams(const RoomParams& p) {
   audiofake::g_roomSetParams.fetch_add(1);
   audiofake::g_roomLastParams = p;
+  impl_->params = p;  // the fake: adopted at once (the real room at its next BeginBlock)
+  impl_->haveParams = true;
 }
 void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
   audiofake::g_roomBegins.fetch_add(1, std::memory_order_relaxed);
@@ -271,6 +280,8 @@ void Room::BeginBlock(std::uint32_t frames, const RoomFrame& f) {
   impl_->inBlock = frames > 0 && frames <= kMaxFramesPerCall;
   impl_->frames = frames;
   impl_->wet = f.wet;
+  impl_->canopy = f.canopyOpen;
+  impl_->earlyMix = f.frameValid && f.early ? 1.0f : 0.0f;
   if (impl_->inBlock) memset(impl_->acc, 0, sizeof(float) * frames);
 }
 bool Room::AddSource(std::uint32_t slot, const RoomSource& s, const MonoInput& in, std::uint32_t frames, float w0, float w1) {
@@ -284,6 +295,13 @@ bool Room::AddSource(std::uint32_t slot, const RoomSource& s, const MonoInput& i
       audiofake::g_roomRejected.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
+  }
+  if (const uint32_t us = audiofake::g_roomAddSpinUs.load(std::memory_order_relaxed)) {
+    LARGE_INTEGER f, a, b;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    do QueryPerformanceCounter(&b);
+    while ((b.QuadPart - a.QuadPart) * 1000000 / f.QuadPart < us);
   }
   audiofake::g_roomAdds.fetch_add(1, std::memory_order_relaxed);
   audiofake::RoomSlotView& v = audiofake::g_roomSlot[slot];
@@ -321,10 +339,19 @@ void Room::EndBlock() {
 }
 // Idle: wet 0 for 3 blocks (the fake's "tail").
 bool Room::Idle() const { return impl_->wet == 0.0f && impl_->quietBlocks >= 3; }
+RoomDirectState Room::DirectState() const {
+  return RoomDirectState{impl_->haveParams ? &impl_->params : nullptr, impl_->wet, impl_->canopy, impl_->earlyMix};
+}
 RoomStats Room::GetStats() const { return RoomStats{}; }
 void Room::ResetStats() {}
 
-float RoomDirectGain(const RoomParams&, float wet, float, bool, const float*, std::uint32_t) {
+float RoomDirectGain(const RoomParams& p, float wet, float canopy, bool early, const float* pos, std::uint32_t flags) {
+  return RoomDirectGainMix(p, wet, canopy, early ? 1.0f : 0.0f, pos, flags);
+}
+// The fake's d: 1 / sqrt(1 + energy x wet) with its output on; the early mix and canopy it was given are recorded.
+float RoomDirectGainMix(const RoomParams&, float wet, float canopy, float earlyMix, const float*, std::uint32_t) {
+  audiofake::g_roomLastEarlyMix = earlyMix;
+  audiofake::g_roomLastDirectCanopy = canopy;
   if (!audiofake::g_roomOutput.load(std::memory_order_relaxed)) return 1.0f;
   return 1.0f / std::sqrt(1.0f + audiofake::kFakeRoomEnergy * wet);
 }
