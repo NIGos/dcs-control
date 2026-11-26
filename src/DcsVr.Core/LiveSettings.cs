@@ -107,7 +107,15 @@ public static class LiveSettings
         // interface field) is not in the table: an edit by hand waits for the next launch.
         A("binauralAudio"), A("binauralHrtf"), A("headCircumferenceCm"), A("binauralLateHeadTracking"), A("binauralNearField"), A("binauralMaxObjects"),
         A("binauralLevelTrimDb"), A("binauralCpuBudgetPercent"), A("binauralLogVoices"), A("audioToggleKey"),
+        // Cockpit space (docs/COCKPIT_SPACE.md section 7): all three Live, crossfaded by the module; only with a payload
+        // whose audio part has it (CockpitSpaceInstalled).
+        A("cockpitSpace"), A("cockpitSpaceFamily"), A("cockpitSpaceCanopy"),
     ];
+    /// <summary>The cockpit space settings, live only with a payload that reads them.</summary>
+    private static readonly HashSet<string> CockpitSpaceFields = new(StringComparer.Ordinal) { "cockpitSpace", "cockpitSpaceFamily", "cockpitSpaceCanopy" };
+    /// <summary>The engine payload the applied profile installed reads [Audio] CockpitSpace* (<see cref="Binaural.PayloadHasCockpitSpace"/>).</summary>
+    public static bool CockpitSpaceInstalled(TransactionJournal? journal) =>
+        journal?.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals("DcsQvCullPayload.dll", StringComparison.OrdinalIgnoreCase)) is { } payload && Binaural.PayloadHasCockpitSpace(payload.Path);
 
     private static readonly Dictionary<string, Field> ByName = Fields.ToDictionary(f => f.Name, StringComparer.Ordinal);
     public static Field? Find(string name) => ByName.GetValueOrDefault(name);
@@ -211,10 +219,11 @@ public static class LiveSettings
         var installed = journal.Entries.Select(e => Path.GetFileName(e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var current07 = Current07(journal);
         var audio = AudioInstalled(journal);
+        var cockpitSpace = audio && CockpitSpaceInstalled(journal);
         var fgQuality = FgQualityInstalled(journal);
         return [.. Fields.Where(f => f.In.All(file => installed.Contains(file) && Reloads(file, applied, journal)) && (current07 || !Live07.Contains(f.Name)) && f.Kind switch
         {
-            Kind.Audio => audio,
+            Kind.Audio => audio && (cockpitSpace || !CockpitSpaceFields.Contains(f.Name)),
             Kind.Engine => launch.EngineOptimizations && (f.Name != "engineDiagnosticHooks" || Current(journal) && !launch.EngineDiagnosticHooks),
             Kind.Visual => !launch.Desktop,
             // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is
@@ -247,9 +256,11 @@ public static class LiveSettings
         // So live, and the interface says the full gain can take a few minutes of flight.
         "D3D.ChainFast", "D3D.ShaderFast",
         // 3D headphone audio (binaural_config.h: every key Live) and its in-flight key; only with an audio payload (audio).
-        "Audio.*", "Hotkeys.AudioToggle",
+        // [AudioTest] (the listening test, DcsVr.Cli audio-test): a live write that ends a test left on is live too.
+        "Audio.*", "Hotkeys.AudioToggle", "AudioTest.*",
     };
-    private static bool IsAudioKey(string key) => key.StartsWith("Audio.", StringComparison.OrdinalIgnoreCase) || key.Equals("Hotkeys.AudioToggle", StringComparison.OrdinalIgnoreCase);
+    private static bool IsAudioKey(string key) => key.StartsWith("Audio.", StringComparison.OrdinalIgnoreCase) || key.StartsWith("AudioTest.", StringComparison.OrdinalIgnoreCase)
+        || key.Equals("Hotkeys.AudioToggle", StringComparison.OrdinalIgnoreCase);
     // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze, QuadViewsFixedFocus or [DlssPreset] (instance creation).
     private static readonly HashSet<string> PupilKeys = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -314,6 +325,8 @@ public static class LiveSettings
     /// <paramref name="hrtfSets"/>: the personal HRTF sets installed next to the module (<see cref="InstalledHrtfSets"/>);
     /// [Audio] Hrtf naming another one waits, since its file comes only with the next launch. Null: not checked.
     /// <paramref name="fgQuality"/>: the installed OFXR reads the quality keys (<see cref="FgQualityInstalled"/>).
+    /// [Audio] CockpitSpace* are written live to any audio payload: one without cockpit space ignores them, and its
+    /// settings are then not available live (<see cref="AvailableFields"/>), so the page says they wait for the next launch.
     public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true, bool audio = true, IReadOnlySet<string>? hrtfSets = null, bool audioOnLive = true, bool fgQuality = true)
     {
         if (file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase) && IsAudioKey(key))

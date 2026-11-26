@@ -680,3 +680,13 @@ replace `CliHrtfConverter` with an in-process call. The SOFA file and its folder
 `audio-status`, `audio-backoff` (readiness, from the log). The diagnostic package adds `dcs-control/audio.txt` (the library's
 sets and the audio log lines; never a SOFA file, its path, or a `.dcshrtf`). The pilot's set names (often a person's) are
 "personal set N" everywhere in the package: audio.txt, the module's log, DcsQvCull.ini, the profiles in report.json.
+
+## 11. Cockpit space
+
+The cockpit's early reflections and a short shared tail around the owned 3D voices, so cockpit sounds are heard outside
+the head: [COCKPIT_SPACE.md](COCKPIT_SPACE.md) (design, interfaces, metrics, listening test). App side: `[Audio]`
+`CockpitSpace` (0..3, default 1), `CockpitSpaceFamily` (`auto`), `CockpitSpaceCanopy` (1), all Live (only with a payload
+whose key table has them, `Binaural.PayloadHasCockpitSpace`); the status reads the `audio: cockpit space:` lines
+(`CockpitSpaceStatus`); Checks code `audio-space-early` (its close reflections left out for CPU), `audio-cockpit-space`
+and `audio-cockpit-type` (ranges). The listening test's `[AudioTest]` is written only by `DcsVr.Cli audio-test`
+(`tools/listening-test/`) and goes with Launch DCS, Live writes of the file and Back to stock DCS.

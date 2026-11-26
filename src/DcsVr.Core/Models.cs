@@ -730,6 +730,16 @@ public sealed record VrProfile
     [WrittenWhenChanged] public string? BinauralExcludeContexts { get; init; }
     /// <summary>[Audio] LogVoices: a per-sound CSV next to the module's log, for diagnosis. Off by default.</summary>
     [WrittenWhenChanged] public bool BinauralLogVoices { get; init; }
+    /// <summary>[Audio] CockpitSpace (docs/COCKPIT_SPACE.md): the cockpit's early reflections and a short shared tail around
+    /// the 3D sounds, so they are heard outside the head. 0 Off (today's dry 3D sound, bit for bit), 1 Subtle (default),
+    /// 2 Normal, 3 Strong. Only with 3D audio on.</summary>
+    [WrittenWhenChanged] public int CockpitSpace { get; init; } = Binaural.CockpitSpaceDefault;
+    /// <summary>[Audio] CockpitSpaceFamily: "auto" (the module picks it from the aircraft flown) or a family id (bubble,
+    /// framed, helicopter, warbird, transport, generic). Held as written: trimmed, lower case, blank is "auto".</summary>
+    [WrittenWhenChanged] public string CockpitSpaceFamily { get => _cockpitSpaceFamily; init => _cockpitSpaceFamily = Binaural.NormalizeCockpitFamily(value); }
+    private readonly string _cockpitSpaceFamily = Binaural.CockpitFamilyAuto;
+    /// <summary>[Audio] CockpitSpaceCanopy: an open canopy opens the space (less reflection and tail). On by default.</summary>
+    [WrittenWhenChanged] public bool CockpitSpaceCanopy { get; init; } = true;
     /// <summary>[Hotkeys] AudioToggle: switches 3D audio off and back on in flight, to compare (DCS's own panning while
     /// off). "virtual-key:modifiers"; "Off" disables it.</summary>
     [WrittenWhenChanged] public string AudioToggleKey { get; init; } = NeuralHotkeys.AudioDefault;

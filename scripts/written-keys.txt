@@ -39,6 +39,9 @@ Cheeky	CheekyFoveatedDLSS	SchemaVersion
 Cheeky	CheekyFoveatedDLSS	TransitionWidth
 Cheeky	CheekyFoveatedDLSS	Width
 DcsQvCull	Audio	Binaural
+DcsQvCull	Audio	CockpitSpace
+DcsQvCull	Audio	CockpitSpaceCanopy
+DcsQvCull	Audio	CockpitSpaceFamily
 DcsQvCull	Audio	CpuBudgetPercent
 DcsQvCull	Audio	ExcludeContexts
 DcsQvCull	Audio	HeadCircumferenceCm

@@ -693,6 +693,38 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         return new(inEffect, waiting, written, message, rechecks);
     }
 
+    /// <summary>
+    /// The cockpit space listening test (DcsVr.Cli audio-test, docs/COCKPIT_SPACE.md section 11): writes [AudioTest] into
+    /// the applied profile's DcsQvCull.ini (null: removes it), as a live write, so the file stays DCS Control's and the
+    /// module takes it within a second. Nothing else in the file changes. Refused without an applied profile with 3D
+    /// audio on, or when the file was changed outside DCS Control. Launch DCS and Back to stock DCS write or restore the
+    /// whole file, which ends a test left on.
+    /// </summary>
+    public string SetAudioTest(AudioTestSettings? test)
+    {
+        var applied = ReadAppliedProfile() ?? throw new InvalidOperationException("No profile is applied. Launch DCS once with 3D headphone audio on.");
+        if (!applied.Profile.ForLaunch().UsesBinauralAudio && test is not null)
+            throw new InvalidOperationException("3D headphone audio is off in the applied profile. Turn it on and Launch DCS once.");
+        var entry = applied.Journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(LiveSettings.EngineFile, StringComparison.OrdinalIgnoreCase) && !e.Deleted)
+            ?? throw new InvalidOperationException("The engine module is not installed. Launch DCS once with 3D headphone audio on.");
+        var bytes = File.ReadAllBytes(entry.Path);
+        if (Hashing.BytesSha256(bytes) != entry.InstalledSha256)
+            throw new InvalidOperationException("DcsQvCull.ini was changed outside DCS Control. Launch DCS once, then start the test again.");
+        var text = IniFile.Decode(bytes);
+        var next = CockpitSpaceTest.WithSection(text, test);
+        if (next == text) return test is null ? "No listening test was on." : "Already set.";
+        Originals.UpdateInstalledLive(applied.Journal.Id, [new LiveFileUpdate(entry.Path, IniFile.Encode(next, bytes), entry.InstalledSha256)]);
+        return test is null ? "Listening test stopped: your own cockpit space setting plays again." : "Listening test set.";
+    }
+
+    /// <summary>The [AudioTest] now in the applied DcsQvCull.ini; null when none or no profile is applied.</summary>
+    public AudioTestSettings? ReadAudioTest()
+    {
+        var entry = ReadAppliedProfile()?.Journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(LiveSettings.EngineFile, StringComparison.OrdinalIgnoreCase) && !e.Deleted);
+        try { return entry is null || !File.Exists(entry.Path) ? null : CockpitSpaceTest.Read(IniFile.Decode(File.ReadAllBytes(entry.Path))); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
     /// <summary>Live mode's record of what it wrote (live.json in the state folder): the live settings whose values in
     /// effect differ from the applied profile.json, for that apply's journal, with each live file's record as it was then
     /// (<see cref="LiveStamps"/>). Launch DCS (a new journal) or anything else that rewrites a live file makes its

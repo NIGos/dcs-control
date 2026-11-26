@@ -22,7 +22,7 @@ try
     var service = new ControlService(Option("--distribution") ?? AppContext.BaseDirectory, Option("--state") ?? ControlService.DefaultStateRoot);
     // Commands that read or write the record of original files refuse to run from a sandbox that redirects
     // %LOCALAPPDATA% (a second, private record would diverge from the app's); an explicit --state is the caller's choice.
-    if (command is "readiness" or "preview" or "apply" or "live-apply" or "status" or "restore" or "launch-check" or "launch" or "diagnostic"
+    if (command is "readiness" or "preview" or "apply" or "live-apply" or "status" or "restore" or "launch-check" or "launch" or "diagnostic" or "audio-test"
         && Option("--state") is null && AppDataRedirection.Target() is { } redirected)
     { Console.Error.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, AppDataRedirection.Message, redirected)); return 3; }
     switch (command)
@@ -148,6 +148,9 @@ try
             using (process) Console.WriteLine(sync.Message + " DCS launched.");
             break;
         }
+        // The cockpit space listening test (tools/listening-test): [AudioTest] in the applied DcsQvCull.ini, Part A's
+        // sounds, Part B's mission and watcher, the analysis.
+        case "audio-test": return CockpitSpaceTestCli.Run(args[1..], () => service, Console.Out, Console.Error);
         // Runs in its own process so it outlives the app; started automatically when a boosted profile launches DCS.
         case "boost": return BoostRuntime.Run(args[1..], Console.Out, Console.Error);
         // Started elevated by the app (Start Tobii) when an ended helper left the desktop Tobii services stopped.
@@ -157,7 +160,7 @@ try
         default:
             // An unknown command is an error (a typo must not look like success to a script); "help" is not.
             if (command != "help") Console.Error.WriteLine("Unknown command: " + command);
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, end-dcs, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall, hrtf-convert\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile (with --leftovers also the count of DCS Control files in DCS the record does not list). restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values). hrtf-convert <in.sofa> <out.dcshrtf> [--name N] [--source S] [--generic] converts a SOFA HRTF file for 3D audio."); if (command != "help") return 1; break;
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, end-dcs, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall, hrtf-convert, audio-test\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile (with --leftovers also the count of DCS Control files in DCS the record does not list). restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values). hrtf-convert <in.sofa> <out.dcshrtf> [--name N] [--source S] [--generic] converts a SOFA HRTF file for 3D audio. audio-test runs the cockpit space listening test (audio-test help)."); if (command != "help") return 1; break;
     }
     return 0;
 }

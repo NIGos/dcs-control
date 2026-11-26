@@ -434,9 +434,13 @@ the direction. The kept side of a wide voice gets `d` too, so a wide voice's mid
   default `auto`, advanced, Live.
 - `[Audio] CockpitSpaceCanopy` 0/1, default 1, advanced, Live: the space opens with the canopy.
 - `[Audio] LogVoices` (existing, diagnostics): also writes the room columns and `audio_space.csv` (section 8.6).
-- `[AudioTest]` (listening test only, written by the kit through the app; removed by Back to stock): `Active` 0/1,
-  `Seed` (uint32), `Trials` (count). Hotkeys `[Hotkeys] AudioTestNext`, `AudioTestA`, `AudioTestB`,
-  `AudioTestRate0` .. `AudioTestRate4` (default none; the kit sets them for the test and removes them after).
+- `[AudioTest]` (listening test only, written by `DcsVr.Cli audio-test` as a live write of the applied file; removed
+  when the test stops, and by Launch DCS, any Live write of the file and Back to stock): `Active` 0/1, `Seed` (uint32,
+  informational), `Trials` (count, informational), `Level` 0..3 (optional). With `Active=1` and `Level` present the
+  module plays that level instead of `CockpitSpace`, crossfaded like a live change, and logs nothing that names it beyond
+  its usual `audio: cockpit space:` line; without `Level`, or with `Active` absent, the pilot's `CockpitSpace` plays. No
+  test hotkeys: Part B's trials and answers go through the test mission's F10 radio menu (section 11), so the test adds
+  no key of ours.
 
 UI (Audio page, under "3D headphone audio", disabled while it is off):
 
@@ -667,7 +671,7 @@ sends (voices keep playing in external views).
 - On HRTF change: `Room::SetHrtf` with the voices' new set; retire as for voices (both renderers must release a set
   before it is freed).
 - Budget ladder (section 9).
-- Test hotkeys (section 11).
+- `[AudioTest] Active`/`Level` (section 7): the effective level is `Level` while the test is on, else `CockpitSpace`.
 
 ### 8.5 Log lines (`DcsQvCull.log`; the app reads the first two)
 
@@ -760,9 +764,11 @@ the trials; answers are single keys, each confirmed by a short tick.
 
 **Part A, offline stimuli (about 5 minutes, DCS not running).** The kit renders, with `binaural_room_render.exe` and
 the user's own HRTF setting (the `[Audio] Hrtf` set; reading only), 1.5 s stimuli: a pink-noise burst train and a
-"switch click + hum" complex at 8 directions (0°, ±45°, ±90°, ±135°, 180° azimuth; plus 45° up front and 30° down
-front at 0.5 m = cockpit distance), each as Off / Subtle / Normal of the `generic` family. Played through the headset's
-headphones by the kit (Windows `SoundPlayer`, no new dependency) in a random order with the seed in the result file.
+"switch click + hum" complex (alternating by direction, the same signal at the three levels of a direction) at 8
+directions at 0.5 m = cockpit distance: 0°, ±45°, ±135°, 180° azimuth (front/back pairs; ±90° has no front/back answer
+and is left out), 45° up front and 30° down front, each as Off / Subtle / Normal of the `generic` family. Played through
+the headset's headphones by the kit (Windows `SoundPlayer`, no new dependency) in a random order from the session seed
+(`seed.txt`); the runner reads only opaque ids (`trials.json`), the unblinding is `key.json`.
 
 - A1 (24 trials, about 3 minutes): after each stimulus, **externalisation 0-4** (0 inside the head, 1 at the head's
   surface, 2 just outside, 3 clearly outside, 4 where the source should be) with the number row, then **front or
@@ -770,17 +776,29 @@ headphones by the kit (Windows `SoundPlayer`, no new dependency) in a random ord
 - A2 (8 trials, about 2 minutes): A/B/X between Off and Subtle on random directions: A, B, X play in turn; key 1 = X
   is A, 2 = X is B.
 
-**Part B, in DCS (about 5 minutes; the pilot starts DCS and flies, cold-start ramp of any aircraft).** The kit writes
-`[AudioTest] Active=1, Seed, Trials=12` and the test hotkeys through the app's Live settings (no restart). Each
-`AudioTestNext` starts the next trial: the module crossfades to the trial's level (Off / Subtle / Normal, order from
-the seed, never shown or logged as a name) and plays a tick; the pilot flips switches on the left console, the right
-console, the front panel and overhead, turns the head, and rates externalisation with `AudioTestRate0..4`. Trials 10-12
-are A/B/X (`AudioTestA`, `AudioTestB` switch to the two references; `AudioTestRate1` = X is A, `AudioTestRate2` = X is
-B). The module logs `audio: test trial <n> rating <k>` (and `audio: test order <hash of seed>`); at the end the kit
-removes `[AudioTest]` and the hotkeys and unblinds from the seed.
+**Part B, in DCS (about 5 minutes; the pilot starts DCS and flies the test mission, cold on the ramp of any
+aircraft).** No key of ours: the kit makes a test mission from any mission DCS saved (`audio-test mission`, a copy next
+to the results; nothing is written into DCS or Saved Games by the kit itself): one MISSION START trigger runs
+`cockpit_space_test.lua` (DO SCRIPT FILE, as DCS's own missions do), which adds an F10 radio menu (Other > Cockpit space
+test) and writes every choice to dcs.log as a `CSPACE ...` line (`env.info`). The kit's watcher (`audio-test watch`)
+follows dcs.log, writes `[AudioTest] Active=1, Seed, Trials=12` when it starts and `Level` for each trial (section 7),
+and removes `[AudioTest]` when the mission's End the test is chosen or on Ctrl+C. Each choice that changes the sound is
+followed by a tick about 3 s later (time for the log line, the watcher and the module's one-second ini read):
+- **Next cockpit trial** (9 trials, Off / Subtle / Normal in blocks of three from the seed, never shown or logged as a
+  name): the pilot flips switches on the left console, the right console, the front panel and overhead, turns the head,
+  and picks **Rate the cockpit trial** 0..4.
+- **Next outside sound** (16): an explosion (`trigger.action.explosion`, power 3) 150 m from the aircraft, 15 m above the
+  ground, at a bearing from two shuffled passes over 8 bearings relative to the nose, 4 s after the choice; Off and
+  Subtle in blocks of two. The pilot looks straight ahead and picks **The outside sound came from** (8 directions):
+  front/back reversals and the angle error for a world sound entering through the canopy.
+- **A/B/X** (3 trials): Play A (Off), Play B (Subtle), Play X (one of them, from the seed), then X is A / X is B.
+Mission lines: `CSPACE start`, `trial <n>`, `rate <n> <k>`, `outside <n> az <deg>`, `heard <n> <deg>`, `abxtrial <n>`,
+`abx <n> <A|B|X>`, `abxanswer <n> <A|B>`, `end`. The watcher copies them to `part-b.log` in the results folder (dcs.log
+starts anew with DCS); the analysis unblinds from the seed.
 
 **Analysis (kit, automatic):** per condition: median externalisation and the share of ratings ≥ 3; front/back
-reversal rate (A1); Wilcoxon signed-rank Off vs Subtle and Subtle vs Normal (paired by direction/position); A/B/X
+reversal rate (A1 and Part B's outside sounds); Wilcoxon signed-rank (exact, two-sided) Off vs Subtle and Subtle vs
+Normal (paired by direction in A1 and by block in Part B); A/B/X
 correct count with its binomial p (8 trials: 7 correct p = 0.035). **Accept Subtle as default** when it rates higher
 than Off (median +1 or more, p < 0.05 over A1+B) and its reversals are not worse than Off's; prefer Normal as default
 only if it rates higher than Subtle and nobody reports colouration ("tin can") in the free comment.
@@ -801,7 +819,9 @@ file and the header in the same commit. Where two parts touch one file, the owne
 - `RoomDirectGain`, `RoomSendDistanceGain`, `Preset`, `FamilyForType` (table of section 5.1; verify the names
   statically against `<DCS>\Mods\aircraft\*\entry.lua` and readable aircraft Lua, read-only; list unverified ones).
 - `test/room_test.cpp` (tests C1-C14), `test/room_render.cpp` → `binaural_room_render.exe` (metrics R1-R6, R8-R10,
-  WAV output for the kit, command line `--family --strength --source x,y,z --yaw --out <dir> --hrtf <file>`),
+  WAV output for the kit, command line `--family --strength --source x,y,z --yaw --out <dir> --hrtf <file>`; with
+  `--input <mono wav>` it renders that signal (direct path at strength 0, direct + room above) and writes
+  `<dir>/render.wav`, stereo 48 kHz, which the kit plays: `CockpitSpaceTest.RenderArguments` builds this line),
   `test/contract_test.cpp` additions, `CMakeLists.txt` targets and ctest entries.
 - Hand-off: library target unchanged (`binaural_core` gains `src/room.cpp`); the tool's command line for APP.
 
@@ -811,7 +831,7 @@ file and the header in the same commit. Where two parts touch one file, the owne
   `C_dcs`, through-canopy class), new `src/audio_space.h` (`SpaceState` seqlock, frame consistency, late rotation of
   `C`), `src/audio_render.h` (Room calls in `ProcessVoice` and the block, direct gain, budget ladder step 1),
   `src/audio_config.h` (new keys, `[AudioTest]`), `src/main/audio.inc` (Room lifetime next to the core, SetParams on
-  changes, HRTF retire for both, log lines 8.5, CSV 8.6, listener probe, test hotkeys and tick).
+  changes, HRTF retire for both, log lines 8.5, CSV 8.6, listener probe, `[AudioTest] Level` as the effective level).
 - Lua bridge: `src/loader.cpp`, `src/loader_api.h`, `src/main/exports.inc` (three exports of 8.3),
   `lua/DcsQvCull.lua` (callbacks, gated by `DcsQvCull_AudioWanted`).
 - Tests: `test/audio_e2e_test.cpp`, `test/audio_fake_ed.h` (fake ctx `+0xe1`, `+0x58..+0x60`, sound `+0x1a8`,
@@ -825,13 +845,15 @@ file and the header in the same commit. Where two parts touch one file, the owne
 
 - `src/DcsVr.Core/Models.cs` (`CockpitSpace` int 0..3 default 1, `CockpitSpaceFamily` "auto", `CockpitSpaceCanopy`
   true, `[WrittenWhenChanged]`), `src/DcsVr.Core/BinauralAudio.cs` (levels, family keys, labels, validation),
-  `src/DcsVr.Core/ConfigurationWriters.cs` (`[Audio]` keys; `[AudioTest]` and test hotkeys written only by the kit verb,
-  removed by Back to stock), `src/DcsVr.Core/LiveSettings.cs` (all three Live).
+  `src/DcsVr.Core/ConfigurationWriters.cs` (`[Audio]` keys), `src/DcsVr.Core/LiveSettings.cs` (all three Live, only
+  with a payload that has them), `src/DcsVr.Core/CockpitSpaceTest.cs` (`[AudioTest]`, orders, stimuli, the test
+  mission, log lines, analysis) and `CockpitSpaceTestCli.cs`; `ControlService.SetAudioTest` (`[AudioTest]` as a live
+  write; Launch DCS and Back to stock end it).
 - `src/DcsVr.App/ui/app.js` (+ `smoke.js`): the control, Advanced rows, status line from the log line (8.5).
-- CLI verb `audio-test start|stop` in the app's CLI (writes/removes `[AudioTest]` and the hotkeys via the writers).
-- `tools/listening-test/` (kit: `README.md`, `make-stimuli.ps1` calling `binaural_room_render.exe`, `run-part-a.ps1`,
-  `part-b.ps1` (start/stop via the CLI verb, unblinding from the log), `analyze.ps1`); results under
-  `artifacts\listening\<date>\` (not committed).
+- CLI verb `audio-test start|level|stop|watch|stimuli|mission|analyze` in the app's CLI.
+- `tools/listening-test/` (kit: `README.md`, `RATING_SHEET.md`, `make-stimuli.ps1` calling `binaural_room_render.exe`,
+  `run-part-a.ps1`, `make-mission.ps1`, `part-b.ps1` (the watcher), `analyze.ps1`); results under
+  `artifacts\listening\<date>\` and the test mission under `artifacts\cspace-listening\` (not committed).
 - `tests/DcsVr.Tests/Program.cs` (tests P1-P10); `docs/USER_GUIDE.md` (Audio section); `docs/BINAURAL_AUDIO.md`
   (a short pointer to this document; owner of that file stays as before, append only).
 
@@ -935,16 +957,18 @@ bundled KU100 set, else the synthetic sphere. Exit 0 written, 1 bad arguments, 2
 - M13 HRTF change retires the set only after both the voices' Renderer and the Room released it.
 - M14 real time: `audio_rt_alloc` covers the room path.
 - M15 CSV/log: columns and lines of 8.5/8.6 exactly (header text compared).
-- M16 test mode: `[AudioTest]` order from the seed, hotkey ratings logged without the level, tick audible in the
-  output buffer, `Active=0` restores the user's level.
+- M16 test mode: `[AudioTest] Active=1` with `Level` plays that level (crossfaded, as a live change), without `Level`
+  the user's; removing the section (or `Active=0`) restores the user's level; no hotkey is read for the test.
 
 ### APP (`tests/DcsVr.Tests`)
 
 - P1 defaults: CockpitSpace 1, Family auto, Canopy 1; `[Audio]` written only when changed (`WrittenWhenChanged`).
 - P2 key names and ranges equal `binaural_config.h`'s table (the existing table-parity test extended).
 - P3 Live: all three keys Live, no restart prompt.
-- P4 Back to stock removes `[AudioTest]` and the test hotkeys with `[Audio]`.
-- P5 the `audio-test start|stop` verb writes and removes exactly `[AudioTest]` and the hotkeys.
+- P4 Back to stock removes `[AudioTest]` with `[Audio]`.
+- P5 the `audio-test start|level|stop` verb writes and removes exactly `[AudioTest]`; the watcher sets each trial's
+  level from the mission's log lines and removes the section at the end; the test mission gets one MISSION START
+  trigger and its two resources and keeps everything else.
 - P6 UI smoke: the control is disabled while 3D audio is off; labels and descriptions as section 7.
 - P7 status line parsing of the log line (known type, unknown, setting).
 - P8 kit: `make-stimuli.ps1` dry run builds the command lines; `analyze.ps1` on a fixture log/answers file gives the

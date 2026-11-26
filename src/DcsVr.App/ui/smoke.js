@@ -25,7 +25,7 @@ window.runWebSmoke = async function() {
     'glare','glareStrength','nightVisionBlue','nightVisionBlur','nightVisionScotopic','nightVisionPhotopic','glareThresholdEv','glareRadius','glareStreak',
     'gazeDof','gazeDofStrength','gazeDofMaxArcmin','gazeDofSaccadeRelease','gazeDofSettleMs','gazeDofFadeInMs','gazeDofToleranceD','gazeDofFoveaGuardDeg','gazeDofPupilMm',
     'gVision','gVisionStrength','gVisionUseGaze','gVisionRedout','gVisionTolerance','gVisionMode',
-    'binauralAudio','headCircumferenceCm','binauralHrtf','binauralLateHeadTracking','binauralNearField','binauralMaxObjects','binauralLevelTrimDb','binauralCpuBudgetPercent','binauralLogVoices',
+    'binauralAudio','headCircumferenceCm','binauralHrtf','binauralLateHeadTracking','cockpitSpace','binauralNearField','cockpitSpaceFamily','cockpitSpaceCanopy','binauralMaxObjects','binauralLevelTrimDb','binauralCpuBudgetPercent','binauralLogVoices',
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','audioToggleKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
@@ -251,7 +251,7 @@ window.runWebSmoke = async function() {
     check('Dependency notes are short and only where they apply',[...document.querySelectorAll('#featureList .feature-note span')].every(n => n.textContent.length <= 40) && $('featureNotes-framegen').textContent === '' && $('featureNotes-boost').textContent === '');
     // Compact settings: segmented choices, short help with More, fold values, folded program lists, toggle lists, density.
     { const SEGMENTED_S1 = ['quadViews','gaze','foveaSource','frameGen','frameGenFactor','frameGenPassThrough','fpsLimit','nvidiaFlowScale','flowPreset','boostDcsPriority'];
-      const SEGMENTED = [...SEGMENTED_S1,'neuralStyle','neuralDepth','boostPrefetch','eyeDistance','depthBoostMode','farDepthPreset','colorMode','panelGamut','gVisionMode','engineShaderCompileWorkers'];
+      const SEGMENTED = [...SEGMENTED_S1,'neuralStyle','neuralDepth','boostPrefetch','eyeDistance','depthBoostMode','farDepthPreset','colorMode','panelGamut','gVisionMode','engineShaderCompileWorkers','cockpitSpace'];
       const radios = p => [...$('seg-'+p).querySelectorAll('[role=radio]')], segDiff = listDiff(SEGMENTED,ui.fields.filter(f => f.segments).map(f => f.path));
       check('Short choices are segmented buttons over their select, one per option in the same order'+segDiff,!segDiff && SEGMENTED.every(p => { const f = ui.fields.find(x => x.path === p), g = $('seg-'+p);
         return f.type === 'select' && f.input.tagName === 'SELECT' && g?.getAttribute('role') === 'radiogroup' && radios(p).map(b => b.dataset.value).join('|') === [...f.input.options].map(o => o.value).join('|'); })
@@ -370,9 +370,9 @@ window.runWebSmoke = async function() {
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
       { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-frameGenHudSymbology','setting-frameGenFoveated',
-          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes','audioControls','frameGenFineTune'];
+          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes','audioControls','frameGenFineTune','setting-cockpitSpace'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its sixteen settings, cards and folds (3D headphone audio and frame generation Fine-tune included)',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its seventeen settings, cards and folds (3D headphone audio, Cockpit space and frame generation Fine-tune included)',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -869,7 +869,21 @@ window.runWebSmoke = async function() {
       check('Off by default, with the generic ears selected out of the box',!ui.profile.binauralAudio && ui.profile.binauralHrtf === 'default'
         && $('input-binauralHrtf').selectedOptions[0].textContent.startsWith('Generic (KU100)'));
       check(`Off, its settings are greyed out and say why (${why('headCircumferenceCm')})`,f('headCircumferenceCm').input.disabled && why('headCircumferenceCm') === 'Turn on 3D headphone audio to change these.' && $('hrtfImport').disabled);
+      // (The fold says the reason once, on its first row: Cockpit type repeats Close sounds per ear's.)
+      check('Cockpit space is greyed out while 3D audio is off',f('cockpitSpace').input.disabled && f('cockpitSpaceFamily').input.disabled && f('cockpitSpaceCanopy').input.disabled && why('binauralNearField') === 'Turn on 3D headphone audio to change these.');
       edit('binauralAudio',true);
+      // Cockpit space (docs/COCKPIT_SPACE.md section 7): Off / Subtle / Normal / Strong, Subtle by default, EXPERIMENTAL, no
+      // consent gate; Cockpit type and the canopy in Advanced, greyed with a reason while the space is off.
+      { const seg = $('seg-cockpitSpace'), buttons = seg ? [...seg.querySelectorAll('button')] : [];
+        check('Cockpit space: four choices, Subtle by default, its description and tag',buttons.map(b => b.textContent).join('/') === 'Off/Subtle/Normal/Strong' && ui.profile.cockpitSpace === 1
+          && seg.querySelector('[aria-checked="true"]').textContent === 'Subtle' && $('help-cockpitSpace').textContent === 'Puts cockpit sounds around you instead of inside your head.'
+          && [...$('setting-cockpitSpace').querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL') && !buttons.some(b => b.disabled)
+          && $('help-cockpitSpaceFamily').textContent === 'Automatic picks it from the aircraft you fly.' && ui.profile.cockpitSpaceFamily === 'auto' && ui.profile.cockpitSpaceCanopy === true && !f('cockpitSpaceFamily').input.disabled);
+        buttons[0].click();
+        check('Cockpit space Off greys Cockpit type and the canopy, with the reason',ui.profile.cockpitSpace === 0 && f('cockpitSpaceFamily').input.disabled && f('cockpitSpaceCanopy').input.disabled && why('cockpitSpaceFamily') === 'Turn on Cockpit space to change these.' && !f('binauralNearField').input.disabled);
+        buttons[3].click(); edit('cockpitSpaceFamily','helicopter');
+        check('Strong and a chosen cockpit type are kept in the profile',ui.profile.cockpitSpace === 3 && ui.profile.cockpitSpaceFamily === 'helicopter');
+        buttons[1].click(); edit('cockpitSpaceFamily','auto'); }
       check('On, its settings open; the head size has Small, Medium and Large',!f('headCircumferenceCm').input.disabled && !f('binauralMaxObjects').input.disabled && !$('hrtfImport').disabled && $('hrtfRemove').hidden
         && $('headPresets').querySelectorAll('[data-head]').length === 3 && $('navState-audio').textContent === 'ON');
       $('headPresets').querySelector('[data-head="60"]').click();
