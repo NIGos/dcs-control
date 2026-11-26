@@ -773,7 +773,7 @@ audio: cockpit space: inside signals: ed_sound <inside|outside|unknown>, camera 
 audio: cockpit space: frame from <sound|none>, cockpit ctx <i>, spread <deg> deg, unreliable frames <n>, outlier sounds <n>   (on change, and once per minute while unreliable)
 audio: cockpit space: early reflections off (CPU budget) | early reflections on again
 audio: ctx <i> listener gain=<f> pitch=<f> lowpass=<f>                                       (probe: at enable and on any change > 1 %)
-audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB, match <lo>/<mid>/<hi> dB, energy dry <dB> out <dB> -> <dB> dB, renders <n> in mix <n> after <n>, blocks <n>; head pose <on|off|unused>
+audio: running, ... ; space <level> <family> inside <0|1> wet voices <n> early <on|off> room p99 <ms> ms, direct <dB> dB, match <lo>/<mid>/<hi> dB, energy dry <dB> out <dB> -> <dB> dB, renders <n> in mix <n> after <n> (dropped <n>, added <n>, late <n>), blocks <n>, master <dB> dB, us per block: sends <us> walls <us> buses <us> early hp <us> tail <us> match <us>, us max: sends <us> drain <us> walls <us> buses <us> early hp <us> tail <us> match <us> room <us>; head pose <on|off|unused>
 audio: cockpit space: level match <on|off> ([Dev] AudioRoomNoMatch=<0|1>)                    (dev ini, for a live bisection; on change)
 audio: cockpit space: ed_sound's cockpit fields not found (<why>); <what is off>               (at install, only when a signature row is missing)
 ```
@@ -783,6 +783,13 @@ with it), and reads `space Off` while the space is off. Its `room p99` is the ro
 Render, EndBlock and the per-voice sends (AddSource, the direct and send gains). The direct gain d follows the room's
 own state after its BeginBlock (`Room::DirectState`: the crossfading preset, the wet weight, the canopy smoothed once by
 the room, the early reflections' fade), so d never makes room for early reflections the room is not playing.
+
+`late` counts the voice calls that came after the block's flush (they play dry, no send). `us per block` is the
+mean per room block over the line's window (sends: the module's per-voice work; the rest `RoomStats::sectionUs`).
+`us max` is the longest single block of each since the last running line (about 10 s, wall time like `room p99`):
+the sends, the room's six sections (`RoomStats::sectionMaxUs`, restarted with `Room::ResetSectionMax` at each line)
+and `room`, the room's whole share of that block. A spike in `room` that none of the sections shows came from
+outside the room's work (preemption, page faults, other load on the PC).
 
 The probe line answers [A] of section 3.1: open and close the canopy once in the first live flight and see whether the
 world context's listener gain or low-pass moves with it.
@@ -872,6 +879,19 @@ empty otherwise; `ax..az` aircraft-frame position; `dcomp_db` 20 log10 d).
   - (off) leaving out each voice's taps under 4 % of its early energy (early third octaves up to 3.25 dB, direct + early
     0.74 dB; R9 and R4 failed);
   - not built: fewer buses (14 -> 8), the tail at half rate, an ILD/ITD model for the reflections.
+- **Round 5 (live: medians unchanged, sends 76, buses 46, tail 10 µs; worst blocks 0.36-0.40 ms, CSV p99 up to
+  406 µs, with another analysis running on the PC).** The running line now prints `us max` per section over its
+  window (section 8.5), so the next flight shows whether a spike is in the room's work or outside it. C19 times the
+  events that could make one block cost more (48 voices turning, best of 5 runs per block, synthetic set): steady
+  p50 112 µs (max 133); all voices ending at once (drain) max 113; all starting again in reused slots max 129; a
+  parameter change (every voice's taps recomputed for the crossfade) mean 122, max 138; the canopy opening mean
+  128, max 150; half the voices silent mean 113, max 138. None comes near 0.36 ms: no event inside the room
+  explains the live maxima; slot reuse clears a 4 KB line (48 x 4 KB at most), the shelf redesign is four biquad
+  designs per block, and FTZ/DAZ covers every room call (each runs inside the module's `MxcsrScope`), so the tail
+  makes no denormals. One lossless cut found: a voice whose line holds only zeros as far back as the longest tap (a
+  voice playing silence, a drained one) skipped its tap work (adding 0 x gain), its accumulators still claimed in
+  the same order. C19 checks it against the full work: 0 of 960000 output samples differ. Half silent: 125 -> 113 µs
+  mean.
 - Room time is inside `dspTicks` (the module's budget measure).
 - Back-off ladder: over budget (> 10 % of the blocks of the last second) → **step 1: early reflections off** (late
   only, logged) → then the existing MaxObjects steps. Recovery in reverse: MaxObjects back to the setting, then after
@@ -1061,6 +1081,9 @@ file and the header in the same commit. Where two parts touch one file, the owne
 - C13 idle: wet 0 and silence for 3 x RT60 → `Idle()` true, Render adds nothing; a new send wakes it without a click.
 - C14 HRTF swap: `SetHrtf` during sound crossfades the buses, retires the old set only once unused; diffuse EQ
   recomputed.
+- C19 worst blocks (round 5): per-block time of the events that could spike (all voices ending, starting in reused
+  slots, a parameter change, the canopy opening, half the voices silent), printed; the silent-tap skip bit-exact
+  against the full work (checked).
 
 ### 13.1 CORE results (2026-11-26, `scripts/build-binaural.ps1`, 7/7 ctest)
 

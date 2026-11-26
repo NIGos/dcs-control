@@ -352,6 +352,7 @@ RoomDirectState Room::DirectState() const {
   return RoomDirectState{impl_->haveParams ? &impl_->params : nullptr, impl_->wet, impl_->canopy, impl_->earlyMix};
 }
 RoomStats Room::GetStats() const { return RoomStats{}; }
+void Room::ResetSectionMax() {}
 void Room::ResetStats() {}
 
 float RoomDirectGain(const RoomParams& p, float wet, float canopy, bool early, const float* pos, std::uint32_t flags) {
