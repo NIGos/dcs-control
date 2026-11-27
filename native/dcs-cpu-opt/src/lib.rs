@@ -10,6 +10,19 @@ use std::sync::Mutex;
 
 mod zlib_opt;
 
+extern "C" {
+    fn DcsCpuOpt_WriteGuardedPatch(target: *mut u8, bytes: *const u8, len: usize,
+        expected_at: *const u8, expected: *const u8, expected_len: usize) -> i32;
+    fn DcsCpuOpt_AllocNearPatch(target: *const u8, len: usize) -> *mut u8;
+}
+
+unsafe fn write_guarded_patch<const N: usize, const M: usize>(
+    target: *mut u8, bytes: &[u8; N], expected_at: *const u8, expected: &[u8; M],
+) -> bool {
+    DLL_PINNED.load(Ordering::Acquire)
+        && DcsCpuOpt_WriteGuardedPatch(target, bytes.as_ptr(), N, expected_at, expected.as_ptr(), M) != 0
+}
+
 // Expected first 15 bytes of ed_sound.dll!SND_process (DCS 2.9.31.29434, SHA-256 dc52bc85...)
 // 0x180004980: MOV [RSP+0x08], RBX  (48 89 5c 24 08)
 // 0x180004985: MOV [RSP+0x10], RBP  (48 89 6c 24 10)
@@ -308,89 +321,54 @@ unsafe fn find_visualizer_spin_loop(base: usize, image_size: usize) -> Result<us
     found.ok_or_else(|| "Visualizer.dll spin loop pattern not found".to_string())
 }
 
-/// Build the RWX MONITORX/MWAITX replacement stub for `EXPECTED_VIS_SPIN_LOOP`.
-/// Preserves RSP, RBX, RBP, RSI, RDI and jumps to `resume_addr` when done.
-fn build_mwaitx_pacer_stub(resume_addr: u64, timeout_cycles: u32) -> [u8; 88] {
-    let mut s = [0x90u8; 88];
-    let t = timeout_cycles.to_le_bytes();
-    let r = resume_addr.to_le_bytes();
-    let body: [u8; 74] = [
-        // 0x00: loop_top: cmp byte ptr [rbx], dil; je done (0x4a)
-        0x40, 0x38, 0x3b, 0x74, 0x45,
-        // 0x05: mov rcx, [rbp+0x38]; test rcx, rcx; je do_wait (0x14)
-        0x48, 0x8b, 0x4d, 0x38, 0x48, 0x85, 0xc9, 0x74, 0x06,
-        // 0x0e: mov rax, [rcx]; call [rax+0x10]
-        0x48, 0x8b, 0x01, 0xff, 0x50, 0x10,
-        // 0x14: do_wait: mov eax, [rbx+0x4]; cmp esi, eax; jb done (0x4a)
-        0x8b, 0x43, 0x04, 0x3b, 0xf0, 0x72, 0x2f,
-        // 0x1b: lea rax, [rbx+0x4]; xor ecx, ecx; xor edx, edx; monitorx
-        0x48, 0x8d, 0x43, 0x04, 0x31, 0xc9, 0x31, 0xd2, 0x0f, 0x01, 0xfa,
-        // 0x26: re-check after monitorx: cmp byte ptr [rbx], dil; je done (0x4a)
-        0x40, 0x38, 0x3b, 0x74, 0x1f,
-        // 0x2b: mov eax, [rbx+0x4]; cmp esi, eax; jb done (0x4a)
-        0x8b, 0x43, 0x04, 0x3b, 0xf0, 0x72, 0x18,
-        // 0x32: push rbx; xor eax, eax (C1); mov ecx, 2 (timer); mov ebx, timeout; mwaitx; pop rbx
-        0x53, 0x31, 0xc0, 0xb9, 0x02, 0x00, 0x00, 0x00,
-        0xbb, t[0], t[1], t[2], t[3],
-        0x0f, 0x01, 0xfb, 0x5b,
-        // 0x43: mov eax, [rbx+0x4]; cmp esi, eax; jae loop_top (0x00)
-        0x8b, 0x43, 0x04, 0x3b, 0xf0, 0x73, 0xb6,
+// Only the first three PAUSE instructions can be replaced. The original callback returns to 20,
+// where a jump lands on the fourth PAUSE at 28. Neither address is inside the patch.
+const VIS_PAUSE_OFFSET: usize = 22;
+const VIS_RESUME_OFFSET: usize = 30;
+
+fn build_mwaitx_pacer_stub(resume_addr: u64, timeout_cycles: u32) -> [u8; 56] {
+    let mut code = [0u8; 56];
+    let [t0, t1, t2, t3] = timeout_cycles.to_le_bytes();
+    let body: [u8; 48] = [
+        0x51, 0x52, 0x53, // preserve RCX, RDX and RBX; the stock continuation reloads EAX
+        0x48, 0x8d, 0x43, 0x04, 0x31, 0xc9, 0x31, 0xd2, 0x0f, 0x01, 0xfa, // monitor [rbx+4]
+        0x40, 0x38, 0x3b, 0x74, 0x14, // cmp byte [rbx], dil; je restore
+        0x3b, 0x73, 0x04, 0x72, 0x0f, // cmp esi,[rbx+4]; jb restore
+        0x31, 0xc0, 0xb9, 0x02, 0x00, 0x00, 0x00, 0xbb, t0, t1, t2, t3, // C1 with timeout
+        0x0f, 0x01, 0xfb, // mwaitx
+        0x5b, 0x5a, 0x59, // restore RBX, RDX and RCX
+        0xff, 0x25, 0, 0, 0, 0, // jmp [rip], to the untouched stock counter check
     ];
-    s[0..74].copy_from_slice(&body);
-    // 0x4a: jmp qword ptr [rip+0]; .quad resume_addr
-    s[74..80].copy_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
-    s[80..88].copy_from_slice(&r);
-    s
+    code[..body.len()].copy_from_slice(&body);
+    code[body.len()..].copy_from_slice(&resume_addr.to_le_bytes());
+    code
 }
 
-unsafe fn patch_vis_pacer(target: *mut u8, timeout_cycles: u32) -> Result<*mut u8, String> {
-    let mut actual = [0u8; 38];
-    ptr::copy_nonoverlapping(target, actual.as_mut_ptr(), 38);
-    if actual != EXPECTED_VIS_SPIN_LOOP {
-        return Err("Visualizer.dll spin loop bytes mismatch".to_string());
-    }
-    let stub = VirtualAlloc(
-        ptr::null_mut(),
-        128,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE,
-    ) as *mut u8;
+fn pacer_jump(site: usize, stub: usize) -> Option<[u8; 6]> {
+    let displacement = i32::try_from(stub as i64 - (site as i64 + 5)).ok()?;
+    let [b0, b1, b2, b3] = displacement.to_le_bytes();
+    Some([0xe9, b0, b1, b2, b3, 0x90])
+}
+
+unsafe fn patch_vis_pacer(target: *mut u8, timeout_cycles: u32) -> Result<(), String> {
+    let site = target.add(VIS_PAUSE_OFFSET);
+    let resume = target.add(VIS_RESUME_OFFSET) as usize as u64;
+    let code = build_mwaitx_pacer_stub(resume, timeout_cycles);
+    let stub = DcsCpuOpt_AllocNearPatch(site, code.len());
     if stub.is_null() {
-        return Err("VirtualAlloc failed for pacer stub".to_string());
+        return Err("no nearby executable allocation for Visualizer.dll".to_string());
     }
-    let resume_addr = (target as usize + 38) as u64;
-    let code = build_mwaitx_pacer_stub(resume_addr, timeout_cycles);
+    let Some(patch) = pacer_jump(site as usize, stub as usize) else {
+        VirtualFree(stub as *mut c_void, 0, MEM_RELEASE);
+        return Err("Visualizer.dll wait stub is outside rel32 reach".to_string());
+    };
     ptr::copy_nonoverlapping(code.as_ptr(), stub, code.len());
-    FlushInstructionCache(GetCurrentProcess(), stub as *const c_void, 128);
-
-    let mut old_prot: u32 = 0;
-    if VirtualProtect(target as *mut c_void, 38, PAGE_EXECUTE_READWRITE, &mut old_prot) == 0 {
+    FlushInstructionCache(GetCurrentProcess(), stub as *const c_void, code.len());
+    if !write_guarded_patch(site, &patch, target, &EXPECTED_VIS_SPIN_LOOP) {
         VirtualFree(stub as *mut c_void, 0, MEM_RELEASE);
-        return Err("VirtualProtect failed for Visualizer.dll".to_string());
+        return Err("guarded Visualizer.dll patch refused".to_string());
     }
-    let mut patch = [0x90u8; 38];
-    patch[0..6].copy_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
-    patch[6..14].copy_from_slice(&(stub as usize as u64).to_le_bytes());
-    ptr::copy_nonoverlapping(patch.as_ptr(), target, 38);
-    let mut dummy: u32 = 0;
-    VirtualProtect(target as *mut c_void, 38, old_prot, &mut dummy);
-    FlushInstructionCache(GetCurrentProcess(), target as *const c_void, 38);
-    Ok(stub)
-}
-
-unsafe fn unpatch_vis_pacer(target: *mut u8, stub: *mut u8) {
-    if !target.is_null() {
-        let mut old_prot: u32 = 0;
-        if VirtualProtect(target as *mut c_void, 38, PAGE_EXECUTE_READWRITE, &mut old_prot) != 0 {
-            ptr::copy_nonoverlapping(EXPECTED_VIS_SPIN_LOOP.as_ptr(), target, 38);
-            let mut dummy: u32 = 0;
-            VirtualProtect(target as *mut c_void, 38, old_prot, &mut dummy);
-            FlushInstructionCache(GetCurrentProcess(), target as *const c_void, 38);
-        }
-    }
-    if !stub.is_null() {
-        VirtualFree(stub as *mut c_void, 0, MEM_RELEASE);
-    }
+    Ok(())
 }
 
 const EXPECTED_TERRAIN_LOOKUP_PROLOGUE: [u8; 17] = [
@@ -498,6 +476,7 @@ struct FlatSlot {
     val: u32,
 }
 
+#[derive(Default)]
 struct FlatU32Map {
     slots: Vec<FlatSlot>,
     mask: usize,
@@ -505,14 +484,6 @@ struct FlatU32Map {
 }
 
 impl FlatU32Map {
-    fn new() -> Self {
-        Self {
-            slots: Vec::new(),
-            mask: 0,
-            max_key_val: None,
-        }
-    }
-
     fn reset_with_capacity(&mut self, count: usize) {
         let cap = (count.saturating_mul(2).max(16)).next_power_of_two();
         self.slots.clear();
@@ -561,133 +532,59 @@ impl FlatU32Map {
     }
 }
 
-struct TerrainMapCache {
-    map_obj: usize,
-    head: usize,
-    size: usize,
-    first_node: usize,
-    last_node: usize,
-    map_gen: u64,
+#[derive(Default)]
+struct TerrainWorkspace {
     flat: FlatU32Map,
-    inv_vec_begin: usize,
-    inv_vec_end: usize,
-    inv_fingerprint: u64,
-    inv_map_gen: u64,
-    inverted: std::collections::HashMap<u32, Vec<i32>>,
+    matches: Vec<i32>,
 }
 
-impl TerrainMapCache {
-    fn new() -> Self {
-        Self {
-            map_obj: 0,
-            head: 0,
-            size: usize::MAX,
-            first_node: 0,
-            last_node: 0,
-            map_gen: 0,
-            flat: FlatU32Map::new(),
-            inv_vec_begin: 0,
-            inv_vec_end: 0,
-            inv_fingerprint: 0,
-            inv_map_gen: u64::MAX,
-            inverted: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Ensure `self.flat` mirrors the MSVC `std::unordered_map<u32, u32>` at `r14 + 0xb0..0xb8`.
-    /// Returns `false` if the list structure looks unexpected (caller should fall back to orig).
-    unsafe fn sync_from_msvc_map(&mut self, map_obj: usize) -> bool {
+impl TerrainWorkspace {
+    /// Rebuild the lookup from the current MSVC map. The pointers and size can stay unchanged across edits.
+    unsafe fn read_map(&mut self, map_obj: usize) -> bool {
         let head = ptr::read((map_obj + 0xb0) as *const usize);
         let size = ptr::read((map_obj + 0xb8) as *const usize);
         if head == 0 || size > 2_000_000 {
             return false;
         }
-        let first_node = ptr::read(head as *const usize);
-        let last_node = ptr::read((head + 8) as *const usize);
-        if self.map_obj == map_obj
-            && self.head == head
-            && self.size == size
-            && self.first_node == first_node
-            && self.last_node == last_node
-        {
-            return true;
-        }
-
         self.flat.reset_with_capacity(size);
-        let mut cur = first_node;
-        let mut visited = 0usize;
-        while cur != 0 && cur != head && visited <= size {
-            let key = ptr::read((cur + 0x10) as *const u32);
-            let val = ptr::read((cur + 0x14) as *const u32);
+        let mut node = ptr::read(head as *const usize);
+        for _ in 0..size {
+            if node == 0 || node == head {
+                return false;
+            }
+            let key = ptr::read((node + 0x10) as *const u32);
+            let val = ptr::read((node + 0x14) as *const u32);
             self.flat.insert(key, val);
-            cur = ptr::read(cur as *const usize);
-            visited += 1;
+            node = ptr::read(node as *const usize);
         }
-        if cur != head || visited != size {
-            self.size = usize::MAX;
-            return false;
-        }
-        self.map_obj = map_obj;
-        self.head = head;
-        self.size = size;
-        self.first_node = first_node;
-        self.last_node = last_node;
-        self.map_gen = self.map_gen.wrapping_add(1);
-        TERRAIN_REBUILDS.fetch_add(1, Ordering::Relaxed);
-        true
+        node == head
     }
 
-    /// Ensure `self.inverted` maps `target_val -> sorted deduplicated Vec<chunk_idx>`
-    /// for `(vec_begin..vec_end, self.flat)`. Rebuilds automatically on any structural change.
-    unsafe fn sync_inverted_index(&mut self, vec_begin: usize, vec_end: usize, count: usize) {
-        let mut fp = (vec_begin as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (vec_end as u64);
+    /// Return chunks in the game's iteration order. Do not modify the game set until all inputs were checked.
+    unsafe fn find_matches(&mut self, vec_begin: usize, count: usize, target: u32) -> bool {
+        self.matches.clear();
         for i in 0..count {
             let entry = vec_begin + i * 0x1b0;
-            let it = ptr::read((entry + 0x110) as *const usize);
-            let it_end = ptr::read((entry + 0x118) as *const usize);
-            fp = fp.rotate_left(5)
-                ^ (it as u64).wrapping_mul(0x517C_C1B7_2722_0A95)
-                ^ (it_end as u64);
-            if it < it_end {
-                let first_key = ptr::read(it as *const u32);
-                fp = fp.wrapping_add(first_key as u64);
+            let mut key = ptr::read((entry + 0x110) as *const usize);
+            let end = ptr::read((entry + 0x118) as *const usize);
+            if end < key || (end - key) % 0x40 != 0 || key == 0 && end != 0 {
+                return false;
             }
-        }
-        if self.inv_map_gen == self.map_gen
-            && self.inv_vec_begin == vec_begin
-            && self.inv_vec_end == vec_end
-            && self.inv_fingerprint == fp
-        {
-            return;
-        }
-
-        self.inverted.clear();
-        for i in 0..count {
-            let entry = vec_begin + i * 0x1b0;
-            let mut it = ptr::read((entry + 0x110) as *const usize);
-            let it_end = ptr::read((entry + 0x118) as *const usize);
-            let idx_i32 = i as i32;
-            while it < it_end {
-                let key = ptr::read(it as *const u32);
-                let val = self.flat.get(key);
-                let list = self.inverted.entry(val).or_default();
-                if list.last().copied() != Some(idx_i32) {
-                    list.push(idx_i32);
+            while key < end {
+                if self.flat.get(ptr::read(key as *const u32)) == target {
+                    self.matches.push(i as i32);
+                    break;
                 }
-                it += 0x40;
+                key += 0x40;
             }
         }
-        self.inv_vec_begin = vec_begin;
-        self.inv_vec_end = vec_end;
-        self.inv_fingerprint = fp;
-        self.inv_map_gen = self.map_gen;
-        TERRAIN_INV_REBUILDS.fetch_add(1, Ordering::Relaxed);
+        true
     }
 }
 
 thread_local! {
-    static TERRAIN_CACHE: std::cell::RefCell<TerrainMapCache> =
-        std::cell::RefCell::new(TerrainMapCache::new());
+    // Reuse allocation capacity only. Map values and chunk matches belong to a single call.
+    static TERRAIN_WORKSPACE: std::cell::RefCell<TerrainWorkspace> = Default::default();
 }
 
 type TerrainLookupFn = extern "C" fn(*mut u8, u64);
@@ -704,9 +601,9 @@ static TERRAIN_REBUILDS: AtomicU64 = AtomicU64::new(0);
 static TERRAIN_INV_REBUILDS: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn hook_terrain_lookup(self_ptr: *mut u8, target_val: u64) {
-    let tramp = TERRAIN_TRAMP_PTR.load(Ordering::Relaxed);
-    let ins_ptr = TERRAIN_INSERT_PTR.load(Ordering::Relaxed);
-    if !TERRAIN_OPT_ACTIVE.load(Ordering::Relaxed)
+    let tramp = TERRAIN_TRAMP_PTR.load(Ordering::Acquire);
+    let ins_ptr = TERRAIN_INSERT_PTR.load(Ordering::Acquire);
+    if !TERRAIN_OPT_ACTIVE.load(Ordering::Acquire)
         || self_ptr.is_null()
         || ins_ptr == 0
     {
@@ -744,7 +641,7 @@ extern "C" fn hook_terrain_lookup(self_ptr: *mut u8, target_val: u64) {
             } else {
                 let vec_begin = ptr::read(r15.add(0xd8) as *const usize);
                 let vec_end = ptr::read(r15.add(0xe0) as *const usize);
-                if vec_end < vec_begin {
+                if vec_end < vec_begin || (vec_end - vec_begin) % 0x1b0 != 0 || vec_begin == 0 && vec_end != 0 {
                     false
                 } else {
                     let count = (vec_end - vec_begin) / 0x1b0;
@@ -754,18 +651,20 @@ extern "C" fn hook_terrain_lookup(self_ptr: *mut u8, target_val: u64) {
                         let insert_set: TerrainInsertSetFn = std::mem::transmute(ins_ptr);
                         let set_ptr = self_ptr.add(0x220);
                         let mut local_hits = 0u64;
-                        let synced = TERRAIN_CACHE.with(|cell| {
-                            let mut cache = cell.borrow_mut();
-                            if !cache.sync_from_msvc_map(r14 as usize) {
+                        let synced = TERRAIN_WORKSPACE.with(|cell| {
+                            let Ok(mut workspace) = cell.try_borrow_mut() else { return false };
+                            if !workspace.read_map(r14 as usize) {
                                 return false;
                             }
-                            cache.sync_inverted_index(vec_begin, vec_end, count);
-                            if let Some(indices) = cache.inverted.get(&target_u32) {
-                                for &idx_i32 in indices {
-                                    let mut tmp = [0usize; 2];
-                                    insert_set(set_ptr, &mut tmp, &idx_i32);
-                                    local_hits += 1;
-                                }
+                            TERRAIN_REBUILDS.fetch_add(1, Ordering::Relaxed);
+                            if !workspace.find_matches(vec_begin, count, target_u32) {
+                                return false;
+                            }
+                            TERRAIN_INV_REBUILDS.fetch_add(1, Ordering::Relaxed);
+                            for index in &workspace.matches {
+                                let mut tmp = [0usize; 2];
+                                insert_set(set_ptr, &mut tmp, index);
+                                local_hits += 1;
                             }
                             true
                         });
@@ -787,62 +686,6 @@ extern "C" fn hook_terrain_lookup(self_ptr: *mut u8, target_val: u64) {
     let dt = (qpc_now() - t0).max(0) as u64;
     TERRAIN_CALLS.fetch_add(1, Ordering::Relaxed);
     TERRAIN_QPC.fetch_add(dt, Ordering::Relaxed);
-}
-
-unsafe fn patch_17(
-    target: *mut u8,
-    expected: &[u8; 17],
-    detour_addr: u64,
-) -> Result<*mut u8, String> {
-    let mut actual = [0u8; 17];
-    ptr::copy_nonoverlapping(target, actual.as_mut_ptr(), 17);
-    if &actual != expected {
-        return Err(format!("prologue mismatch at 0x{:x}", target as usize));
-    }
-    let tramp = VirtualAlloc(
-        ptr::null_mut(),
-        64,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE,
-    ) as *mut u8;
-    if tramp.is_null() {
-        return Err("VirtualAlloc failed".to_string());
-    }
-    let resume_addr = (target as usize + 17) as u64;
-    ptr::copy_nonoverlapping(expected.as_ptr(), tramp, 17);
-    let jmp_back: [u8; 6] = [0xFF, 0x25, 0x00, 0x00, 0x00, 0x00];
-    ptr::copy_nonoverlapping(jmp_back.as_ptr(), tramp.add(17), 6);
-    ptr::copy_nonoverlapping(resume_addr.to_le_bytes().as_ptr(), tramp.add(23), 8);
-    FlushInstructionCache(GetCurrentProcess(), tramp as *const c_void, 64);
-
-    let mut old_prot: u32 = 0;
-    if VirtualProtect(target as *mut c_void, 17, PAGE_EXECUTE_READWRITE, &mut old_prot) == 0 {
-        VirtualFree(tramp as *mut c_void, 0, MEM_RELEASE);
-        return Err("VirtualProtect failed".to_string());
-    }
-    let mut patch = [0x90u8; 17];
-    patch[0..6].copy_from_slice(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
-    patch[6..14].copy_from_slice(&detour_addr.to_le_bytes());
-    ptr::copy_nonoverlapping(patch.as_ptr(), target, 17);
-    let mut dummy: u32 = 0;
-    VirtualProtect(target as *mut c_void, 17, old_prot, &mut dummy);
-    FlushInstructionCache(GetCurrentProcess(), target as *const c_void, 17);
-    Ok(tramp)
-}
-
-unsafe fn unpatch_17(target: *mut u8, expected: &[u8; 17], tramp: *mut u8) {
-    if !target.is_null() {
-        let mut old_prot: u32 = 0;
-        if VirtualProtect(target as *mut c_void, 17, PAGE_EXECUTE_READWRITE, &mut old_prot) != 0 {
-            ptr::copy_nonoverlapping(expected.as_ptr(), target, 17);
-            let mut dummy: u32 = 0;
-            VirtualProtect(target as *mut c_void, 17, old_prot, &mut dummy);
-            FlushInstructionCache(GetCurrentProcess(), target as *const c_void, 17);
-        }
-    }
-    if !tramp.is_null() {
-        VirtualFree(tramp as *mut c_void, 0, MEM_RELEASE);
-    }
 }
 
 // ============================================================================
@@ -907,84 +750,6 @@ static ROUTE_TRAMP_PTR: AtomicU64 = AtomicU64::new(0);
 static ROUTE_OPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static ROUTE_CALLS: AtomicU64 = AtomicU64::new(0);
 static ROUTE_QPC: AtomicU64 = AtomicU64::new(0);
-
-const ROUTE_CHUNK_SIZE: usize = 64;
-const ROUTE_CACHE_SLOTS: usize = 256;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ChunkAabb {
-    min_x: f64,
-    max_x: f64,
-    min_z: f64,
-    max_z: f64,
-}
-
-struct RouteCacheEntry {
-    begin_addr: usize,
-    len: usize,
-    fp: [u64; 6],
-    chunks: Vec<ChunkAabb>,
-}
-
-impl RouteCacheEntry {
-    fn empty() -> Self {
-        Self {
-            begin_addr: 0,
-            len: 0,
-            fp: [0; 6],
-            chunks: Vec::new(),
-        }
-    }
-}
-
-#[inline]
-fn route_fingerprint(nodes: &[PathNode]) -> [u64; 6] {
-    let n = nodes.len();
-    let first = unsafe { nodes.get_unchecked(0) };
-    let mid = unsafe { nodes.get_unchecked(n >> 1) };
-    let last = unsafe { nodes.get_unchecked(n - 1) };
-    [
-        first.s.to_bits(),
-        first.x.to_bits(),
-        mid.x.to_bits(),
-        last.s.to_bits(),
-        last.x.to_bits(),
-        last.z.to_bits(),
-    ]
-}
-
-fn build_route_chunks(nodes: &[PathNode], out: &mut Vec<ChunkAabb>) {
-    out.clear();
-    let seg_count = nodes.len().saturating_sub(1);
-    let num_chunks = (seg_count + ROUTE_CHUNK_SIZE - 1) / ROUTE_CHUNK_SIZE;
-    out.reserve(num_chunks);
-    let mut c = 0usize;
-    while c < seg_count {
-        let end_node = (c + ROUTE_CHUNK_SIZE).min(seg_count);
-        let first = unsafe { nodes.get_unchecked(c) };
-        let mut min_x = first.x;
-        let mut max_x = first.x;
-        let mut min_z = first.z;
-        let mut max_z = first.z;
-        let mut k = c + 1;
-        while k <= end_node {
-            let nd = unsafe { nodes.get_unchecked(k) };
-            if nd.x < min_x { min_x = nd.x; }
-            if nd.x > max_x { max_x = nd.x; }
-            if nd.z < min_z { min_z = nd.z; }
-            if nd.z > max_z { max_z = nd.z; }
-            k += 1;
-        }
-        out.push(ChunkAabb { min_x, max_x, min_z, max_z });
-        c += ROUTE_CHUNK_SIZE;
-    }
-}
-
-thread_local! {
-    static ROUTE_CHUNK_CACHE: std::cell::RefCell<Vec<RouteCacheEntry>> =
-        std::cell::RefCell::new((0..ROUTE_CACHE_SLOTS).map(|_| RouteCacheEntry::empty()).collect());
-}
 
 unsafe fn find_transport_route_fn(base: usize, image_size: usize) -> Result<usize, String> {
     let pe_hdr = base + ptr::read_unaligned((base + 0x3c) as *const i32) as usize;
@@ -1087,123 +852,70 @@ fn find_closest_point_fast(
     let mut best_f5 = 0.0f64;
     let mut best_f6 = 0.0f64;
 
-    macro_rules! scan_range {
-        ($from:expr, $to:expr) => {{
-            let mut broke = false;
-            let mut i = $from;
-            let end_i = $to;
-            while i < end_i {
-                let a = unsafe { nodes.get_unchecked(i) };
-                let b = unsafe { nodes.get_unchecked(i + 1) };
-                i += 1;
-
-                let ax = a.x;
-                let bx = b.x;
-                if (ax < qx_lo && bx < qx_lo) || (ax > qx_hi && bx > qx_hi) {
-                    continue;
-                }
-                let az = a.z;
-                let bz = b.z;
-                if (az < qz_lo && bz < qz_lo) || (az > qz_hi && bz > qz_hi) {
-                    continue;
-                }
-
-                let abx = bx - ax;
-                let abz = bz - az;
-                let len_sq = abx * abx + abz * abz;
-                let (t, px, pz) = if len_sq > 0.0 {
-                    let dot = (qx - ax) * abx + (qz - az) * abz;
-                    if dot <= 0.0 {
-                        (0.0, ax, az)
-                    } else if dot >= len_sq {
-                        (1.0, bx, bz)
-                    } else {
-                        let t = dot / len_sq;
-                        (t, ax + t * abx, az + t * abz)
-                    }
-                } else {
-                    (1.0, bx, bz)
-                };
-
-                let dx = qx - px;
-                let dz = qz - pz;
-                let d_sq = dx * dx + dz * dz;
-                if d_sq < best_dist_sq {
-                    if start_s > 0.0 && a.seg_idx > anchor_seg_idx {
-                        best_s = anchor.s + 0.0001;
-                        best_seg_idx = anchor.seg_idx;
-                        best_x = anchor.x;
-                        best_z = anchor.z;
-                        best_f4 = anchor.f4;
-                        best_f5 = anchor.f5;
-                        best_f6 = anchor.f6;
-                        broke = true;
-                        break;
-                    }
-                    best_dist_sq = d_sq;
-                    let pad = d_sq.sqrt() * 1.000000000001;
-                    qx_lo = qx - pad;
-                    qx_hi = qx + pad;
-                    qz_lo = qz - pad;
-                    qz_hi = qz + pad;
-
-                    best_seg_idx = a.seg_idx;
-                    best_s = a.s + (b.s - a.s) * t;
-                    best_x = px;
-                    best_z = pz;
-                    best_f4 = a.f4 + (b.f4 - a.f4) * t;
-                    best_f5 = a.f5 + (b.f5 - a.f5) * t;
-                    best_f6 = a.f6 + (b.f6 - a.f6) * t;
-                    if d_sq == 0.0 {
-                        broke = true;
-                        break;
-                    }
-                }
-            }
-            broke
-        }};
-    }
-
-    let seg_count = n - 1;
-    if seg_count - start_i >= ROUTE_CHUNK_SIZE * 2 {
-        let begin_addr = nodes.as_ptr() as usize;
-        let fp = route_fingerprint(nodes);
-        let slot_idx = ((begin_addr >> 6) ^ n) & (ROUTE_CACHE_SLOTS - 1);
-        let first_chunk = start_i / ROUTE_CHUNK_SIZE;
-        let first_chunk_end = ((first_chunk + 1) * ROUTE_CHUNK_SIZE).min(seg_count);
-
-        if !scan_range!(start_i, first_chunk_end) && first_chunk_end < seg_count {
-            ROUTE_CHUNK_CACHE.with(|cell| {
-                let mut table = cell.borrow_mut();
-                let entry = unsafe { table.get_unchecked_mut(slot_idx) };
-                if entry.begin_addr != begin_addr || entry.len != n || entry.fp != fp {
-                    build_route_chunks(nodes, &mut entry.chunks);
-                    entry.begin_addr = begin_addr;
-                    entry.len = n;
-                    entry.fp = fp;
-                }
-                let chunks = &entry.chunks;
-                let mut c = first_chunk + 1;
-                let num_chunks = chunks.len();
-                while c < num_chunks {
-                    let bb = unsafe { chunks.get_unchecked(c) };
-                    if bb.max_x >= qx_lo
-                        && bb.min_x <= qx_hi
-                        && bb.max_z >= qz_lo
-                        && bb.min_z <= qz_hi
-                    {
-                        let c_from = c * ROUTE_CHUNK_SIZE;
-                        let c_to = (c_from + ROUTE_CHUNK_SIZE).min(seg_count);
-                        if scan_range!(c_from, c_to) {
-                            break;
-                        }
-                    }
-                    c += 1;
-                }
-            });
+    // Read the current route on every call. The game may change a path in place.
+    for segment in nodes[start_i..].windows(2) {
+        let a = &segment[0];
+        let b = &segment[1];
+        let ax = a.x;
+        let bx = b.x;
+        if (ax < qx_lo && bx < qx_lo) || (ax > qx_hi && bx > qx_hi) {
+            continue;
         }
-    } else {
-        let _ = scan_range!(start_i, seg_count);
+        let az = a.z;
+        let bz = b.z;
+        if (az < qz_lo && bz < qz_lo) || (az > qz_hi && bz > qz_hi) {
+            continue;
+        }
+
+        let abx = bx - ax;
+        let abz = bz - az;
+        let len_sq = abx * abx + abz * abz;
+        let (t, px, pz) = if len_sq > 0.0 {
+            let dot = (qx - ax) * abx + (qz - az) * abz;
+            if dot <= 0.0 {
+                (0.0, ax, az)
+            } else if dot >= len_sq {
+                (1.0, bx, bz)
+            } else {
+                let t = dot / len_sq;
+                (t, ax + t * abx, az + t * abz)
+            }
+        } else {
+            (1.0, bx, bz)
+        };
+
+        let dx = qx - px;
+        let dz = qz - pz;
+        let d_sq = dx * dx + dz * dz;
+        if d_sq < best_dist_sq {
+            if start_s > 0.0 && a.seg_idx > anchor_seg_idx {
+                best_s = anchor.s + 0.0001;
+                best_seg_idx = anchor.seg_idx;
+                best_x = anchor.x;
+                best_z = anchor.z;
+                best_f4 = anchor.f4;
+                best_f5 = anchor.f5;
+                best_f6 = anchor.f6;
+                break;
+            }
+            best_dist_sq = d_sq;
+            let pad = d_sq.sqrt() * 1.000000000001;
+            qx_lo = qx - pad;
+            qx_hi = qx + pad;
+            qz_lo = qz - pad;
+            qz_hi = qz + pad;
+
+            best_seg_idx = a.seg_idx;
+            best_s = a.s + (b.s - a.s) * t;
+            best_x = px;
+            best_z = pz;
+            best_f4 = a.f4 + (b.f4 - a.f4) * t;
+            best_f5 = a.f5 + (b.f5 - a.f5) * t;
+            best_f6 = a.f6 + (b.f6 - a.f6) * t;
+            if d_sq == 0.0 {
+                break;
+            }
+        }
     }
 
     let dx = best_x - qx;
@@ -1232,7 +944,7 @@ extern "C" fn hook_transport_route(
     start_s: f64,
 ) -> *mut PathNode {
     let tramp = ROUTE_TRAMP_PTR.load(Ordering::Acquire);
-    if !ROUTE_OPT_ACTIVE.load(Ordering::Relaxed)
+    if !ROUTE_OPT_ACTIVE.load(Ordering::Acquire)
         || this_ptr.is_null()
         || out_node.is_null()
         || query_xz.is_null()
@@ -1267,7 +979,7 @@ extern "C" fn hook_transport_route(
     out_node
 }
 
-fn try_install_transport_route_opt() -> Option<(*mut u8, *mut u8, String)> {
+fn try_install_transport_route_opt() -> Option<(*mut u8, String)> {
     let hmod = unsafe { GetModuleHandleA(b"Transport.dll\0".as_ptr()) };
     if hmod.is_null() {
         return None;
@@ -1275,21 +987,20 @@ fn try_install_transport_route_opt() -> Option<(*mut u8, *mut u8, String)> {
     let base = hmod as usize;
     let sz = match unsafe { verified_image_size(base, 0x6afebf8b, 0x367000) } {
         Some(s) => s,
-        None => return Some((ptr::null_mut(), ptr::null_mut(), "skip(unverified_dcs_build)".to_string())),
+        None => return Some((ptr::null_mut(), "skip(unverified_dcs_build)".to_string())),
     };
     let fn_addr = match unsafe { find_transport_route_fn(base, sz) } {
         Ok(a) => a,
-        Err(e) => return Some((ptr::null_mut(), ptr::null_mut(), format!("skip({})", e))),
+        Err(e) => return Some((ptr::null_mut(), format!("skip({})", e))),
     };
     let tt = fn_addr as *mut u8;
     let detour = hook_transport_route as *const () as usize as u64;
-    match unsafe { patch_15(tt, &EXPECTED_TRANSPORT_ROUTE_PROLOGUE, detour) } {
-        Ok(tramp) => {
-            ROUTE_TRAMP_PTR.store(tramp as u64, Ordering::Release);
+    match unsafe { patch_inline(tt, &EXPECTED_TRANSPORT_ROUTE_PROLOGUE, detour, &ROUTE_TRAMP_PTR) } {
+        Ok(()) => {
             ROUTE_OPT_ACTIVE.store(true, Ordering::Release);
-            Some((tt, tramp, format!("fast_route@0x{:x}", fn_addr - base)))
+            Some((tt, format!("fast_route@0x{:x}", fn_addr - base)))
         }
-        Err(e) => Some((ptr::null_mut(), ptr::null_mut(), format!("err({})", e))),
+        Err(e) => Some((ptr::null_mut(), format!("err({})", e))),
     }
 }
 
@@ -1376,29 +1087,20 @@ struct Config {
 }
 
 struct HookState {
-    installed: bool,
     mode: CullMode,
     max_hz: i64,
     log_interval_sec: i64,
     log_path: PathBuf,
     addrs: Option<ResolvedAddrs>,
-    snd_target: *mut u8,
-    snd_tramp: *mut u8,
-    upd_target: *mut u8,
-    upd_tramp: *mut u8,
-    vis_pacer_target: *mut u8,
-    vis_pacer_stub: *mut u8,
     terrain_opt_wanted: bool,
     terrain_last_probe_qpc: i64,
     terrain_target: *mut u8,
-    terrain_tramp: *mut u8,
     route_opt_wanted: bool,
     route_last_probe_qpc: i64,
     route_target: *mut u8,
-    route_tramp: *mut u8,
     zlib_opt_wanted: bool,
     zlib_last_probe_qpc: i64,
-    zlib_installed: Option<zlib_opt::Installed>,
+    zlib_installed: bool,
     qpc_freq: i64,
     window_start_qpc: i64,
     last_exec_qpc: i64,
@@ -1700,7 +1402,7 @@ fn flush_window(st: &mut HookState, now_qpc: i64, reason: &str) {
     let zlib_qpc = zlib_opt::ZLIB_FAST_QPC.swap(0, Ordering::Relaxed);
     let zlib_fallback = zlib_opt::ZLIB_FALLBACK.swap(0, Ordering::Relaxed);
     let zlib_pass = zlib_opt::ZLIB_PASS.swap(0, Ordering::Relaxed);
-    let zlib_suffix = if st.zlib_installed.is_some() || zlib_fast > 0 {
+    let zlib_suffix = if st.zlib_installed || zlib_fast > 0 {
         format!(
             " zlib_fast={} zlib_fast_mb={:.1} zlib_fast_ms={:.1} zlib_fallback={} zlib_pass={}",
             zlib_fast,
@@ -1741,12 +1443,12 @@ fn flush_window(st: &mut HookState, now_qpc: i64, reason: &str) {
 }
 
 extern "C" fn hook_update_source(src: *mut u8) {
-    let tramp = UPD_TRAMP_PTR.load(Ordering::Relaxed);
+    let tramp = UPD_TRAMP_PTR.load(Ordering::Acquire);
     if tramp == 0 {
         return;
     }
 
-    if CULL_ENABLED.load(Ordering::Relaxed)
+    if CULL_ENABLED.load(Ordering::Acquire)
         && IN_SND_PROCESS.load(Ordering::Relaxed)
         && !src.is_null()
     {
@@ -1859,20 +1561,12 @@ extern "C" fn hook_snd_process() {
     }
 }
 
-unsafe fn patch_15(
+unsafe fn patch_inline<const N: usize>(
     target: *mut u8,
-    expected: &[u8; 15],
-    detour_addr: u64,
-) -> Result<*mut u8, String> {
-    let mut actual = [0u8; 15];
-    ptr::copy_nonoverlapping(target, actual.as_mut_ptr(), 15);
-    if &actual != expected {
-        return Err(format!(
-            "prologue mismatch at 0x{:x} (DCS version changed?): {:02x?}",
-            target as usize, actual
-        ));
-    }
-
+    expected: &[u8; N],
+    detour: u64,
+    original: &AtomicU64,
+) -> Result<(), String> {
     let tramp = VirtualAlloc(
         ptr::null_mut(),
         64,
@@ -1880,64 +1574,33 @@ unsafe fn patch_15(
         PAGE_EXECUTE_READWRITE,
     ) as *mut u8;
     if tramp.is_null() {
-        return Err("VirtualAlloc failed".to_string());
+        return Err("VirtualAlloc failed for the trampoline".to_string());
     }
-
-    let resume_addr = (target as usize + 15) as u64;
-    ptr::copy_nonoverlapping(expected.as_ptr(), tramp, 15);
-    let jmp_back: [u8; 6] = [0xFF, 0x25, 0x00, 0x00, 0x00, 0x00];
-    ptr::copy_nonoverlapping(jmp_back.as_ptr(), tramp.add(15), 6);
-    ptr::copy_nonoverlapping(resume_addr.to_le_bytes().as_ptr(), tramp.add(21), 8);
+    let jmp: [u8; 6] = [0xff, 0x25, 0, 0, 0, 0];
+    let resume_addr = (target as usize + N) as u64;
+    ptr::copy_nonoverlapping(expected.as_ptr(), tramp, N);
+    ptr::copy_nonoverlapping(jmp.as_ptr(), tramp.add(N), jmp.len());
+    ptr::copy_nonoverlapping(resume_addr.to_le_bytes().as_ptr(), tramp.add(N + jmp.len()), 8);
     FlushInstructionCache(GetCurrentProcess(), tramp as *const c_void, 64);
 
-    let mut old_prot: u32 = 0;
-    if VirtualProtect(
-        target as *mut c_void,
-        15,
-        PAGE_EXECUTE_READWRITE,
-        &mut old_prot,
-    ) == 0
-    {
+    let mut patch = [0x90u8; N];
+    patch[..6].copy_from_slice(&jmp);
+    patch[6..14].copy_from_slice(&detour.to_le_bytes());
+    // Threads can run as soon as the guarded write returns. Publish the callable original first.
+    original.store(tramp as u64, Ordering::Release);
+    if !write_guarded_patch(target, &patch, target, expected) {
+        // A refused single-site write installed no jump, so no caller can use this trampoline.
+        original.store(0, Ordering::Release);
         VirtualFree(tramp as *mut c_void, 0, MEM_RELEASE);
-        return Err("VirtualProtect failed".to_string());
+        return Err(format!("guarded patch refused at 0x{:x}", target as usize));
     }
-    let mut patch = [0u8; 15];
-    patch[0..6].copy_from_slice(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
-    patch[6..14].copy_from_slice(&detour_addr.to_le_bytes());
-    patch[14] = 0x90;
-    ptr::copy_nonoverlapping(patch.as_ptr(), target, 15);
-    let mut dummy: u32 = 0;
-    VirtualProtect(target as *mut c_void, 15, old_prot, &mut dummy);
-    FlushInstructionCache(GetCurrentProcess(), target as *const c_void, 15);
-
-    Ok(tramp)
-}
-
-unsafe fn unpatch_15(target: *mut u8, expected: &[u8; 15], tramp: *mut u8) {
-    if !target.is_null() {
-        let mut old_prot: u32 = 0;
-        if VirtualProtect(
-            target as *mut c_void,
-            15,
-            PAGE_EXECUTE_READWRITE,
-            &mut old_prot,
-        ) != 0
-        {
-            ptr::copy_nonoverlapping(expected.as_ptr(), target, 15);
-            let mut dummy: u32 = 0;
-            VirtualProtect(target as *mut c_void, 15, old_prot, &mut dummy);
-            FlushInstructionCache(GetCurrentProcess(), target as *const c_void, 15);
-        }
-    }
-    if !tramp.is_null() {
-        VirtualFree(tramp as *mut c_void, 0, MEM_RELEASE);
-    }
+    Ok(())
 }
 
 /// Attempt to locate and hook `edterrain4.dll` lookup loop (`FUN_15870`).
 /// Returns `Some((target, tramp, status_msg))` when `edterrain4.dll` is loaded and patched,
 /// or `None` if `edterrain4.dll` is not loaded yet (will be retried lazily).
-fn try_install_terrain_opt() -> Option<(*mut u8, *mut u8, String)> {
+fn try_install_terrain_opt() -> Option<(*mut u8, String)> {
     let hterr = unsafe { GetModuleHandleA(b"edterrain4.dll\0".as_ptr()) };
     if hterr.is_null() {
         return None;
@@ -1945,41 +1608,39 @@ fn try_install_terrain_opt() -> Option<(*mut u8, *mut u8, String)> {
     let tbase = hterr as usize;
     let tsz = match unsafe { verified_image_size(tbase, 0x6ae721cb, 0x14c2000) } {
         Some(s) => s,
-        None => return Some((ptr::null_mut(), ptr::null_mut(), "skip(unverified_dcs_build)".to_string())),
+        None => return Some((ptr::null_mut(), "skip(unverified_dcs_build)".to_string())),
     };
     let (fn_addr, ins_addr) = match unsafe { find_terrain_lookup_fn(tbase, tsz) } {
         Ok(pair) => pair,
-        Err(e) => return Some((ptr::null_mut(), ptr::null_mut(), format!("skip({})", e))),
+        Err(e) => return Some((ptr::null_mut(), format!("skip({})", e))),
     };
     let tt = fn_addr as *mut u8;
     let detour = hook_terrain_lookup as *const () as usize as u64;
-    match unsafe { patch_17(tt, &EXPECTED_TERRAIN_LOOKUP_PROLOGUE, detour) } {
-        Ok(tramp) => {
+    match unsafe { patch_inline(tt, &EXPECTED_TERRAIN_LOOKUP_PROLOGUE, detour, &TERRAIN_TRAMP_PTR) } {
+        Ok(()) => {
             TERRAIN_INSERT_PTR.store(ins_addr as u64, Ordering::Release);
-            TERRAIN_TRAMP_PTR.store(tramp as u64, Ordering::Release);
             TERRAIN_OPT_ACTIVE.store(true, Ordering::Release);
             Some((
                 tt,
-                tramp,
                 format!("flat_hash@0x{:x}(ins=0x{:x})", fn_addr - tbase, ins_addr - tbase),
             ))
         }
-        Err(e) => Some((ptr::null_mut(), ptr::null_mut(), format!("err({})", e))),
+        Err(e) => Some((ptr::null_mut(), format!("err({})", e))),
     }
 }
 
 /// Attempt to redirect edCore.dll's zlib1.dll inflate imports (`ZlibInflateOpt`).
 /// Returns `None` while edCore.dll / zlib1.dll are not loaded yet (retried lazily), otherwise the installed
 /// state (if any) and a status string for the log.
-fn try_install_zlib_opt() -> Option<(Option<zlib_opt::Installed>, String)> {
+fn try_install_zlib_opt() -> Option<(bool, String)> {
     match zlib_opt::try_install() {
         Ok(None) => None,
-        Ok(Some((inst, msg))) => Some((Some(inst), msg)),
-        Err(e) => Some((None, format!("skip({})", e))),
+        Ok(Some(msg)) => Some((true, msg)),
+        Err(e) => Some((false, format!("skip({})", e))),
     }
 }
 
-fn install_sound(cfg: &Config) -> Result<(ResolvedAddrs, [*mut u8; 4]), String> {
+fn install_sound(cfg: &Config) -> Result<ResolvedAddrs, String> {
     let hmod = unsafe { GetModuleHandleA(b"ed_sound.dll\0".as_ptr()) };
     if hmod.is_null() {
         return Err("ed_sound.dll not loaded".to_string());
@@ -1996,39 +1657,22 @@ fn install_sound(cfg: &Config) -> Result<(ResolvedAddrs, [*mut u8; 4]), String> 
     let addrs = unsafe { resolve_from_snd_process(base, image_size, snd_target as usize)? };
     FRAME_COUNTER_ADDR.store(addrs.frame_counter as u64, Ordering::Release);
 
-    let (upd_target, upd_tramp) = if cfg.mode.uses_cull() {
+    if cfg.mode.uses_cull() {
         unsafe {
             CULL_MASK = cfg.cull_mask;
             SAFE_MARGIN_M = cfg.safe_margin_m;
+            let target = addrs.update_source as *mut u8;
+            let detour = hook_update_source as *const () as usize as u64;
+            patch_inline(target, &EXPECTED_UPDATE_SRC_PROLOGUE, detour, &UPD_TRAMP_PTR)?;
         }
-        let ut = addrs.update_source as *mut u8;
-        let detour = hook_update_source as *const () as usize as u64;
-        let tramp = unsafe { patch_15(ut, &EXPECTED_UPDATE_SRC_PROLOGUE, detour)? };
-        UPD_TRAMP_PTR.store(tramp as u64, Ordering::Release);
-        (ut, tramp)
-    } else {
-        (ptr::null_mut(), ptr::null_mut())
-    };
+    }
 
+    let detour = hook_snd_process as *const () as usize as u64;
+    // If this second patch is refused, the first stays a pass-through for the rest of the process.
+    // Restoring it here would race callers already executing its trampoline.
+    unsafe { patch_inline(snd_target, &EXPECTED_SND_PROCESS_PROLOGUE, detour, &SND_TRAMP_PTR)? };
     CULL_ENABLED.store(cfg.mode.uses_cull(), Ordering::Release);
-
-    let snd_detour = hook_snd_process as *const () as usize as u64;
-    let snd_tramp = unsafe {
-        match patch_15(snd_target, &EXPECTED_SND_PROCESS_PROLOGUE, snd_detour) {
-            Ok(t) => t,
-            Err(e) => {
-                if !upd_target.is_null() {
-                    CULL_ENABLED.store(false, Ordering::Release);
-                    UPD_TRAMP_PTR.store(0, Ordering::Release);
-                    unpatch_15(upd_target, &EXPECTED_UPDATE_SRC_PROLOGUE, upd_tramp);
-                }
-                return Err(e);
-            }
-        }
-    };
-    SND_TRAMP_PTR.store(snd_tramp as u64, Ordering::Release);
-
-    Ok((addrs, [snd_target, snd_tramp, upd_target, upd_tramp]))
+    Ok(addrs)
 }
 
 fn install_hook() -> Result<String, String> {
@@ -2047,97 +1691,79 @@ fn install_hook() -> Result<String, String> {
     }
 
     let now = qpc_now();
-    let (addrs, [snd_target, snd_tramp, upd_target, upd_tramp], sound_status) = if cfg.sound_cull {
+    let (addrs, sound_status) = if cfg.sound_cull {
         match install_sound(&cfg) {
-            Ok((addrs, installed)) => (Some(addrs), installed, "on".to_string()),
-            Err(e) => (None, [ptr::null_mut(); 4], format!("skip({e})")),
+            Ok(addrs) => (Some(addrs), "on".to_string()),
+            Err(e) => (None, format!("skip({e})")),
         }
     } else {
-        (None, [ptr::null_mut(); 4], "disabled".to_string())
+        (None, "disabled".to_string())
     };
 
-    let (vis_pacer_target, vis_pacer_stub, pacer_status) = if cfg.low_power_pacer {
-        if !cpu_supports_monitorx() {
-            (ptr::null_mut(), ptr::null_mut(), "no_monitorx".to_string())
+    let pacer_status = if !cfg.low_power_pacer {
+        "disabled".to_string()
+    } else if !cpu_supports_monitorx() {
+        "no_monitorx".to_string()
+    } else {
+        let hvis = unsafe { GetModuleHandleA(b"Visualizer.dll\0".as_ptr()) };
+        if hvis.is_null() {
+            "no_visualizer".to_string()
         } else {
-            let hvis = unsafe { GetModuleHandleA(b"Visualizer.dll\0".as_ptr()) };
-            if hvis.is_null() {
-                (ptr::null_mut(), ptr::null_mut(), "no_visualizer".to_string())
-            } else {
-                let vbase = hvis as usize;
-                match unsafe { pe_image_size(vbase) }
-                    .ok_or_else(|| "bad_pe".to_string())
-                    .and_then(|vsz| unsafe { find_visualizer_spin_loop(vbase, vsz) })
-                {
-                    Ok(vaddr) => {
-                        let vt = vaddr as *mut u8;
-                        match unsafe { patch_vis_pacer(vt, cfg.pacer_timeout_cycles) } {
-                            Ok(stub) => (
-                                vt,
-                                stub,
-                                format!("mwaitx@0x{:x}(cycles={})", vaddr - vbase, cfg.pacer_timeout_cycles),
-                            ),
-                            Err(e) => (ptr::null_mut(), ptr::null_mut(), format!("err({})", e)),
-                        }
-                    }
-                    Err(e) => (ptr::null_mut(), ptr::null_mut(), format!("skip({})", e)),
-                }
+            let vbase = hvis as usize;
+            match unsafe { pe_image_size(vbase) }
+                .ok_or_else(|| "bad_pe".to_string())
+                .and_then(|vsz| unsafe { find_visualizer_spin_loop(vbase, vsz) })
+            {
+                Ok(vaddr) => match unsafe { patch_vis_pacer(vaddr as *mut u8, cfg.pacer_timeout_cycles) } {
+                    Ok(()) => format!("mwaitx@0x{:x}(cycles={})", vaddr - vbase, cfg.pacer_timeout_cycles),
+                    Err(e) => format!("err({e})"),
+                },
+                Err(e) => format!("skip({e})"),
             }
         }
-    } else {
-        (ptr::null_mut(), ptr::null_mut(), "disabled".to_string())
     };
 
-    let (terrain_target, terrain_tramp, terrain_opt_wanted, terrain_status) = if cfg.terrain_lookup_opt {
+    let (terrain_target, terrain_opt_wanted, terrain_status) = if cfg.terrain_lookup_opt {
         match try_install_terrain_opt() {
-            Some((tt, tr, msg)) => (tt, tr, false, msg),
-            None => (ptr::null_mut(), ptr::null_mut(), true, "deferred".to_string()),
+            Some((tt, msg)) => (tt, false, msg),
+            None => (ptr::null_mut(), true, "deferred".to_string()),
         }
     } else {
-        (ptr::null_mut(), ptr::null_mut(), false, "disabled".to_string())
+        (ptr::null_mut(), false, "disabled".to_string())
     };
 
-    let (route_target, route_tramp, route_opt_wanted, route_status) = if cfg.transport_route_opt {
+    let (route_target, route_opt_wanted, route_status) = if cfg.transport_route_opt {
         match try_install_transport_route_opt() {
-            Some((rt, rr, msg)) => (rt, rr, false, msg),
-            None => (ptr::null_mut(), ptr::null_mut(), true, "deferred".to_string()),
+            Some((rt, msg)) => (rt, false, msg),
+            None => (ptr::null_mut(), true, "deferred".to_string()),
         }
     } else {
-        (ptr::null_mut(), ptr::null_mut(), false, "disabled".to_string())
+        (ptr::null_mut(), false, "disabled".to_string())
     };
 
     let (zlib_installed, zlib_opt_wanted, zlib_status) = if cfg.zlib_inflate_opt {
         match try_install_zlib_opt() {
             Some((inst, msg)) => (inst, false, msg),
-            None => (None, true, "deferred".to_string()),
+            None => (false, true, "deferred".to_string()),
         }
     } else {
-        (None, false, "disabled".to_string())
+        (false, false, "disabled".to_string())
     };
 
     {
         let mut guard = STATE.lock().unwrap();
         *guard = Some(HookState {
-            installed: true,
             mode: cfg.mode,
             max_hz: cfg.max_hz,
             log_interval_sec: cfg.log_interval_sec,
             log_path: cfg.log_path.clone(),
             addrs,
-            snd_target,
-            snd_tramp,
-            upd_target,
-            upd_tramp,
-            vis_pacer_target,
-            vis_pacer_stub,
             terrain_opt_wanted,
             terrain_last_probe_qpc: now,
             terrain_target,
-            terrain_tramp,
             route_opt_wanted,
             route_last_probe_qpc: now,
             route_target,
-            route_tramp,
             zlib_opt_wanted,
             zlib_last_probe_qpc: now,
             zlib_installed,
@@ -2169,60 +1795,10 @@ fn install_hook() -> Result<String, String> {
     Ok(msg)
 }
 
-fn uninstall_hook() {
-    CULL_ENABLED.store(false, Ordering::Release);
-    TERRAIN_OPT_ACTIVE.store(false, Ordering::Release);
-    ROUTE_OPT_ACTIVE.store(false, Ordering::Release);
-    HOOK_ACTIVE.store(false, Ordering::Release);
-    if let Ok(mut guard) = STATE.lock() {
-        if let Some(st) = guard.as_mut() {
-            if st.installed {
-                let now = qpc_now();
-                flush_window(st, now, "shutdown");
-                if let Some(inst) = st.zlib_installed.take() {
-                    zlib_opt::uninstall(&inst);
-                }
-                unsafe {
-                    if !st.route_target.is_null() {
-                        ROUTE_TRAMP_PTR.store(0, Ordering::Release);
-                        unpatch_15(st.route_target, &EXPECTED_TRANSPORT_ROUTE_PROLOGUE, st.route_tramp);
-                        st.route_target = ptr::null_mut();
-                        st.route_tramp = ptr::null_mut();
-                    }
-
-                    if !st.terrain_target.is_null() {
-                        TERRAIN_TRAMP_PTR.store(0, Ordering::Release);
-                        unpatch_17(st.terrain_target, &EXPECTED_TERRAIN_LOOKUP_PROLOGUE, st.terrain_tramp);
-                        st.terrain_target = ptr::null_mut();
-                        st.terrain_tramp = ptr::null_mut();
-                    }
-
-                    if !st.vis_pacer_target.is_null() {
-                        unpatch_vis_pacer(st.vis_pacer_target, st.vis_pacer_stub);
-                        st.vis_pacer_target = ptr::null_mut();
-                        st.vis_pacer_stub = ptr::null_mut();
-                    }
-
-                    SND_TRAMP_PTR.store(0, Ordering::Release);
-                    unpatch_15(st.snd_target, &EXPECTED_SND_PROCESS_PROLOGUE, st.snd_tramp);
-                    st.snd_tramp = ptr::null_mut();
-
-                    if !st.upd_target.is_null() {
-                        UPD_TRAMP_PTR.store(0, Ordering::Release);
-                        unpatch_15(st.upd_target, &EXPECTED_UPDATE_SRC_PROLOGUE, st.upd_tramp);
-                        st.upd_tramp = ptr::null_mut();
-                    }
-                }
-                st.installed = false;
-            }
-        }
-    }
-}
-
 /// Returns true when the hooks are currently installed in this process.
 fn hooks_installed() -> bool {
     match STATE.lock() {
-        Ok(guard) => guard.as_ref().map_or(false, |st| st.installed),
+        Ok(guard) => guard.is_some(),
         Err(_) => HOOK_ACTIVE.load(Ordering::Acquire),
     }
 }
@@ -2266,9 +1842,8 @@ pub extern "C" fn DcsCpuOpt_Tick(_lua_state: *mut c_void) -> i32 {
                 && (t1 - st.terrain_last_probe_qpc) >= st.qpc_freq * 5
             {
                 st.terrain_last_probe_qpc = t1;
-                if let Some((tt, tr, msg)) = try_install_terrain_opt() {
+                if let Some((tt, msg)) = try_install_terrain_opt() {
                     st.terrain_target = tt;
-                    st.terrain_tramp = tr;
                     st.terrain_opt_wanted = false;
                     append_log(&st.log_path, &format!("event=terrain_init {}", msg));
                 }
@@ -2278,15 +1853,14 @@ pub extern "C" fn DcsCpuOpt_Tick(_lua_state: *mut c_void) -> i32 {
                 && (t1 - st.route_last_probe_qpc) >= st.qpc_freq * 5
             {
                 st.route_last_probe_qpc = t1;
-                if let Some((rt, rr, msg)) = try_install_transport_route_opt() {
+                if let Some((rt, msg)) = try_install_transport_route_opt() {
                     st.route_target = rt;
-                    st.route_tramp = rr;
                     st.route_opt_wanted = false;
                     append_log(&st.log_path, &format!("event=route_init {}", msg));
                 }
             }
             if st.zlib_opt_wanted
-                && st.zlib_installed.is_none()
+                && !st.zlib_installed
                 && (t1 - st.zlib_last_probe_qpc) >= st.qpc_freq * 5
             {
                 st.zlib_last_probe_qpc = t1;
@@ -2310,7 +1884,7 @@ pub extern "C" fn DcsCpuOpt_Tick(_lua_state: *mut c_void) -> i32 {
 ///
 /// A Lua state closing (or its guard being collected) must not unpatch: the patches stay for the whole process
 /// lifetime and this DLL is pinned, so process exit needs no cleanup. It only logs `event=lua_state_closed`.
-/// Only if pinning failed (the DLL could later be unloaded) does it fall back to the old full unpatch.
+/// No hooks are installed when pinning fails.
 #[no_mangle]
 pub extern "C" fn DcsCpuOpt_Shutdown(_lua_state: *mut c_void) -> i32 {
     let n = LUA_CLOSE_CALLS.fetch_add(1, Ordering::AcqRel) + 1;
@@ -2329,9 +1903,6 @@ pub extern "C" fn DcsCpuOpt_Shutdown(_lua_state: *mut c_void) -> i32 {
             pinned as u8
         ),
     );
-    if !pinned {
-        uninstall_hook();
-    }
     0
 }
 
@@ -2399,21 +1970,56 @@ mod tests {
 
     #[test]
     fn pacer_stub_jump_targets_exact() {
-        let stub = build_mwaitx_pacer_stub(0x1122_3344_5566_7788, 200_000);
-        // Verify every short branch lands on done (0x4a) or loop_top (0x00)
-        assert_eq!(0x05isize + (stub[0x04] as i8) as isize, 0x4a); // je done
-        assert_eq!(0x0eisize + (stub[0x0d] as i8) as isize, 0x14); // je do_wait
-        assert_eq!(0x1bisize + (stub[0x1a] as i8) as isize, 0x4a); // jb done
-        assert_eq!(0x2bisize + (stub[0x2a] as i8) as isize, 0x4a); // je done
-        assert_eq!(0x32isize + (stub[0x31] as i8) as isize, 0x4a); // jb done
-        assert_eq!(0x4aisize + (stub[0x49] as i8) as isize, 0x00); // jae loop_top
-        assert_eq!(&stub[0x4a..0x50], &[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
-        assert_eq!(u64::from_le_bytes(stub[0x50..0x58].try_into().unwrap()), 0x1122_3344_5566_7788);
+        let resume = 0x1122_3344_5566_7788;
+        let stub = build_mwaitx_pacer_stub(resume, 200_000);
+        assert_eq!(19isize + (stub[18] as i8) as isize, 39); // je restore
+        assert_eq!(24isize + (stub[23] as i8) as isize, 39); // jb restore
+        assert_eq!(&stub[39..42], &[0x5b, 0x5a, 0x59]);
+        assert_eq!(&stub[42..48], &[0xff, 0x25, 0, 0, 0, 0]);
+        assert_eq!(u64::from_le_bytes(stub[48..].try_into().unwrap()), resume);
+        let mut loop_bytes = EXPECTED_VIS_SPIN_LOOP;
+        let base = 0x1_0000_0000;
+        let near_stub = base - 0x1_0000;
+        let jump = pacer_jump(base + VIS_PAUSE_OFFSET, near_stub).unwrap();
+        let displacement = i32::from_le_bytes(jump[1..5].try_into().unwrap());
+        assert_eq!((base + VIS_PAUSE_OFFSET + 5) as i64 + displacement as i64, near_stub as i64);
+        assert!(pacer_jump(base + VIS_PAUSE_OFFSET, base + 0x9000_0000).is_none());
+        loop_bytes[VIS_PAUSE_OFFSET..VIS_PAUSE_OFFSET + jump.len()].copy_from_slice(&jump);
+        let callback_return = 20;
+        let callback_landing = (callback_return + 2) as i8 + (loop_bytes[callback_return + 1] as i8);
+        assert_eq!(callback_landing, 28);
+        assert_eq!(&loop_bytes[..VIS_PAUSE_OFFSET], &EXPECTED_VIS_SPIN_LOOP[..VIS_PAUSE_OFFSET]);
+        assert_eq!(&loop_bytes[callback_landing as usize..], &EXPECTED_VIS_SPIN_LOOP[28..]);
+        assert_eq!(VIS_RESUME_OFFSET, 30);
+    }
+
+    #[test]
+    fn guarded_write_checks_full_signature_before_touching_the_patch() {
+        let expected = EXPECTED_VIS_SPIN_LOOP;
+        let patch = [0x90u8; 6];
+        unsafe {
+            let mem = VirtualAlloc(ptr::null_mut(), 64, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) as *mut u8;
+            assert!(!mem.is_null());
+            ptr::copy_nonoverlapping(expected.as_ptr(), mem, expected.len());
+            // Change a byte outside the overwritten range.
+            *mem.add(17) = 0x90;
+            let site = mem.add(VIS_PAUSE_OFFSET);
+            let refused = DcsCpuOpt_WriteGuardedPatch(site, patch.as_ptr(), patch.len(), mem, expected.as_ptr(), expected.len());
+            let unchanged = std::slice::from_raw_parts(site, patch.len()) == &expected[VIS_PAUSE_OFFSET..VIS_PAUSE_OFFSET + patch.len()];
+            *mem.add(17) = expected[17];
+            let accepted = DcsCpuOpt_WriteGuardedPatch(site, patch.as_ptr(), patch.len(), mem, expected.as_ptr(), expected.len());
+            let applied = std::slice::from_raw_parts(site, patch.len()) == patch;
+            VirtualFree(mem as *mut c_void, 0, MEM_RELEASE);
+            assert_eq!(refused, 0);
+            assert!(unchanged);
+            assert_eq!(accepted, 1);
+            assert!(applied);
+        }
     }
 
     #[test]
     fn flat_u32_map_handles_edge_keys_and_collisions() {
-        let mut m = FlatU32Map::new();
+        let mut m = FlatU32Map::default();
         m.reset_with_capacity(64);
         for k in 0..64u32 {
             m.insert(k * 7, k + 100);
@@ -2573,6 +2179,56 @@ mod tests {
     }
 
     #[test]
+    fn transport_route_sees_an_in_place_edit() {
+        let mut nodes: Vec<_> = (0..193)
+            .map(|i| PathNode {
+                s: i as f64,
+                seg_idx: 0,
+                _pad: 0,
+                x: 0.0,
+                z: if i < 64 { 10.0 } else { 100.0 },
+                f4: 0.0,
+                f5: 0.0,
+                f6: 0.0,
+            })
+            .collect();
+        assert_eq!(find_closest_point_fast(&nodes, 0.0, 0.0, 0.0).1, 10.0);
+        nodes[70].z = 0.0;
+        assert_eq!(find_closest_point_fast(&nodes, 0.0, 0.0, 0.0).1, 0.0);
+    }
+
+    #[test]
+    fn terrain_workspace_reads_in_place_map_and_chunk_edits() {
+        let mut head = [0usize; 2];
+        let mut node = [head.as_mut_ptr() as usize, 0, (4usize << 32) | 9];
+        head[0] = node.as_mut_ptr() as usize;
+        let mut map = [0usize; 24];
+        map[0xb0 / 8] = head.as_ptr() as usize;
+        map[0xb8 / 8] = 1;
+        let mut keys = [0usize; 16];
+        keys[8] = 9;
+        let mut chunk = [0usize; 0x1b0 / 8];
+        chunk[0x110 / 8] = keys.as_mut_ptr() as usize;
+        chunk[0x118 / 8] = chunk[0x110 / 8] + 0x80;
+        let mut workspace = TerrainWorkspace::default();
+        unsafe {
+            assert!(workspace.read_map(map.as_ptr() as usize));
+            assert!(workspace.find_matches(chunk.as_ptr() as usize, 1, 4));
+            assert_eq!(workspace.matches, [0]);
+            node[2] = (7usize << 32) | 9;
+            assert!(workspace.read_map(map.as_ptr() as usize));
+            assert!(workspace.find_matches(chunk.as_ptr() as usize, 1, 4));
+            assert!(workspace.matches.is_empty());
+            assert!(workspace.find_matches(chunk.as_ptr() as usize, 1, 7));
+            assert_eq!(workspace.matches, [0]);
+            keys[8] = 10;
+            assert!(workspace.find_matches(chunk.as_ptr() as usize, 1, 7));
+            assert!(workspace.matches.is_empty());
+            std::hint::black_box((node, keys, head));
+        }
+    }
+
+    #[test]
     fn transport_route_fast_matches_reference() {
         assert_eq!(std::mem::size_of::<PathNode>(), 0x38);
         let mut seed: u64 = 0x1234_5678_9abc_def0;
@@ -2585,7 +2241,7 @@ mod tests {
             let n = if case < 3 {
                 case
             } else if case >= 200 {
-                200 + (case - 200) * 25 // long routes up to 1450 nodes -> exercises 64-seg chunk-AABB cache!
+                200 + (case - 200) * 25 // Long routes also exercise segment pruning.
             } else {
                 2 + (case % 80)
             };

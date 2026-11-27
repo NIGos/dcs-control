@@ -387,14 +387,6 @@ unsafe fn swap_slot(slot: *mut usize, expect: usize, new: usize) -> bool {
     ok
 }
 
-/// The three patched edCore IAT slots and the original zlib1.dll pointers they held.
-pub(crate) struct Installed {
-    /// `inflateInit2_`, `inflate`, `inflateEnd` slots.
-    slots: [*mut usize; 3],
-    /// Original values, same order.
-    orig: [usize; 3],
-}
-
 /// Name of libdeflate's decode path on this CPU (it dispatches by itself: BMI2 when CPUID.7:EBX[8] is set).
 pub(crate) fn libdeflate_path() -> &'static str {
     let l0 = core::arch::x86_64::__cpuid(0);
@@ -408,7 +400,7 @@ pub(crate) fn libdeflate_path() -> &'static str {
 
 /// Installs on the loaded edCore.dll. `Ok(None)` when edCore.dll or zlib1.dll is not loaded yet (retry later);
 /// `Err` when something does not match and the hook is skipped.
-pub(crate) fn try_install() -> Result<Option<(Installed, String)>, String> {
+pub(crate) fn try_install() -> Result<Option<String>, String> {
     let hcore = unsafe { super::GetModuleHandleA(b"edCore.dll\0".as_ptr()) };
     let hz = unsafe { super::GetModuleHandleA(b"zlib1.dll\0".as_ptr()) };
     if hcore.is_null() || hz.is_null() {
@@ -445,15 +437,7 @@ pub(crate) fn try_install() -> Result<Option<(Installed, String)>, String> {
         rva(c),
         libdeflate_path()
     );
-    Ok(Some((Installed { slots: [a, b, c], orig }, msg)))
-}
-
-/// Restores edCore's IAT slots (only used when the DLL could not be pinned). Wrappers stay valid for calls in flight.
-pub(crate) fn uninstall(inst: &Installed) {
-    let hooks = [hook_inflate_init2 as *const () as usize, hook_inflate as *const () as usize, hook_inflate_end as *const () as usize];
-    for i in 0..3 {
-        unsafe { swap_slot(inst.slots[i], hooks[i], inst.orig[i]) };
-    }
+    Ok(Some(msg))
 }
 
 #[cfg(test)]

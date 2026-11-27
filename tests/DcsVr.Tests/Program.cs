@@ -3404,6 +3404,58 @@ Test("A moved installation can recover a missing owned file without touching use
     Require(File.ReadAllText(Path.Combine(target, "notes.txt")) == "keep");
     Require(!Directory.Exists(original));
 });
+Test("A moved registered update snapshots the profiles from the version it replaces", () =>
+{
+    var first = ReleaseFixture("moved-registered-v1", "0.7.1-preview", "first");
+    var second = ReleaseFixture("moved-registered-v2", "0.7.2-preview", "second");
+    var registered = Path.Combine(root, "app-install/moved-registered-old");
+    var target = Path.Combine(root, "app-install/moved-registered-new");
+    var state = RollbackState("moved-registered", "draft-71", ("Day.json", "day-71"));
+    new ApplicationInstaller(registered).Install(first);
+    Directory.Move(registered, target);
+
+    var extra = Path.Combine(second, "extra.txt");
+    AtomicFile.WriteText(extra, "belongs to the update");
+    var manifestPath = Path.Combine(second, "release-manifest.json");
+    var manifest = JsonData.Deserialize<ReleaseManifest>(File.ReadAllText(manifestPath));
+    manifest.Files.Add(new("extra.txt", Hashing.FileSha256(extra), new FileInfo(extra).Length));
+    AtomicFile.WriteText(manifestPath, JsonData.Serialize(manifest));
+    var installer = new ApplicationInstaller(target);
+    var existing = Path.Combine(target, "extra.txt");
+    AtomicFile.WriteText(existing, "belongs to the pilot");
+    Throws<IOException>(() => installer.Install(second));
+    Require(File.ReadAllText(existing) == "belongs to the pilot");
+    File.Delete(existing);
+
+    installer.Install(second, movedStateRoot: previous =>
+    {
+        Require(string.Equals(previous, Path.GetFullPath(registered), StringComparison.OrdinalIgnoreCase), "only the verified former location identifies the registration");
+        return state;
+    });
+
+    var rollback = new Rollback(state, target, "0.7.2-preview");
+    Require(rollback.Target().Version == "0.7.1-preview" && rollback.HasSnapshot("0.7.1-preview"));
+    Require(StateText(state, "versions/0.7.1-preview/presets/Day.json") == "day-71");
+    Require(StateText(state, "draft.json") == "draft-71");
+});
+Test("Uninstall identifies the former folder only when the verified installation was moved", () =>
+{
+    var source = ReleaseFixture("moved-uninstall-v1", "0.7.2-preview", "first");
+    foreach (var anotherInstall in new[] { false, true })
+    {
+        var original = Path.Combine(root, $"app-install/moved-uninstall-old-{anotherInstall}");
+        var target = Path.Combine(root, $"app-install/moved-uninstall-new-{anotherInstall}");
+        new ApplicationInstaller(original).Install(source);
+        AtomicFile.WriteText(Path.Combine(original, "notes.txt"), "keep");
+        Directory.Move(original, target);
+        if (anotherInstall) new ApplicationInstaller(original).Install(source);
+
+        Require(new ApplicationInstaller(target).Uninstall(out var previousRoot).Complete);
+        Require(string.Equals(previousRoot, anotherInstall ? null : Path.GetFullPath(original), StringComparison.OrdinalIgnoreCase));
+        Require(File.ReadAllText(Path.Combine(target, "notes.txt")) == "keep" && !File.Exists(Path.Combine(target, "app.bin")));
+        Require(File.Exists(Path.Combine(original, "app.bin")) == anotherInstall, "another installation at the former path stays intact");
+    }
+});
 Test("A moved installer baseline with changed payload still refuses to remove files", () =>
 {
     var initial = ReleaseFixture("moved-edited-v1", "1", "first");

@@ -912,7 +912,7 @@ function buildFields() {
     'Can speed up loading textures and models from archives. The decompressed files are identical.',
     'toggle',null,engine,'',null,null,cpuOptNeeds);
   field(cpuOpt,'engineCpuOptTerrain','Faster terrain lookups',
-    ['Reduces CPU work on terrain lookups that use this path.','Tested with DCS 2.9.32.30490 on Steam. DCS keeps its usual lookup on other builds.'],
+    ['Uses a flat lookup built from current terrain data.','Available on DCS 2.9.32.30490 (Steam). Other builds use the original lookup.'],
     'toggle',null,engine,'',null,null,cpuOptNeeds);
   field(cpuOpt,'engineCpuOptGroundRoutes','Faster ground vehicle route searches',
     ['Reduces CPU work in missions with moving ground vehicles.','Tested with DCS 2.9.32.30490 on Steam. DCS keeps its usual route search on other builds.'],

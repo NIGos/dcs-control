@@ -14,5 +14,11 @@ fn main() {
         .compile("libdeflate_strict");
     println!("cargo:rerun-if-changed={src}/lib");
     println!("cargo:rerun-if-changed={src}/libdeflate.h");
+    cc::Build::new()
+        .cpp(true)
+        .file("patch_guard.cpp")
+        .compile("dcs_cpu_opt_patch_guard");
+    println!("cargo:rerun-if-changed=patch_guard.cpp");
+    println!("cargo:rerun-if-changed=../dcsqvcull/src/patch_threads.h");
     println!("cargo:rerun-if-changed=build.rs");
 }

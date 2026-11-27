@@ -37,7 +37,9 @@ public sealed class ApplicationInstaller(string destination)
     /// <param name="stateRoot">The app's state folder when this installation is the pilot's own (the CLI decides):
     /// before a newer version's first start, the draft and presets are copied as the replaced version left them
     /// (<see cref="Rollback.Snapshot"/>), so going back finds settings that version can read. Null: no copy.</param>
-    public TransactionJournal Install(string source, Action<int>? beforeWrite = null, string? stateRoot = null)
+    /// <param name="movedStateRoot">Resolves the pilot's state only when the verified former application folder is absent.</param>
+    public TransactionJournal Install(string source, Action<int>? beforeWrite = null, string? stateRoot = null,
+        Func<string, string?>? movedStateRoot = null)
     {
         EnsureAppClosed();
         var sourceRoot = Path.GetFullPath(source).TrimEnd(Path.DirectorySeparatorChar);
@@ -48,8 +50,10 @@ public sealed class ApplicationInstaller(string destination)
         // Journals an earlier update left before its consolidated baseline (cut short while pruning) go first.
         PruneSuperseded();
         var journals = Live(Transactions.List());
-        journals = RebaseMovedBaseline(journals);
+        journals = RebaseMovedBaseline(journals, out var previousRoot, out var movedBaseline);
         ValidateJournalScope(journals);
+        if (stateRoot is null && previousRoot is not null)
+            stateRoot = movedStateRoot?.Invoke(previousRoot);
         // An update cut short (power loss, the setup ended) is rolled back first, so the next update can run.
         var interrupted = Interrupted(journals);
         // A reinstall takes this same path, so the message says what clears it instead (a file held open, most often).
@@ -89,6 +93,8 @@ public sealed class ApplicationInstaller(string destination)
         if (previousLedger is { Deleted: false } && File.Exists(ledger) && previousLedger.InstalledSha256 == Hashing.BytesSha256(ledgerBytes))
             unchanged.Add(new() { Path = ledger, InstalledSha256 = previousLedger.InstalledSha256, Root = Root, Applied = true });
         else changes.Add(new(ledger, previousLedger?.InstalledSha256, ledgerBytes, "Application installation ledger", Root: Root));
+        // Keep the old location available for another attempt if validation fails.
+        if (movedBaseline is not null) Transactions.Replace(movedBaseline);
         var applied = Transactions.Apply(new("application", "DCS Control " + manifest.Version, changes, new Dictionary<string, string>(), ""), beforeWrite);
         var baseline = Consolidate(applied, unchanged);
         // What this version replaced, for Go back (one step). The state copy only on the way up: on the way down the
@@ -154,14 +160,16 @@ public sealed class ApplicationInstaller(string destination)
     /// <summary>Whether <see cref="Root"/> is the pilot's own installation: the standard folder, or the one Settings >
     /// Apps names. Only then does an update copy the app's settings (a test installation in a scratch folder never
     /// touches them).</summary>
-    public bool IsRegistered()
+    public bool IsRegistered() => IsRegistered(Root);
+
+    public static bool IsRegistered(string root)
     {
-        if (Root.Equals(Path.GetFullPath(DefaultDestination).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) return true;
+        if (root.Equals(Path.GetFullPath(DefaultDestination).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) return true;
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl");
             return key?.GetValue("InstallLocation") is string location && Path.IsPathFullyQualified(location)
-                && Root.Equals(Path.GetFullPath(location).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+                && root.Equals(Path.GetFullPath(location).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
         }
         catch (Exception e) when (e is System.Security.SecurityException or IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
@@ -201,11 +209,14 @@ public sealed class ApplicationInstaller(string destination)
         var live = Live(all).Select(j => j.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var journal in all.Where(j => !live.Contains(j.Id))) Transactions.Delete(journal.Id);
     }
-    public RestoreResult Uninstall()
+    public RestoreResult Uninstall() => Uninstall(out _);
+
+    /// <param name="previousRoot">The verified former application folder, when it no longer exists.</param>
+    public RestoreResult Uninstall(out string? previousRoot)
     {
         EnsureAppClosed();
         var journals = Live(Transactions.List());
-        journals = RebaseMovedBaseline(journals);
+        journals = RebaseMovedBaseline(journals, out previousRoot, out var movedBaseline);
         ValidateJournalScope(journals);
         if (!journals.Any(j => j.Status != "restored")) throw new InvalidOperationException("No application installation to restore.");
         // An update cut short is rolled back first, as before an update, so its half-written files are not "modified".
@@ -214,6 +225,7 @@ public sealed class ApplicationInstaller(string destination)
             if (Transactions.Restore(journal.Id) is { Complete: false } partial) return partial;
         if (interrupted.Length > 0) journals = Live(Transactions.List());
         foreach (var entry in CurrentOwned(journals).Values) VerifyOwned(entry, Root);
+        if (movedBaseline is not null) Transactions.Replace(movedBaseline);
         foreach (var journal in journals.Where(j => j.Status != "restored"))
         {
             var result = Transactions.Restore(journal.Id);
@@ -232,8 +244,11 @@ public sealed class ApplicationInstaller(string destination)
     // A moved folder still has absolute paths from the previous location. Rebase only a completed baseline whose
     // entries match the local release ledger and whose remaining payload is unmodified. An interrupted journal can contain
     // backups and delete operations tied to its original destination, so it still has to be recovered there.
-    private IReadOnlyList<TransactionJournal> RebaseMovedBaseline(IReadOnlyList<TransactionJournal> journals)
+    private IReadOnlyList<TransactionJournal> RebaseMovedBaseline(IReadOnlyList<TransactionJournal> journals,
+        out string? previousLocation, out TransactionJournal? movedBaseline)
     {
+        previousLocation = null;
+        movedBaseline = null;
         if (journals is not [ { Consolidated: true, Status: "applied", ProfileId: "application" } journal ] ||
             journal.Entries.FirstOrDefault()?.Root is not { } previousRoot ||
             !Path.IsPathFullyQualified(previousRoot) ||
@@ -263,7 +278,8 @@ public sealed class ApplicationInstaller(string destination)
         }
         if (expected.Count != journal.Entries.Count) return journals;
 
-        var prior = Path.GetFullPath(previousRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var formerRoot = Path.GetFullPath(previousRoot).TrimEnd(Path.DirectorySeparatorChar);
+        var prior = formerRoot + Path.DirectorySeparatorChar;
         var entries = new List<JournalEntry>(journal.Entries.Count);
         foreach (var entry in journal.Entries)
         {
@@ -285,8 +301,22 @@ public sealed class ApplicationInstaller(string destination)
         }
 
         var rebased = journal with { Entries = entries };
-        Transactions.Replace(rebased);
+        movedBaseline = rebased;
+        if (FormerFolderIsAbsent(formerRoot)) previousLocation = formerRoot;
         return [rebased];
+    }
+
+    private static bool FormerFolderIsAbsent(string fullPath)
+    {
+        try
+        {
+            // An unavailable volume is not evidence that the registered application was moved.
+            if (fullPath.StartsWith(@"\\", StringComparison.Ordinal) || Path.GetPathRoot(fullPath) is not { } volume || !Directory.Exists(volume)) return false;
+            _ = File.GetAttributes(fullPath);
+            return false;
+        }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return true; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return false; }
     }
 
     private void ValidateJournalScope(IReadOnlyList<TransactionJournal> journals)

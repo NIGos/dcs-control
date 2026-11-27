@@ -34,15 +34,19 @@ try
             // The pilot's own installation (not a test one in a scratch folder, not from a sandbox with a private
             // %LOCALAPPDATA%): its settings are copied as the replaced version left them, for Go back.
             var installer = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination);
-            var installState = Option("--state") ?? (installer.IsRegistered() && AppDataRedirection.Target() is null ? ControlService.DefaultStateRoot : null);
-            var journal = installer.Install(Option("--source") ?? ReleaseFolder(), stateRoot: installState);
+            var mayUsePilotState = !args.Contains("--no-registered-state") && AppDataRedirection.Target() is null;
+            var installState = Option("--state") ?? (mayUsePilotState && installer.IsRegistered() ? ControlService.DefaultStateRoot : null);
+            var journal = installer.Install(Option("--source") ?? ReleaseFolder(), stateRoot: installState,
+                movedStateRoot: mayUsePilotState ? former => ApplicationInstaller.IsRegistered(former) ? ControlService.DefaultStateRoot : null : null);
             Console.WriteLine($"Installed {journal.Entries.Count} application files. Recovery transaction: {journal.Id}"); break;
         }
         case "app-uninstall":
         {
             // Incomplete (a file could not be restored): non-zero, so the installer keeps the shortcuts, the Apps entry and the journals.
-            var result = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Uninstall();
-            Console.WriteLine(JsonData.Serialize(result));
+            var result = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Uninstall(out var previousRoot);
+            Console.WriteLine(args.Contains("--details")
+                ? JsonData.Serialize(new { result.Complete, result.Conflicts, PreviousRoot = result.Complete ? previousRoot : null })
+                : JsonData.Serialize(result));
             return result.Complete ? 0 : 2;
         }
         case "inventory":

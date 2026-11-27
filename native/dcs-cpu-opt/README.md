@@ -5,3 +5,5 @@ Native Windows component for the experimental CPU options in DCS Control. Origin
 DCS Control writes the configuration next to the component and loads it through its Saved Games hook. Each optimization is off by default and applies at the next DCS start. The native log is written next to the component. The upstream libdeflate copyright and MIT license are in THIRD_PARTY_NOTICES.txt and third_party/libdeflate/COPYING.
 
 The audio, terrain and route hooks check the PE identity of the validated DCS 2.9.32.30490 Steam DLLs before checking their signatures. The AMD pacer checks the complete wait-loop signature. Decompression checks the three imports and falls back to DCS's decoder for unsupported streams. DCS Control prevents its integrated version from loading next to the standalone Saved Games hook.
+
+Inline hooks use the same coordinated code writer as DcsQvCull. If the writer cannot safely install a hook, DCS keeps its original routine. Terrain and ground-route searches read the current game data at each call, so in-place edits are visible.

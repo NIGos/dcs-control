@@ -38,6 +38,7 @@
 // Included once from main.cpp after exit_guard.h.
 #pragma once
 
+#include <cstring>
 #include <tlhelp32.h>
 
 namespace qvpatch {
@@ -96,6 +97,9 @@ struct Site {
   uint8_t* addr;
   const uint8_t* bytes;
   size_t len;
+  const uint8_t* expected = nullptr;
+  const uint8_t* expectedAddr = nullptr;
+  size_t expectedLen = 0;
 };
 
 inline uint64_t NowUs() {
@@ -120,6 +124,10 @@ inline bool InsideAny(uintptr_t rip, const Site* s, int n) {
 inline bool WriteAll(const Site* s, int n) {
   bool done = true;
   for (int i = 0; i < n; ++i) {
+    if (s[i].expected && std::memcmp(s[i].expectedAddr, s[i].expected, s[i].expectedLen) != 0) {
+      done = false;
+      continue;
+    }
     DWORD old;
     if (!VirtualProtect(s[i].addr, s[i].len, PAGE_EXECUTE_READWRITE, &old)) {
       done = false;
@@ -193,30 +201,43 @@ inline bool WriteSuspendedToolhelp(const Site* s, int n, int attempts) {
 // PatchMode=1 (R90): this process's threads from NtGetNextThread, all suspended first, then every
 // context read (each GetThreadContext returns once that thread's suspension has completed), then the
 // IP check and the write, then all resumed.
-inline bool WriteSuspendedProcess(const Site* s, int n, int attempts) {
+inline bool WriteSuspendedProcess(const Site* s, int n, int attempts, bool failClosed = false) {
   const DWORD self = GetCurrentThreadId();
   for (int attempt = 0; attempt < attempts; ++attempt) {
     HANDLE held[kMaxHeld];  // on the stack: no allocation while threads are suspended
     int nHeld = 0;
     bool overflow = false;
+    bool missedThread = false;
     const uint64_t t0 = NowUs();
     const int visited = ForEachProcessThread(
         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, [&](HANDLE h) {
-          if (GetThreadId(h) == self) return false;
+          const DWORD id = GetThreadId(h);
+          if (!id && failClosed) {
+            missedThread = true;
+            return false;
+          }
+          if (id == self) return false;
           if (nHeld >= kMaxHeld) {
             overflow = true;
             return false;
           }
-          if (SuspendThread(h) == static_cast<DWORD>(-1)) return false;  // exiting: it runs no code of ours
+          if (SuspendThread(h) == static_cast<DWORD>(-1)) {
+            missedThread = true;
+            return false;
+          }
           held[nHeld++] = h;
           return true;
         });
     const uint64_t t1 = NowUs();
-    bool clear = visited >= 0 && !overflow;
+    bool clear = visited >= 0 && !overflow && (!failClosed || !missedThread);
     for (int k = 0; k < nHeld && clear; ++k) {
       CONTEXT ctx{};
       ctx.ContextFlags = CONTEXT_CONTROL;
-      if (GetThreadContext(held[k], &ctx) && InsideAny(ctx.Rip, s, n)) clear = false;
+      if (!GetThreadContext(held[k], &ctx)) {
+        if (failClosed) clear = false;
+      } else if (InsideAny(ctx.Rip, s, n)) {
+        clear = false;
+      }
     }
     const bool done = clear && WriteAll(s, n);
     for (int k = 0; k < nHeld; ++k) {
@@ -226,7 +247,7 @@ inline bool WriteSuspendedProcess(const Site* s, int n, int attempts) {
     const uint64_t t2 = NowUs();
     // No NtGetNextThread, a failed walk (R115 P5: threads may have been missed; nothing was written and every
     // thread held above is resumed) or too many threads: the Toolhelp path.
-    if (visited < 0 || overflow) return WriteSuspendedToolhelp(s, n, attempts);
+    if (visited < 0 || overflow) return !failClosed && WriteSuspendedToolhelp(s, n, attempts);
     if (clear) {
       NoteWrite(t2 - t0, t1 - t0, static_cast<uint32_t>(nHeld), static_cast<uint32_t>(attempt + 1));
       return done;

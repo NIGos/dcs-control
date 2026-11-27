@@ -100,10 +100,29 @@ if ($Action -eq 'Uninstall' -and ([IO.Path]::GetFullPath($filesRoot).TrimEnd('\'
     Get-ChildItem -LiteralPath $filesRoot -File | Copy-Item -Destination $temporaryCli
     $cliRoot = $temporaryCli
 }
+$realUninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl'
+$applicationRoots = @($installRoot)
 try {
-    & (Join-Path $cliRoot 'DcsVr.Cli.exe') $command --source $payloadRoot --destination $installRoot
-    # The program has just said why, and that stays the last line (it rolls back what it had started).
-    if ($LASTEXITCODE -ne 0) { exit 1 }
+    $cliArguments = @($command, '--source', $payloadRoot, '--destination', $installRoot)
+    if ($Action -eq 'Uninstall') {
+        $uninstallResult = & (Join-Path $cliRoot 'DcsVr.Cli.exe') @cliArguments --details
+        $cliExit = $LASTEXITCODE
+        $uninstallResult | Write-Output
+        if ($cliExit -ne 0) { exit 1 }
+
+        # Only the installer can prove a journal belongs to the former location. The Apps entry must still point there.
+        $formerRoot = ($uninstallResult -join "`n" | ConvertFrom-Json).previousRoot
+        if ($formerRoot -and (Test-Path -LiteralPath $UninstallKey)) {
+            $registered = (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+            if ($registered -and [IO.Path]::GetFullPath($registered).TrimEnd('\','/') -eq $formerRoot -and
+                -not (Test-Path -LiteralPath $formerRoot)) { $applicationRoots += $formerRoot }
+        }
+    } else {
+        if ($UninstallKey -ne $realUninstallKey) { $cliArguments += '--no-registered-state' }
+        & (Join-Path $cliRoot 'DcsVr.Cli.exe') @cliArguments
+        # The program has just said why, and that stays the last line (it rolls back what it had started).
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+    }
 } finally {
     if ($temporaryCli) { Remove-Item -LiteralPath $temporaryCli -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -112,8 +131,8 @@ if ($Action -eq 'Uninstall') {
     # Only for the pilot's own installation (the standard folder, or the one the real Apps entry names): a test
     # installation in a scratch folder or with a scratch Apps key leaves the pilot's state alone. Also with -NoShortcut.
     $standard = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs/DcsControl')).TrimEnd('\','/')
-    $registered = if ($UninstallKey -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl' -and (Test-Path -LiteralPath $UninstallKey)) { (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation }
-    $ownInstall = $UninstallKey -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl' -and ($installRoot -eq $standard -or ($registered -and [IO.Path]::GetFullPath($registered).TrimEnd('\','/') -eq $installRoot))
+    $registered = if ($UninstallKey -eq $realUninstallKey -and (Test-Path -LiteralPath $UninstallKey)) { (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation }
+    $ownInstall = $UninstallKey -eq $realUninstallKey -and ($installRoot -eq $standard -or ($registered -and $applicationRoots -contains [IO.Path]::GetFullPath($registered).TrimEnd('\','/')))
     $setups = Join-Path $env:LOCALAPPDATA 'DcsControl\setups'
     if ($ownInstall -and (Test-Path -LiteralPath $setups)) { Remove-Item -LiteralPath $setups -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -171,10 +190,11 @@ if ($Action -eq 'Install') {
     }
 } else {
     # Only shortcuts and an Apps & features entry that belong to this installation.
+    $applicationPaths = @($applicationRoots | ForEach-Object { Join-Path $_ 'DcsControl.exe' })
     foreach ($path in $shortcutPath, $desktopPath) {
-        if ((Test-Path -LiteralPath $path) -and $shell.CreateShortcut($path).TargetPath -eq $appPath) { Remove-Item -LiteralPath $path }
+        if ((Test-Path -LiteralPath $path) -and $applicationPaths -contains $shell.CreateShortcut($path).TargetPath) { Remove-Item -LiteralPath $path }
     }
     $location = if (Test-Path -LiteralPath $UninstallKey) { (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation }
-    if ($location -and [IO.Path]::GetFullPath($location).TrimEnd('\','/') -eq $installRoot) { Remove-Item -LiteralPath $UninstallKey -Recurse }
+    if ($location -and $applicationRoots -contains [IO.Path]::GetFullPath($location).TrimEnd('\','/')) { Remove-Item -LiteralPath $UninstallKey -Recurse }
     Write-Output 'Owned application files removed. Game-mod backup state is retained.'
 }
