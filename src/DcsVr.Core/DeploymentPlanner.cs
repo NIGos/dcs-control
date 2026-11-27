@@ -247,6 +247,19 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 if (!profile.BinauralHrtf.Equals(Binaural.DefaultHrtf, StringComparison.OrdinalIgnoreCase) && !(hrtfSets ?? []).Any(s => s.Name.Equals(profile.BinauralHrtf, StringComparison.OrdinalIgnoreCase)))
                     hrtf = Binaural.DefaultHrtf;
             }
+            if (profile.UsesCpuOpt)
+            {
+                var cpuOpt = Path.Combine(module, ConfigurationWriters.CpuOptDirectory);
+                var bundled = Path.Combine(engine, ConfigurationWriters.CpuOptDll);
+                if (!File.Exists(bundled))
+                    throw new InvalidDataException("The experimental CPU optimizations are unavailable in this build.");
+                if (File.Exists(Path.Combine(scripts, "Hooks", "DcsCpuOpt.lua")))
+                    throw new InvalidDataException("Remove the standalone DCS CPU Opt hook before using the experimental CPU optimizations.");
+                Add(Path.Combine(cpuOpt, ConfigurationWriters.CpuOptDll), Hashing.ReadAllBytes(bundled),
+                    "Experimental CPU optimizations", runtimeLogs: [Path.Combine(cpuOpt, ConfigurationWriters.CpuOptLog)]);
+                AddText(Path.Combine(cpuOpt, ConfigurationWriters.CpuOptIni), ConfigurationWriters.CpuOpt(profile),
+                    "Experimental CPU optimization settings");
+            }
             AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory, EngineOptimizations.EmulatedListsMatter(module), hrtf), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
             Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), Hashing.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");

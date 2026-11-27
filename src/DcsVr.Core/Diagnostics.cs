@@ -201,6 +201,9 @@ public static partial class Diagnostics
                 // The module's log of the session before the last DCS start (kept by it at each start), as for dcs.log.old.
                 foreach (var name in new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log" })
                     File_("dcs/Scripts/DcsQvCull/" + name, Path.Combine(savedGames, "Scripts", "DcsQvCull", name));
+                var cpuOpt = Path.Combine("Scripts", "DcsQvCull", ConfigurationWriters.CpuOptDirectory);
+                foreach (var name in new[] { ConfigurationWriters.CpuOptIni, ConfigurationWriters.CpuOptLog })
+                    File_("dcs/" + Path.Combine(cpuOpt, name).Replace('\\', '/'), Path.Combine(savedGames, cpuOpt, name));
                 // A second DCS started while the first held the log writes DcsQvCull.<pid>.log.
                 Folder("dcs/Scripts/DcsQvCull", Path.Combine(savedGames, "Scripts", "DcsQvCull"), "DcsQvCull.*.log", 4);
                 Folder("dcs/Scripts/DcsQvCull", Path.Combine(savedGames, "Scripts", "DcsQvCull"), "*", 10);

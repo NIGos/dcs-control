@@ -491,6 +491,16 @@ public sealed record VrProfile
     /// it adds nothing: proven bit-identical) and bit 1 hot-air idle skip (the heat-haze copy and compose passes skipped
     /// when no heat was drawn that frame: the stock picture). Small gains (about 0.23 ms on open sea, 0.02-0.08 ms for
     /// hot air), so one switch for both. Off by default.</summary>
+    public bool EngineCpuOptInflate { get; init; }
+    public bool EngineCpuOptTerrain { get; init; }
+    public bool EngineCpuOptGroundRoutes { get; init; }
+    public bool EngineCpuOptLowPowerPacer { get; init; }
+    public bool EngineCpuOptSoundCull { get; init; }
+
+    [JsonIgnore] public bool UsesCpuOptSoundCull => EngineOptimizations && EngineCpuOptSoundCull && !BinauralAudio;
+    [JsonIgnore] public bool UsesCpuOpt => EngineOptimizations && (EngineCpuOptInflate || EngineCpuOptTerrain ||
+        EngineCpuOptGroundRoutes || EngineCpuOptLowPowerPacer || UsesCpuOptSoundCull);
+
     public bool EngineIdleEffectSkip { get; init; }
     [JsonIgnore] public bool UsesIdleEffectSkip => EngineIdleEffectSkip && EngineOptimizations;
     /// <summary>[Model] ShadowRecorder: the shadow cascades' draws are recorded on 8 worker threads (D3D11 deferred

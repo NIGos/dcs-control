@@ -5,6 +5,22 @@ namespace DcsVr.Core;
 
 public static class ConfigurationWriters
 {
+    internal const string CpuOptDll = "dcs_cpu_opt.dll";
+    internal const string CpuOptIni = "DcsCpuOpt.ini";
+    internal const string CpuOptLog = "DcsCpuOpt.log";
+    internal const string CpuOptDirectory = "cpu-opt";
+
+    internal static string CpuOpt(VrProfile profile) =>
+        $"""
+        [DcsCpuOpt]
+        Enabled=1
+        ZlibInflateOpt={(profile.EngineCpuOptInflate ? 1 : 0)}
+        TerrainLookupOpt={(profile.EngineCpuOptTerrain ? 1 : 0)}
+        TransportRouteOpt={(profile.EngineCpuOptGroundRoutes ? 1 : 0)}
+        LowPowerPacer={(profile.EngineCpuOptLowPowerPacer ? 1 : 0)}
+        SoundCull={(profile.UsesCpuOptSoundCull ? 1 : 0)}
+        """ + "\n";
+
     private static string Number(double value) => value.ToString("G9", CultureInfo.InvariantCulture);
     /// <summary>An integer as the native readers parse it, whatever the PC's culture (a negative sign is always "-").</summary>
     private static string Int(int value) => value.ToString(CultureInfo.InvariantCulture);

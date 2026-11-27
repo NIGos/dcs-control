@@ -283,7 +283,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             {
                 // DCS engine optimizations (native/dcsqvcull), copied to Saved Games\DCS\Scripts.
                 engine = Path.Combine(DistributionRoot, "components/dcsqvcull");
-                foreach (var filename in EngineFiles)
+                foreach (var filename in profile.UsesCpuOpt ? EngineFiles.Append(ConfigurationWriters.CpuOptDll) : EngineFiles)
                 {
                     var path = Path.Combine(engine, filename);
                     if (!File.Exists(path) || !File.Exists(path + ".sha256") || Hashing.FileSha256Cached(path) != File.ReadAllText(path + ".sha256").Trim())
@@ -606,7 +606,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // unless options.lua already has Stereo (none is Auto: Launch DCS writes Stereo into DCS's sound settings, which
         // DCS reads at start). Otherwise Binaural=1 waits with them for the next launch.
         var launchDraft = draft.ForLaunch();
-        var audioOnLive = (launchDraft.Desktop || !launchDraft.BinauralLateHeadTracking)
+        var audioOnLive = !applied.Profile.ForLaunch().UsesCpuOptSoundCull && (launchDraft.Desktop || !launchDraft.BinauralLateHeadTracking)
             && inventory.DcsSettings.TryGetValue("sound.main_layout", out var audioLayout) && Binaural.LayoutValue(audioLayout).Equals(Binaural.StereoLayout, StringComparison.OrdinalIgnoreCase);
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };

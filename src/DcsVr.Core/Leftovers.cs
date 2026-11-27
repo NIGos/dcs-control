@@ -59,7 +59,7 @@ public static class Leftovers
     /// <summary>dxgi.dll is the loader DCS Control installs; version.dll was the Foveated SR loader of 0.2-0.3.</summary>
     private static readonly string[] Loaders = ["dxgi.dll", "version.dll"];
     /// <summary>Folders only DCS Control creates: removed when a leftover sweep leaves them empty.</summary>
-    private static readonly string[] OwnFolders = ["CheekyFoveatedDLSS", "payload", "DcsQvCull"];
+    private static readonly string[] OwnFolders = ["CheekyFoveatedDLSS", "payload", ConfigurationWriters.CpuOptDirectory, "DcsQvCull"];
 
     /// <summary>The leftovers in the given bin folders (bin, bin-mt) and Saved Games DCS folders (Saved Games\DCS,
     /// DCS.openbeta), in the order <see cref="Remove"/> handles them. Paths in <paramref name="recorded"/> are the record's
@@ -101,6 +101,17 @@ public static class Leftovers
             var module = Path.Combine(dcs, "Scripts", "DcsQvCull");
             var parts = new[] { Path.Combine(dcs, "Scripts", "Hooks", "DcsQvCull.lua"), Path.Combine(module, "DcsQvCull.dll"), Path.Combine(module, "payload", "DcsQvCullPayload.dll") }.Where(Own).ToArray();
             foreach (var part in parts) Add(part, part.EndsWith(".lua", StringComparison.OrdinalIgnoreCase) ? "Engine Optimizations hook, installed by DCS Control" : "Engine Optimizations module, installed by DCS Control");
+            var cpuOpt = Path.Combine(module, ConfigurationWriters.CpuOptDirectory);
+            var cpuOptDll = Path.Combine(cpuOpt, ConfigurationWriters.CpuOptDll);
+            if (Own(cpuOptDll))
+            {
+                Add(cpuOptDll, "Experimental CPU optimizations module, installed by DCS Control");
+                foreach (var name in new[] { ConfigurationWriters.CpuOptIni, ConfigurationWriters.CpuOptLog })
+                {
+                    var file = Path.Combine(cpuOpt, name);
+                    if (Free(file)) Add(file, "Experimental CPU optimization settings or log");
+                }
+            }
             var ini = Path.Combine(module, "DcsQvCull.ini");
             if (parts.Length > 0 && Free(ini)) Add(ini, "Engine Optimizations settings");
         }

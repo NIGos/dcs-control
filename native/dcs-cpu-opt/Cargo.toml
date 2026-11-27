@@ -1,0 +1,16 @@
+[package]
+name = "dcs-cpu-opt"
+version = "0.7.0"
+edition = "2021"
+description = "Behavior-preserving CPU optimizations for DCS World (ed_sound, Visualizer MWAITX pacer, edterrain4 lookup, Transport route projection, edCore zip inflate via strict libdeflate)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3
+
+[build-dependencies]
+cc = "1"

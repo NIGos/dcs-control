@@ -223,7 +223,8 @@ public static class LiveSettings
         var fgQuality = FgQualityInstalled(journal);
         return [.. Fields.Where(f => f.In.All(file => installed.Contains(file) && Reloads(file, applied, journal)) && (current07 || !Live07.Contains(f.Name)) && f.Kind switch
         {
-            Kind.Audio => audio && (cockpitSpace || !CockpitSpaceFields.Contains(f.Name)),
+            Kind.Audio => audio && (f.Name != "binauralAudio" || !launch.UsesCpuOptSoundCull)
+                && (cockpitSpace || !CockpitSpaceFields.Contains(f.Name)),
             Kind.Engine => launch.EngineOptimizations && (f.Name != "engineDiagnosticHooks" || Current(journal) && !launch.EngineDiagnosticHooks),
             Kind.Visual => !launch.Desktop,
             // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is

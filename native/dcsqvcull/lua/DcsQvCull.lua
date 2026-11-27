@@ -20,6 +20,25 @@ local function native(name)
   if okL and type(f) == 'function' then return f end
   return nil
 end
+local cpuOptTick
+local cpuOptDll = lfs.writedir() .. [[Scripts\DcsQvCull\cpu-opt\dcs_cpu_opt.dll]]
+if ok and lfs.attributes(cpuOptDll, 'mode') == 'file' then
+  local standalone = lfs.writedir() .. [[Scripts\Hooks\DcsCpuOpt.lua]]
+  if lfs.attributes(standalone, 'mode') == 'file' then
+    log.write('DcsQvCull', log.WARNING, 'Experimental CPU optimizations skipped because the standalone DCS CPU Opt hook is installed.')
+  else
+    local cpuOk, cpuErr = pcall(function()
+      local open, loadError = package.loadlib(cpuOptDll, 'luaopen_dcs_cpu_opt')
+      if not open then error(loadError, 0) end
+      open()
+      cpuOptTick = package.loadlib(cpuOptDll, 'DcsCpuOpt_Tick')
+    end)
+    if not cpuOk then
+      log.write('DcsQvCull', log.ERROR, 'Failed to load experimental CPU optimizations: ' .. tostring(cpuErr))
+    end
+  end
+end
+
 if ok then
   -- DCS exit: this userdata is created after the module was loaded, so Lua
   -- finalizes it first when DCS closes this state, before the loadlib
@@ -133,7 +152,7 @@ if ok then
       end
     end
   end
-  if (simStop or loadBegin or slotChange or gload or audioTick) and DCS and type(DCS.setUserCallbacks) == 'function' then
+  if (simStop or loadBegin or slotChange or gload or audioTick or cpuOptTick) and DCS and type(DCS.setUserCallbacks) == 'function' then
     local cb = {}
     if simStop then cb.onSimulationStop = function() pcall(simStop) end end
     if loadBegin then cb.onMissionLoadBegin = function() pcall(loadBegin) end end
@@ -166,6 +185,18 @@ if ok then
         if not okId or me == nil or id == me then
           if slotChange then pcall(slotChange) end
           if audioTick then pcall(audioTick, true) end
+        end
+      end
+    end
+    if cpuOptTick then
+      local frame = cb.onSimulationFrame
+      local lastTick
+      cb.onSimulationFrame = function()
+        if frame then frame() end
+        local now = clock()
+        if not lastTick or now < lastTick or now - lastTick >= 1 then
+          lastTick = now
+          pcall(cpuOptTick)
         end
       end
     end

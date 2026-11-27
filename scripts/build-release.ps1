@@ -114,7 +114,7 @@ New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
 # its harness (A1-A14 of docs/BINAURAL_AUDIO.md) runs only here, the payload build compiles the same sources.
 if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
 $nativeBuilds = @((Start-NativeBuild 'dcsqvcull' 'build-dcsqvcull.ps1'), (Start-NativeBuild 'pupil-shift' 'build-pupil-shift.ps1'),
-    (Start-NativeBuild 'binaural' 'build-binaural.ps1'))
+    (Start-NativeBuild 'binaural' 'build-binaural.ps1'), (Start-NativeBuild 'dcs-cpu-opt' 'build-dcs-cpu-opt.ps1'))
 # A release that stops before collecting them stops them too.
 trap { if ($nativeBuilds) { $nativeBuilds.Job | Where-Object State -eq 'Running' | Stop-Job -ErrorAction SilentlyContinue }; break }
 # The launcher at the top of the release folder (starts files\DcsControl.exe); the interface render below uses it too.
@@ -170,6 +170,11 @@ foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/nati
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
     Write-Sha256Sidecar $target
 }
+$cpuOpt = Join-Path $workspaceRoot 'artifacts/native/dcs-cpu-opt/x86_64-pc-windows-msvc/release/dcs_cpu_opt.dll'
+$cpuOptTarget = Join-Path $payloadRoot 'components/dcsqvcull/dcs_cpu_opt.dll'
+Copy-Item -LiteralPath $cpuOpt -Destination $cpuOptTarget -Force
+Write-Sha256Sidecar $cpuOptTarget
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'native/dcs-cpu-opt/THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $payloadRoot 'licenses/DcsCpuOpt-THIRD-PARTY.txt') -Force
 # The engine payload carries the generic HRTF set itself, as the RCDATA resource HRTF_DEFAULT. Checked the way the app
 # reads it (DcsVr.Core PeResource: the resource directory's first language of type / name), and byte for byte against
 # native/binaural/data: a payload built before the set was made, or from another one, would leave 3D audio greyed out or

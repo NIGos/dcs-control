@@ -1808,6 +1808,35 @@ Test("An installation from before the rename keeps its state folder; a new one u
     Directory.CreateDirectory(Path.Combine(earlier, "DcsControl"));
     Require(ControlService.StateRootIn(earlier) == Path.Combine(earlier, "DcsControl"));
 });
+Test("Experimental CPU options deploy independently, leave DCS files alone, and restore", () =>
+{
+    var exe = Make("cpu-opt/bin/DCS.exe", "fixture");
+    var options = Make("cpu-opt/saved/DCS/Config/options.lua", "options = {}");
+    var engine = Path.GetDirectoryName(Make("cpu-opt/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("cpu-opt/components/dcsqvcull/DcsQvCullPayload.dll", "payload");
+    Make("cpu-opt/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+    Make("cpu-opt/components/dcsqvcull/dcs_cpu_opt.dll", "cpu opt");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options };
+    var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: engine));
+    var managed = Path.Combine(root, "cpu-opt/managed");
+    var profile = new VrProfile { Desktop = true, EngineOptimizations = true };
+    var cpuOptDir = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(options))!, "Scripts", "DcsQvCull", "cpu-opt");
+    Require(planner.Build(profile, inventory, managed).Files.All(f => !f.Path.StartsWith(cpuOptDir)));
+    profile = profile with { EngineCpuOptInflate = true, EngineCpuOptTerrain = true, EngineCpuOptGroundRoutes = true, EngineCpuOptLowPowerPacer = true, EngineCpuOptSoundCull = true };
+    var plan = planner.Build(profile, inventory, managed);
+    var ini = plan.Files.Single(f => f.Path == Path.Combine(cpuOptDir, "DcsCpuOpt.ini"));
+    Require(Encoding.UTF8.GetString(ini.Content).Equals("[DcsCpuOpt]\nEnabled=1\nZlibInflateOpt=1\nTerrainLookupOpt=1\nTransportRouteOpt=1\nLowPowerPacer=1\nSoundCull=1\n"));
+    Require(plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(exe)!, StringComparison.OrdinalIgnoreCase)));
+    var compatible = planner.Build(profile with { BinauralAudio = true, BinauralLateHeadTracking = false }, inventory, managed);
+    Require(Encoding.UTF8.GetString(compatible.Files.Single(f => f.Path == ini.Path).Content).Contains("SoundCull=0"));
+    var originals = new OriginalsStore(Path.Combine(root, "cpu-opt/originals"));
+    originals.Apply(plan);
+    var log = Path.Combine(cpuOptDir, "DcsCpuOpt.log");
+    AtomicFile.WriteText(log, "native log");
+    Require(originals.RestoreOriginals().Complete && !File.Exists(log) && !File.Exists(ini.Path));
+    Make("cpu-opt/saved/DCS/Scripts/Hooks/DcsCpuOpt.lua", "-- standalone mod");
+    Throws<InvalidDataException>(() => planner.Build(profile, inventory, managed));
+});
 Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the user has them, and adds only the optimizations", () =>
 {
     var exe = Make("desktop/bin/DCS.exe", "fixture");

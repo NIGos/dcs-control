@@ -913,6 +913,13 @@ function buildFields() {
   // skip, both the stock picture; small, so one switch). Live like the other engine parts.
   field(gpuFold,'engineWaterSkip','<span class="tag">EXPERIMENTAL</span> Skip hidden water',['Less GPU time while no water is in view.','DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late.'],'toggle',null,engine);
   field(gpuFold,'engineIdleEffectSkip','<span class="tag">EXPERIMENTAL</span> Skip unused effects',['A small GPU saving over the sea and away from engine heat. Same image.','Skips shading work on water that changes nothing, and the heat-haze passes when nothing is hot.'],'toggle',null,engine);
+  const cpuOpt = toggleList(disclosure(c,'Experimental CPU optimizations',
+    'Off by default. Changes apply at the next DCS start. These options stay in force until DCS exits.'));
+  field(cpuOpt,'engineCpuOptInflate','Faster asset decompression','Uses libdeflate for qualifying texture and model archive entries. Other entries use DCS’s own decoder.','toggle',null,engine);
+  field(cpuOpt,'engineCpuOptTerrain','Faster terrain lookups','Caches terrain index lookups. The cache is rebuilt when the underlying terrain data changes.','toggle',null,engine);
+  field(cpuOpt,'engineCpuOptGroundRoutes','Faster ground vehicle route searches','Reduces the work needed to find a vehicle’s position on a long route.','toggle',null,engine);
+  field(cpuOpt,'engineCpuOptLowPowerPacer','Low-power frame pacing on AMD','Lets supported AMD CPUs sleep briefly while waiting for a frame.','toggle',null,engine);
+  field(cpuOpt,'engineCpuOptSoundCull','Reduce distant sound updates','Reduces updates for distant, silent sounds. Turning on 3D headphone audio takes precedence after the next launch.','toggle',null,p => engine(p) && !p.binauralAudio);
   // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
   more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
   field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);
