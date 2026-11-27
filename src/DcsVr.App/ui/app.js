@@ -879,7 +879,7 @@ function buildFields() {
   // Engine Optimizations page: the DcsQvCull module, installed in Saved Games with the profile.
   const engine = p => p.engineOptimizations;
   c = card('engineControls','Engine Optimizations',['More FPS from the same CPU; the image does not change.','About 50 to 60% more FPS on a busy airfield in VR, until the GPU is the limit.']);
-  field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30 and 2.9.31, single player.'],'toggle');
+  field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested with DCS 2.9.32.30490 (Steam), single player.'],'toggle');
   // [Model] RecordersEmulatedLists, automatic: on for AMD-only graphics, off elsewhere (untested on NVIDIA without lists) until the pilot turns it on.
   // Shown only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only PC or a module log with DriverCommandLists=0.
   // With driver command lists the module ignores it. Read when DCS starts, so not live.
@@ -903,6 +903,28 @@ function buildFields() {
   field(more,'engineFrameHeap','Frame memory per thread','Gives each thread its own short-lived memory. About 1.5% more FPS.','toggle',null,engine);
   field(more,'engineStateFilter','Redundant state filter','Skips graphics state that is already set. Same image. About 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
   field(more,'engineBeeps','Beeps for the in-flight switch','One beep off, two beeps on.','toggle',null,engine);
+  const cpuOpt = toggleList(disclosure(c,'Experimental CPU optimizations',
+    'Optional settings for loading, simulation, frame pacing and audio. Off by default. Apply at the next DCS start.',
+    p => !engine(p) ? 'Engine off' : `${[p.engineCpuOptInflate,p.engineCpuOptTerrain,p.engineCpuOptGroundRoutes,
+      p.engineCpuOptLowPowerPacer,p.engineCpuOptSoundCull && !p.binauralAudio].filter(Boolean).length} of 5 selected`));
+  const cpuOptNeeds = ['Turn on Engine Optimizations to use these settings.','engineOptimizations'];
+  field(cpuOpt,'engineCpuOptInflate','Faster asset decompression',
+    'Can speed up loading textures and models from archives. The decompressed files are identical.',
+    'toggle',null,engine,'',null,null,cpuOptNeeds);
+  field(cpuOpt,'engineCpuOptTerrain','Faster terrain lookups',
+    ['Reduces CPU work on terrain lookups that use this path.','Tested with DCS 2.9.32.30490 on Steam. DCS keeps its usual lookup on other builds.'],
+    'toggle',null,engine,'',null,null,cpuOptNeeds);
+  field(cpuOpt,'engineCpuOptGroundRoutes','Faster ground vehicle route searches',
+    ['Reduces CPU work in missions with moving ground vehicles.','Tested with DCS 2.9.32.30490 on Steam. DCS keeps its usual route search on other builds.'],
+    'toggle',null,engine,'',null,null,cpuOptNeeds);
+  field(cpuOpt,'engineCpuOptLowPowerPacer','Low-power frame pacing on AMD',
+    ['Lets supported AMD CPUs idle briefly while waiting for a frame.','DCS checks for CPU support and keeps its usual pacing on other systems.'],
+    'toggle',null,engine,'',null,null,cpuOptNeeds);
+  field(cpuOpt,'engineCpuOptSoundCull','Reduce sound update work',
+    ['Caps sound-engine updates at 60 Hz and refreshes distant, silent sources less often.',
+      'Some sounds may update later. Uses the validated DCS 2.9.32.30490 Steam build.'],
+    'toggle',null,p => engine(p) && !p.binauralAudio,'',null,null,
+    p => !engine(p) ? cpuOptNeeds : ['3D headphone audio takes priority.','binauralAudio']);
   // GPU savings in their own fold after the CPU parts, with how many are on: the card itself is about the CPU, and the
   // rows at its top pushed the parts below the fold. Faster terrain and shader paths first (on by default).
   const gpuFold = toggleList(disclosure(c,'GPU savings','Less GPU time in some scenes. Some are off by default.',p => `${GPU_SAVINGS.filter(k => p[k]).length} of ${GPU_SAVINGS.length} on`));
@@ -913,15 +935,6 @@ function buildFields() {
   // skip, both the stock picture; small, so one switch). Live like the other engine parts.
   field(gpuFold,'engineWaterSkip','<span class="tag">EXPERIMENTAL</span> Skip hidden water',['Less GPU time while no water is in view.','DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late.'],'toggle',null,engine);
   field(gpuFold,'engineIdleEffectSkip','<span class="tag">EXPERIMENTAL</span> Skip unused effects',['A small GPU saving over the sea and away from engine heat. Same image.','Skips shading work on water that changes nothing, and the heat-haze passes when nothing is hot.'],'toggle',null,engine);
-  const cpuOpt = toggleList(disclosure(c,'Experimental CPU optimizations',
-    'Off by default. Changes apply at the next DCS start. These options stay in force until DCS exits.',
-    p => [p.engineCpuOptInflate,p.engineCpuOptTerrain,p.engineCpuOptGroundRoutes,p.engineCpuOptLowPowerPacer,
-      p.engineCpuOptSoundCull && !p.binauralAudio].filter(Boolean).length + ' of 5 on'));
-  field(cpuOpt,'engineCpuOptInflate','Faster asset decompression','Uses libdeflate for qualifying texture and model archive entries. Other entries use DCS’s own decoder.','toggle',null,engine);
-  field(cpuOpt,'engineCpuOptTerrain','Faster terrain lookups','Caches terrain index lookups. The cache is rebuilt when the underlying terrain data changes.','toggle',null,engine);
-  field(cpuOpt,'engineCpuOptGroundRoutes','Faster ground vehicle route searches','Reduces the work needed to find a vehicle’s position on a long route.','toggle',null,engine);
-  field(cpuOpt,'engineCpuOptLowPowerPacer','Low-power frame pacing on AMD','Lets supported AMD CPUs sleep briefly while waiting for a frame.','toggle',null,engine);
-  field(cpuOpt,'engineCpuOptSoundCull','Reduce distant sound updates','Caps sound-engine updates at 60 Hz and updates distant silent sources less often. Turning on 3D headphone audio takes precedence after the next launch.','toggle',null,p => engine(p) && !p.binauralAudio);
   // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
   more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
   field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);

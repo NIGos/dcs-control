@@ -335,6 +335,16 @@ window.runWebSmoke = async function() {
       { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, gpu = ['engineFastShaderPaths','engineShadowCache','engineWaterSkip','engineIdleEffectSkip'].filter(k => ui.profile[k]).length;
         const tracked = ui.profile.quadViews === 'QuadViewsFoveated' && !ui.profile.quadViewsLayerDirectory && ui.profile.gaze === 'EyeTracked', gaze = ['quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase'].filter(k => ui.profile[k]).length;
         check('The GPU savings fold counts its switches; the eye-tracking fold counts its own, or says it needs eye tracking',value('engineWaterSkip') === `${gpu} of 4 on` && $('setting-engineFastShaderPaths').closest('details') === $('setting-engineWaterSkip').closest('details') && value('quadSaccadeLead') === (tracked ? `${gaze} of 4 on` : 'Eye tracked only')); }
+      { const keys = ['engineCpuOptInflate','engineCpuOptTerrain','engineCpuOptGroundRoutes','engineCpuOptLowPowerPacer','engineCpuOptSoundCull'];
+        const fold = $('setting-engineCpuOptInflate').closest('details'), value = fold.querySelector('.fold-value');
+        const before = {engine:ui.profile.engineOptimizations, audio:ui.profile.binauralAudio, inflate:ui.profile.engineCpuOptInflate, cull:ui.profile.engineCpuOptSoundCull};
+        check('The five experimental CPU switches start off, together on the Engine page', keys.every(k => !ui.profile[k] && $('setting-'+k).closest('details') === fold && $('setting-'+k).closest('.page').id === 'page-engine'));
+        edit('engineOptimizations',true); edit('binauralAudio',false); edit('engineCpuOptInflate',true); edit('engineCpuOptSoundCull',true);
+        const selected = value.textContent === '2 of 5 selected';
+        edit('binauralAudio',true);
+        check('Experimental CPU selections reflect the headphone-audio priority and keep the saved sound choice',
+          selected && value.textContent === '1 of 5 selected' && $('input-engineCpuOptSoundCull').disabled && ui.profile.engineCpuOptSoundCull && !$('why-engineCpuOptSoundCull').hidden);
+        edit('engineCpuOptInflate',before.inflate); edit('engineCpuOptSoundCull',before.cull); edit('binauralAudio',before.audio); edit('engineOptimizations',before.engine); }
       { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, p = ui.profile, fg = p.frameGen, desktop = p.desktop;
         const shape = value('quadEdgeBlend') === (p.quadRoundFocus ? 'Round · ' : 'Rounded rectangle · ')+(ui.effectiveFovea(p).blend > 0 ? 'Edge '+Number(ui.effectiveFovea(p).blend.toFixed(4)) : ui.effectiveFovea(p).pimax ? 'Hard edge (Pimax Play)' : 'Hard edge');
         const nrDefaults = !p.neuralRendering ? value('quadNeuralEdgeFade') === 'Off' : !p.quadNeuralEdgeFade || !p.neuralBeforeUpscaling || value('quadNeuralEdgeFade') === 'Defaults';
