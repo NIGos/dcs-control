@@ -5957,20 +5957,23 @@ void PoolShape(bool cockpitSlots, int* slots, int* threads) {
 
 // GraphicsCore's collection descriptors as R24 2 read them [V 2.9.30]; nullptr
 // or why not (then executions are taken by plain ordinal).
-const char* CollBuildWhy() {
+const char* CollBuildWhy(uint8_t* gc) {
   static const struct {
     uint32_t begin, end;
-    uint64_t hash;
+    uint64_t hash, hash2932;
   } kCode[] = {
       {0x56a74, 0x56aee, 0x2a1c1d647e5002e5ull},  // node and descriptor pushed together, word +0x38 = index
-      {0x40a30, 0x40a52, 0x87c79dd0df9dd11bull},  // descriptor +0: the shading model
+      // 2.9.32 still copies the shading model at +0 and the volume at +8, then copies 0x588 bytes at +0x10.
+      {0x40a30, 0x40a52, 0x87c79dd0df9dd11bull, 0x4771bc463a88f64bull},
       {0x40aea, 0x40af6, 0x0b9b7cd978e36a57ull},  // descriptor +0x690: the viewport tag
       {0x50fa4, 0x5101d, 0x3e6a336882e78f05ull},  // node k, descriptor k (0x6d8 bytes) and vector k read together
   };
-  auto* gc = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"GraphicsCore.dll"));
   if (!gc) return "GraphicsCore.dll not loaded";
-  for (const auto& c : kCode)
-    if (!shadowtex::CodeIs(gc, c.begin, c.end, c.hash)) return "GraphicsCore's collection descriptors differ from R24's";
+  const bool build2932 = gbpass::IsGraphicsCore2932(gc);
+  for (const auto& c : kCode) {
+    const uint64_t hash = build2932 && c.hash2932 ? c.hash2932 : c.hash;
+    if (!shadowtex::CodeIs(gc, c.begin, c.end, hash)) return "GraphicsCore's collection descriptors differ from R24's";
+  }
   return nullptr;
 }
 
@@ -6059,7 +6062,7 @@ bool Install() {
     for (int k = 0; k < kMaxSegments; ++k) g_slot[s].exec[k] = {g_execVtbl, s, k};
   }
   // Execution identity (R24 2): the collection descriptors as analysed, else plain ordinals.
-  const char* collWhy = CollBuildWhy();
+  const char* collWhy = CollBuildWhy(reinterpret_cast<uint8_t*>(GetModuleHandleW(L"GraphicsCore.dll")));
   g_collOk = !collWhy;
   const char* idWhy = g_byOrdinal.load() ? "[Model] GBufferRecorderByOrdinal=1" : collWhy;
   g_idMode = !idWhy;

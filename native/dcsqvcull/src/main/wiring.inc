@@ -42,12 +42,9 @@ void PerceptionGlobalsTick() {
   auto* ng = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!ng) return;
   shadowtex::Addrs a;
-  if (!shadowtex::ResolveAddrs(a) ||
+  if (!shadowtex::ResolveAddrs(ng, a) ||
       !allocslab::RttiIs(ng, reinterpret_cast<void**>(ng + a.model), ".?AVModelMaterialMT@model@@") ||
-      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_drawShadow, ng, shadowtex::kSlot5, shadowtex::kSlot5End,
-                     shadowtex::kSlot5Hash) ||
-      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_submit, ng, shadowtex::kSubmit, shadowtex::kSubmitEnd,
-                     shadowtex::kSubmitHash)) {
+      !shadowtex::ModelCodeMatches(ng)) {
     g_poGlobals = -1;
     Log("perception only: NGModel is not the analysed build; the cockpit ipd's helmet and ownship matching stay off");
     return;

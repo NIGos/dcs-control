@@ -118,6 +118,7 @@ struct VisTerr {
 constexpr VisTerr kVisTerr[] = {
     {0x20ec08, 0x103cf0, {0x103cf0, 0x103d39, 0x0163045434e4ef39ull}},  // DCS 2.9.30 (0x6ac12454)
     {0x23d318, 0x130480, {0x130480, 0x1304c9, 0xae688f8a3a9ab874ull}},  // DCS 2.9.31 (0x6ad87745)
+    {0x23d338, 0x1307f0, {0x1307f0, 0x130839, 0x797cde46a13c2a6dull}},  // DCS 2.9.32.30490 (0x6afec037)
 };
 
 // R125: MetaMaterial_Instancer2 (RTTI `.?AVMetaMaterial_Instancer2@edtg41@@`) vt[8] and what it reads.

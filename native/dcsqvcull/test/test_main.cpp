@@ -1740,7 +1740,7 @@ int main() {
   gbbtest::BuildChecks();
 
   // Shadow texture skip: the C copy of ModelMaterialMT slot 5 against the real
-  // machine code of the analysed NGModel.dll (loaded without imports; its IAT
+  // machine code of a supported NGModel.dll (loaded without imports; its IAT
   // entries, globals and the submit are redirected to fakes).
   {
     using namespace stx;
@@ -1753,25 +1753,32 @@ int main() {
     } else if (const char* why = VerifyBuild(reinterpret_cast<uint8_t*>(ngm), reinterpret_cast<uint8_t*>(dxm))) {
       Check(false, "shadow tex: installed NGModel/dx11backend passes compatibility checks");
       printf("     %s\n", why);
-    } else if (!reloc::IsAnalysedBuild(reinterpret_cast<const uint8_t*>(ngm),
+    } else if (ngb::BuildOf(reinterpret_cast<const uint8_t*>(ngm)) != ngb::k2932 &&
+               !reloc::IsAnalysedBuild(reinterpret_cast<const uint8_t*>(ngm),
                                        hooksig::kLocs[hooksig::NG_ModelMaterialMT_vtbl].module)) {
-      // The execution fixture constructs materials and substitutes functions at original-build offsets.
-      QvSkip("shadow tex: original-image execution fixture does not cover this layout\n");
+      QvSkip("shadow tex: execution fixture does not cover this layout\n");
     } else {
       auto* ng = reinterpret_cast<uint8_t*>(ngm);
+      const Addrs a = shadowtex::g_at;
+      uint8_t savedSubmit[12];
+      memcpy(savedSubmit, ng + a.submit, sizeof(savedSubmit));
+      uint64_t savedGetTexture, savedValid, savedGlobals;
+      memcpy(&savedGetTexture, ng + a.iatGetTexture, sizeof(savedGetTexture));
+      memcpy(&savedValid, ng + a.iatValid, sizeof(savedValid));
+      memcpy(&savedGlobals, ng + a.globals, sizeof(savedGlobals));
       // Redirect what slot 5 reaches outside itself.
       void* redirect = reinterpret_cast<void*>(&FakeGetTexture);
-      WriteCode(ng + kIatGetTexture, &redirect, 8);
+      WriteCode(ng + a.iatGetTexture, &redirect, 8);
       redirect = reinterpret_cast<void*>(&FakeValid);
-      WriteCode(ng + kIatValid, &redirect, 8);
+      WriteCode(ng + a.iatValid, &redirect, 8);
       redirect = g_globals;
-      WriteCode(ng + kGlobals, &redirect, 8);
+      WriteCode(ng + a.globals, &redirect, 8);
       uint8_t jmp[12] = {0x48, 0xb8};
       const uint64_t target = reinterpret_cast<uint64_t>(&FakeSubmit);
       memcpy(jmp + 2, &target, 8);
       jmp[10] = 0xff;
       jmp[11] = 0xe0;  // mov rax, FakeSubmit; jmp rax
-      WriteCode(ng + kSubmit, jmp, sizeof(jmp));
+      WriteCode(ng + a.submit, jmp, sizeof(jmp));
       *reinterpret_cast<uint8_t**>(g_globals + 0x80) = g_sbArray;
       for (int i = 0; i < 8; ++i) *reinterpret_cast<uint64_t*>(g_sbArray + 0x20 + i * 0x30) = 0x5b00 + i;
       g_shaderVtbl[26] = reinterpret_cast<void*>(&FakeSetTex);
@@ -1784,7 +1791,7 @@ int main() {
       *reinterpret_cast<int32_t*>(g_desc + 0x20) = 28;
       // The hook's globals, pointing at the loaded image and the fakes.
       shadowtex::g_ng = ng;
-      shadowtex::g_submit = reinterpret_cast<SubmitFn>(ng + kSubmit);
+      shadowtex::g_submit = reinterpret_cast<SubmitFn>(ng + a.submit);
       shadowtex::g_getDesc = &FakeGetDesc;
       shadowtex::g_compat = &FakeCompat;
       shadowtex::g_getSrv = &FakeGetSrv;
@@ -1792,7 +1799,7 @@ int main() {
       shadowtex::g_innerFile = g_innerVtbl;
       shadowtex::g_innerArray = g_innerVtbl;
       shadowtex::g_innerDummy = g_innerVtbl;
-      auto original = reinterpret_cast<Slot5Fn>(ng + kSlot5);
+      auto original = reinterpret_cast<Slot5Fn>(ng + a.slot5);
 
       const int64_t handles[12] = {0, 1, -1, 2, 3, 4, 5, 6, 7, -1, 9, 10};
       struct Variant {
@@ -1962,6 +1969,10 @@ int main() {
                      "hook with the skip off and on, 7 variants)");
       }
       delete sc;
+      WriteCode(ng + a.submit, savedSubmit, sizeof(savedSubmit));
+      WriteCode(ng + a.globals, &savedGlobals, sizeof(savedGlobals));
+      WriteCode(ng + a.iatValid, &savedValid, sizeof(savedValid));
+      WriteCode(ng + a.iatGetTexture, &savedGetTexture, sizeof(savedGetTexture));
       Check(same, "shadow tex: C copy of slot 5 makes exactly the original's calls (7 variants)");
       Check(noMaskOk, "shadow tex: casters without a mask run the copy with every set kept and counted");
       Check(skipOk && skippedTotal > 0 && replayed > 0,

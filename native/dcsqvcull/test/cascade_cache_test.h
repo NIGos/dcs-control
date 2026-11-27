@@ -817,6 +817,12 @@ void ReplicaTests() {
   g_rig.Release();
 }
 void Run() {
+  if (HMODULE gc = dcsinstall::LoadBinary(L"GraphicsCore.dll")) {
+    Check(ParseTarget(reinterpret_cast<uint8_t*>(gc)) != nullptr, "cascade cache: installed GraphicsCore parse target is recognized");
+    FreeLibrary(gc);
+  } else {
+    dcsinstall::Skip("cascade cache parse target");
+  }
   MathTests();
   DecideTests();
   ListTests();

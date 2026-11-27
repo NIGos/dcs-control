@@ -62,6 +62,7 @@ namespace cascache {
 constexpr uint32_t kVtblRva = 0xd98d0;   // ??_7ShadowMapModule@render@@6BSceneRender@Shadows@enlight@@@
 constexpr int kParseSlot = 1;
 constexpr uint32_t kParseRva = 0xa8180;  // ShadowMapModule::parseShadowMap(int, Matrixf const&, Matrixf const&)
+constexpr uint32_t kParseRva2932 = 0xa8170;  // same SceneRender slot; GraphicsCore 2.9.32.30490 moved the function
 constexpr uint8_t kParseBytes[16] = {0x48, 0x89, 0x5c, 0x24, 0x20, 0x55, 0x56, 0x57,
                                      0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
 constexpr uint32_t kModCount = 0x1a74;   // cascade count (data index = count - 1 - idx, GC 0xa8748)
@@ -1031,15 +1032,26 @@ void ModuleRange(const wchar_t* name, uintptr_t* lo, uintptr_t* hi) {
   *hi = *lo + nt->OptionalHeader.SizeOfImage;
 }
 
+uint8_t* ParseTarget(uint8_t* base) {
+  const bool build2932 = gbpass::IsGraphicsCore2932(base);
+  auto* parse = base + (build2932 ? kParseRva2932 : kParseRva);
+  auto** vtbl = reinterpret_cast<void**>(base + kVtblRva);
+  uint8_t pro[sizeof(kParseBytes)];
+  if (SlotOriginal(&vtbl[kParseSlot]) != parse || !allocslab::ReadBytes(parse, pro, sizeof(pro)) ||
+      memcmp(pro, kParseBytes, sizeof(pro)) != 0)
+    return nullptr;
+  if (build2932 && !ngb::RawIs(base, kParseRva2932, 0xa8815, 0xecd15f795c48fc8eull)) return nullptr;
+  return parse;
+}
+
 bool Install() {
   if (g_state.load() != 0) return g_state.load() > 0;
   HMODULE gc = GetModuleHandleW(L"GraphicsCore.dll");
   if (!gc || !GetModuleHandleW(L"edterrainGraphics41.dll")) return false;  // retried
   auto* base = reinterpret_cast<uint8_t*>(gc);
   auto** vtbl = reinterpret_cast<void**>(base + kVtblRva);
-  uint8_t pro[sizeof(kParseBytes)];
-  if (SlotOriginal(&vtbl[kParseSlot]) != base + kParseRva || !allocslab::ReadBytes(base + kParseRva, pro, sizeof(pro)) ||
-      memcmp(pro, kParseBytes, sizeof(pro)) != 0) {
+  auto* parse = ParseTarget(base);
+  if (!parse) {
     Log("cascade cache: GraphicsCore.dll is not the analysed build (SceneRender slot 1 / parseShadowMap); unavailable");
     g_state = -1;
     return false;
@@ -1053,7 +1065,7 @@ bool Install() {
   QueryPerformanceFrequency(&f);
   g_gapQpc = f.QuadPart / 4;
   g_expectVtbl = vtbl;
-  g_parseOrig = reinterpret_cast<ParseFn>(base + kParseRva);
+  g_parseOrig = reinterpret_cast<ParseFn>(parse);
   if (!HookSlot(&vtbl[kParseSlot], reinterpret_cast<void*>(&ParseHook), nullptr)) {
     Log("cascade cache: the SceneRender slot could not be hooked; unavailable");
     g_state = -1;

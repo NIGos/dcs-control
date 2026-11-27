@@ -407,7 +407,7 @@ void Perception() {
       // Freshly mapped here (QV_PO_ONLY): DCS's own bytes, so it must resolve. After the other tests the
       // mapped image carries their code patches: refused then (logged), never a wrong pointer.
       shadowtex::Addrs a;
-      const bool set = g_poGlobals == 1 && shadowtex::ResolveAddrs(a) &&
+      const bool set = g_poGlobals == 1 && shadowtex::ResolveAddrs(ng, a) &&
                        gbrec::g_env.globals == reinterpret_cast<uint8_t* const*>(ng + a.globals);
       if (g_ngFresh)
         Check(set, "perception only: the NGModel globals for helmet / ownship matching resolved from DCS's NGModel");

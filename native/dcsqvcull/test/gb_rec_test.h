@@ -2615,6 +2615,12 @@ void R129VerifyTests() {
 }
 
 void Run() {
+  if (HMODULE gc = dcsinstall::LoadBinary(L"GraphicsCore.dll")) {
+    Check(!CollBuildWhy(reinterpret_cast<uint8_t*>(gc)), "gbuffer rec: installed GraphicsCore collection layout is recognized");
+    FreeLibrary(gc);
+  } else {
+    dcsinstall::Skip("gbuffer rec collection layout");
+  }
   PureTests();
   R129VerifyTests();
   TexTableTests();

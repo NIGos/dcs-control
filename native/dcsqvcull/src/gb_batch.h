@@ -141,6 +141,12 @@ void** ItemVector(void* pass, void* ctx) {
   }
 }
 
+bool IsGraphicsCore2932(const uint8_t* gc) {
+  const auto* headers = sigscan::NtHeaders(gc);
+  return headers && headers->FileHeader.TimeDateStamp == 0x6ae7209b &&
+         headers->OptionalHeader.SizeOfImage == 0x12a000;
+}
+
 const char* VerifyBuild(uint8_t* gc) {
   auto** vtbl = reinterpret_cast<void**>(gc + kVtableRva);
   if (!allocslab::RttiIs(gc, vtbl, kRtti) || reinterpret_cast<uint8_t*>(SlotOriginal(&vtbl[kExecSlot])) != gc + kThunkRva)

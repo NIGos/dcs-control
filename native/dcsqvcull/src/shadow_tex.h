@@ -844,13 +844,17 @@ void* __fastcall HookDtor(void* self, uint32_t flags) {
 // ---------------------------------------------------------------------------
 
 // False when a location is not found in this build (reloc.h logged which).
-bool ResolveAddrs(Addrs& a, const char** reason = nullptr) {
-  a.model = reloc::Rva(hooksig::NG_ModelMaterialMT_vtbl, kModelVtbl);
-  a.slot5 = reloc::Rva(hooksig::NG_ModelMaterialMT_drawShadow, kSlot5);
-  a.submit = reloc::Rva(hooksig::NG_ModelMaterialMT_submit, kSubmit);
-  a.globals = reloc::Rva(hooksig::NG_model_globals, kGlobals);
-  a.iatGetTexture = reloc::Rva(hooksig::NG_iat_PropertiesSet_getTexture, kIatGetTexture);
-  a.iatValid = reloc::Rva(hooksig::NG_iat_Texture2dProperties_valid, kIatValid);
+bool ResolveAddrs(uint8_t* ng, Addrs& a, const char** reason = nullptr) {
+  const bool knownLayout = ngb::Use(ng) == ngb::k2932;
+  auto modelRva = [&](hooksig::Id id, uint32_t rva) {
+    return knownLayout ? ngb::At(ng, rva) : reloc::Rva(id, rva);
+  };
+  a.model = modelRva(hooksig::NG_ModelMaterialMT_vtbl, kModelVtbl);
+  a.slot5 = modelRva(hooksig::NG_ModelMaterialMT_drawShadow, kSlot5);
+  a.submit = modelRva(hooksig::NG_ModelMaterialMT_submit, kSubmit);
+  a.globals = modelRva(hooksig::NG_model_globals, kGlobals);
+  a.iatGetTexture = modelRva(hooksig::NG_iat_PropertiesSet_getTexture, kIatGetTexture);
+  a.iatValid = modelRva(hooksig::NG_iat_Texture2dProperties_valid, kIatValid);
   a.shader = reloc::Rva(hooksig::DX_DX11Shader_vtbl, kShaderVtbl);
   a.setTexture = reloc::Rva(hooksig::DX_DX11Shader_setTexture, kSetTexture);
   a.shaderDtor = reloc::Rva(hooksig::DX_DX11Shader_dtor, 0x1d3c0);
@@ -881,20 +885,27 @@ bool ResolveAddrs(Addrs& a, const char** reason = nullptr) {
   return modelOk && backendOk;
 }
 
+bool ModelCodeMatches(uint8_t* ng) {
+  if (ngb::BuildOf(ng) == ngb::k2932)
+    return ngb::CodeIs(ng, kSlot5, kSlot5End, kSlot5Hash) &&
+           ngb::CodeIs(ng, kSubmit, kSubmitEnd, kSubmitHash);
+  return reloc::CodeIs(hooksig::NG_ModelMaterialMT_drawShadow, ng, kSlot5, kSlot5End, kSlot5Hash) &&
+         reloc::CodeIs(hooksig::NG_ModelMaterialMT_submit, ng, kSubmit, kSubmitEnd, kSubmitHash);
+}
+
 // Returns nullptr when NGModel and dx11backend are the analysed build (or
 // another build with the same code, see reloc.h), else the log line saying
 // what does not match. Sets g_at.
 const char* VerifyBuild(uint8_t* ng, uint8_t* dx) {
   Addrs& a = g_at;
   const char* reason = nullptr;
-  if (!ResolveAddrs(a, &reason)) return reason;
+  if (!ResolveAddrs(ng, a, &reason)) return reason;
   auto** model = reinterpret_cast<void**>(ng + a.model);
   auto** shaderVtbl = reinterpret_cast<void**>(dx + a.shader);
   auto** texVtbl = reinterpret_cast<void**>(dx + a.tex);
   if (!allocslab::RttiIs(ng, model, ".?AVModelMaterialMT@model@@") ||
       reinterpret_cast<uint8_t*>(SlotOriginal(&model[5])) != ng + a.slot5 ||
-      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_drawShadow, ng, kSlot5, kSlot5End, kSlot5Hash) ||
-      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_submit, ng, kSubmit, kSubmitEnd, kSubmitHash))
+      !ModelCodeMatches(ng))
     return "shadow texture skip: NGModel ModelMaterialMT does not match this build; skipped";
   if (!allocslab::RttiIs(dx, shaderVtbl, ".?AVDX11Shader@RenderAPI@@") ||
       reinterpret_cast<uint8_t*>(SlotOriginal(&shaderVtbl[26])) != dx + a.setTexture ||

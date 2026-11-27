@@ -1337,7 +1337,7 @@ void Run() {
     QvSkip("shadow inst: no .fxo files in %ls\n", kFxoDir);
   } else {
     int files = 0, parsed = 0, exact = 0, countsOk = 0, blobs = 0, reflOk = 0, stageOk = 0, bindOk = 0, isgnOk = 0;
-    int keysOk = 0, techVs = 0, techVsOk = 0;
+    int keysOk = 0, techVs = 0, techVsOk = 0, techNoVs = 0, techNoVsOk = 0;
     std::string firstErr;
     for (const std::wstring& name : ListFiles(root + L"fxo\\", L"*.fxo")) {
       FxoFile f;
@@ -1392,17 +1392,31 @@ void Run() {
           isgnOk += isgn && count == sd.InputParameters;
           r->Release();
         }
-      // Technique pass VS extraction (every technique whose passes all set a VS).
+      // A technique can be recorded only if its name is unique and every pass sets one static VS.
       for (const FxTechnique& t : fx.techs) {
+        const bool unique = std::count_if(fx.techs.begin(), fx.techs.end(),
+                                         [&](const FxTechnique& x) { return x.name == t.name; }) == 1;
+        const bool allStatic = std::all_of(t.passes.begin(), t.passes.end(), [](const FxPass& ps) {
+          int seen = 0;
+          bool usable = false;
+          for (const FxAssign& a : ps.assigns) {
+            if (a.state != kStateVertexShader) continue;
+            ++seen;
+            usable = !a.dynamic && a.shader.p;
+          }
+          return seen == 1 && usable;
+        });
         std::vector<FxBlob> vs;
         std::string e2;
-        bool anyVs = false;
-        for (const FxPass& ps : t.passes)
-          for (const FxAssign& a : ps.assigns) anyVs |= a.state == kStateVertexShader && a.shader.p;
-        if (!anyVs) continue;
+        const bool extracted = TechniqueVs(fx, t.name.c_str(), vs, e2);
+        if (!unique || t.passes.empty() || !allStatic) {
+          ++techNoVs;
+          techNoVsOk += !extracted;
+          continue;
+        }
         ++techVs;
-        if (!TechniqueVs(fx, t.name.c_str(), vs, e2)) continue;
-        bool ok = true;
+        if (!extracted) continue;
+        bool ok = vs.size() == t.passes.size();
         for (const FxBlob& b : vs) {
           ID3D11ShaderReflection* r = nullptr;
           ok &= SUCCEEDED(cc.reflect(b.p, b.n, __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(&r)));
@@ -1431,6 +1445,7 @@ void Run() {
     Check(blobs > 0 && reflOk == blobs && stageOk == blobs && bindOk == blobs && isgnOk == blobs,
           "shadow inst: extracted shader bytecode matches D3DReflect (stage, bindings, input signature)");
     Check(techVs > 0 && techVsOk == techVs, "shadow inst: technique pass VS extraction yields reflectable VS blobs");
+    Check(techNoVsOk == techNoVs, "shadow inst: technique pass VS extraction rejects ambiguous or non-static techniques");
     Check(keysOk == files, "shadow inst: cache keys parse back into path + defines (DCS key format)");
   }
 
