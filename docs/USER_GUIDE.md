@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.7.1-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. A printable book with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf)**.
+**Version 0.7.1-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. A printable book with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe. Please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -37,6 +37,7 @@
 
 ## New in 0.7.1
 
+- **DCS World 2.9.32.30490** support covers the engine optimizations and headphone audio.
 - **3D headphone audio** (Audio page, experimental, off by default): real 3D sound for headphones, in VR and on a monitor. **Cockpit space** (Subtle by default) puts cockpit sounds around you instead of inside your head. See [Audio](#audio).
 - **Cleaner generated frames** (Frame generation page, Image quality > **Fine-tune**, experimental, NVIDIA only, all off by default): four options for cleaner edges around your aircraft in the external view; little effect in the cockpit. See [Frame generation](#frame-generation).
 - **Multi-threading without driver support** is on by default with AMD graphics (GitHub #27); NVIDIA PCs keep their choice.
@@ -284,7 +285,7 @@ Not sure what to turn on? The **Feature guide** explains every feature in a few 
 
 **Test suite:** in flight, with the headset on and awake (or on the monitor), press **Run test suite** (or Ctrl+Alt+F11 in DCS). It compares all the optimizations off (stock DCS) against on, in alternating 5-second blocks for about 3 minutes, and writes a report (**Open last report**): two beeps when it starts, three high beeps when it is done, one long low beep when it stops. Keep your head still in a busy scene; blocks while the headset sleeps are thrown away. On a headset without quad views it compares whole frames, and the report says so. If it stops at once saying no frames were counted, the module did not recognise the headset's views: please report it with a diagnostic package. The module's developer keys are off; Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down stay reserved for it.
 
-Tested on DCS 2.9.30 and 2.9.31 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
+The 0.7.1 engine module was tested on DCS 2.9.32.30490 (Steam) in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
 
 ### CPU Boost
 
