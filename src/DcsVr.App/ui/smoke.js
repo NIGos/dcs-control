@@ -16,7 +16,7 @@ window.runWebSmoke = async function() {
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
     'engineShadowInstancing','engineCostWeights','enginePartitionBoost','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineFrameHeap',
-    'engineStateFilter','engineFastShaderPaths','engineBeeps','engineShadowCache','engineWaterSkip','engineIdleEffectSkip','engineShaderCachePrewarm','engineShaderCompileWorkers','engineTimerRefreshUs','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
+    'engineStateFilter','engineFastShaderPaths','engineBeeps','engineShadowCache','engineWaterSkip','engineIdleEffectSkip','engineCpuOptInflate','engineCpuOptTerrain','engineCpuOptGroundRoutes','engineCpuOptLowPowerPacer','engineCpuOptSoundCull','engineShaderCachePrewarm','engineShaderCompileWorkers','engineTimerRefreshUs','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
     'dcs','options','keepDcsLauncher',
     'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
     'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',
@@ -30,7 +30,7 @@ window.runWebSmoke = async function() {
     'depthBoostToggleKey','colorModeKey','audioToggleKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
   const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','quadEdgeBlend','quadGazeGlideMs','quadNeuralEdgeFade','neuralAdvanced','frameGenPassThrough','frameGenFineTune','nvidiaFlowScale','showOverlay',
-    'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
+    'boostMoveVrRuntime','freeVramReopen','engineGBufferRecorder','engineFastShaderPaths','engineCpuOptInflate','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
     'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftEyeRadiusMm','depthBoostFarStartM','diagnosticOverlayAtStart','binauralNearField','binauralLogVoices','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
   const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
