@@ -136,3 +136,6 @@ bb31ada3f82b53c38337746596ef1189ab5886ae909b5502fc407f353e09c579 dcsqvcull/DcsQv
 e4b02a7fab52d91dd6e5eca0fed5b155d8fadab7b4a503b0d783468ca80f915d dcsqvcull/DcsQvCull.lua (0.7.1-preview)
 7e547f3fe59cdfa2c88433fc2b38f842acbb6807415fa655524c1957ead20b65 dcsqvcull/DcsQvCullPayload.dll (0.7.1-preview)
 0688ace8b42069fb244912f2d432d4de25effd412a75c2548560db24533de41a dcsqvcull/DcsQvCullPayload.dll (0.7.1-preview)
+f5e957193eaba3e1440699edb68ded90cd501dae6de04c2a130615374115466b dcsqvcull/dcs_cpu_opt.dll (0.7.2-preview)
+914ed6f90f30808ad416187c9227f75d78753ee8c9952f4ae72e2015839478e9 dcsqvcull/DcsQvCull.lua (0.7.2-preview)
+988ea1c71cec311709b7303cb59121860d9780b6215548cd08583e28d1b72595 dcsqvcull/DcsQvCullPayload.dll (0.7.2-preview)
