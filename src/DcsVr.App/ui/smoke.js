@@ -494,7 +494,7 @@ window.runWebSmoke = async function() {
       if (on) on.disabled = true; const busyColor = on && getComputedStyle(on).backgroundColor; if (on) on.disabled = false;
       check('A switch that is on keeps its color while a command runs; only inactive settings grey out',on && busyColor === color); }
     { const cursor = ui.fields.find(f => f.path === 'smoothCursor');
-      check('Smooth mouse cursor sits under Frame generation, off by default, and says the click does not move',cursor.page === 'framegen' && cursor.type === 'toggle' && ui.profile.smoothCursor === false && !$('setting-smoothCursor').closest('details') && $('setting-smoothCursor').textContent.includes("Where you click doesn't change")); }
+      check('Smooth mouse cursor sits under Frame generation, off by default, and says the click does not move',cursor.page === 'framegen' && cursor.type === 'toggle' && ui.profile.smoothCursor === false && !$('setting-smoothCursor').closest('details') && $('setting-smoothCursor').textContent.includes("Click positions are unchanged.")); }
     { const vram = ui.fields.find(f => f.path === 'diagnosticVram');
       check('The VRAM counter sits with the headset panel settings on the Keys & headset panel page, off by default',vram.page === 'osd' && vram.type === 'toggle' && $('setting-diagnosticVram').closest('.card') === $('setting-headsetPanel').closest('.card') && ui.profile.diagnosticVram === false);
       check('With Frame generation the headset panel switch gives way to a line saying the panel is always on',ui.profile.desktop || (ui.profile.frameGen !== 'Off' ? $('setting-headsetPanel').hidden && !$('headsetPanelAlways').hidden : !$('setting-headsetPanel').hidden && $('headsetPanelAlways').hidden)); }
@@ -513,7 +513,7 @@ window.runWebSmoke = async function() {
     // The real focus size is on the page wherever it comes from Pimax Play; a Pimax preset is rendered as measured, under its name.
     { const box = $('pimaxFovea'), pct = (w,h) => Math.round(w*100)+'% × '+Math.round(h*100)+'% of the view', more = ui.fields.find(x => x.path === 'foveaSource').detail;
       check('With Custom the page and the Coverage preview state the focus size, the numbers Pimax Play shows',$('pimaxFocusSize').textContent === 'Focus area: '+pct(focusW,focusH)+', from the numbers Pimax Play shows.' && $('coverageDetail').textContent === 'Pimax Play '+expectedShort+' · focus '+pct(focusW,focusH));
-      check('Focus area values says how Custom and a preset are taken',more.includes('With Custom, the focus area is the number Pimax Play shows: 30 is 30% of the view.') && !more.includes('100 minus') && more.includes('With a Pimax preset, it is the preset as Pimax renders it, smaller with eye tracking than with a fixed focus.'));
+      check('Focus area source describes Custom percentages and preset sizes',more.includes('In Custom, 30 means 30% of the view.') && !more.includes('100 minus') && more.includes('Presets use a smaller focus area with eye tracking than with fixed focus.'));
       check('Pimax native would render the rest of the view with the same Custom values',Math.abs(ui.state.pimax.converted.nativeWidth - (1 - focusW)) < 1e-6 && Math.abs(ui.state.pimax.converted.nativeHeight - (1 - focusH)) < 1e-6 && !ui.state.pimax.converted.preset);
       const saved = JSON.parse(JSON.stringify(ui.state.pimax)), show = () => { ui.invalidate(); ui.showProfile(); };
       Object.assign(ui.state.pimax,{preset:true,presetName:'Balanced',level:1,short:'preset Balanced',presetNote:'Balanced as measured.',mismatch:null,capNote:null,converted:Object.assign({},saved.converted,{width:.3123,height:.3216,focusScale:1.1,peripheralScale:.32,transition:true,clamped:false,asymmetric:false,nativeWidth:.3123,nativeHeight:.3216,preset:'Balanced',fixedWidth:.4573,fixedHeight:.4546})}); const gazeBefore = ui.profile.gaze; ui.profile.gaze = 'EyeTracked'; show();
@@ -547,7 +547,7 @@ window.runWebSmoke = async function() {
         const show = values => { Object.assign(ui.profile,values); ui.invalidate(); ui.showProfile(); };
         show({gaze:'EyeTracked'});
         check('Vertical offset sits right after Vertical FOV under Set here, a slider from -100 to 100 at 0',!f.element.hidden && !f.input.disabled && order.indexOf('setting-pimaxVerticalOffset') === order.indexOf('setting-pimaxVerticalFov') + 1 && f.range.min === '-100' && f.range.max === '100' && f.input.value === '0' && ui.profile.quadVerticalOffset === 0 && f.whyElement.hidden);
-        check('Vertical offset says which way is down and what it is for',f.description === 'Moves the focus area down (negative) or up from where you look.' && f.detail.includes('gauges sharp while you look outside') && f.detail.includes('quarter of the view'));
+        check('Vertical offset says which way is down and what it is for',f.description === 'Moves the focus area vertically. Negative values move it down.' && f.detail.includes('cockpit gauges') && f.detail.includes('quarter of the view'));
         check('Without an offset the preview keeps the focus area on the cross',top(50) && $('coverageGaze').textContent === 'Follows your eyes' && !$('coverageDetail').textContent.includes('Vertical offset'));
         edit('pimaxVerticalOffset',-20);
         check('Vertical offset -20 is stored as Quad Views takes it (-0.1) and the preview moves the focus area down',ui.profile.quadVerticalOffset === -.1 && ui.effectiveFovea(ui.profile).offset === -.1 && top(55) && $('coverageGaze').textContent === 'Follows your eyes, 5% below' && $('coverageDetail').textContent.includes(' · Vertical offset -20 (Pimax Quick units)'));
@@ -735,7 +735,7 @@ window.runWebSmoke = async function() {
     $('featureCheck-quad').click(); $('featureCheck-quad').click(); check('Quad Views turned back on uses the provider last selected',ui.profile.quadViews === 'PimaxNative');
     // Stereo Foveated Super Resolution: shown for stereo, and Cheeky writes ratios of at least 0.2, and the page says so.
     $('featureCheck-quad').click(); edit('foveatedDlss',true);
-    check('Stereo Foveated Super Resolution alone checks the DLSS row and lights the DLSS card',!$('foveatedDlssControls').hidden && $('setting-foveatedDlss').textContent.includes('For stereo without Quad Views') && $('featureCheck-dlss').checked && $('featureSummary-dlss').textContent.startsWith('Foveated Super Resolution on') && $('feature-dlss').classList.contains('on') && !$('input-quadViews').querySelector('[value=PimaxNative]').disabled);
+    check('Stereo Foveated Super Resolution alone checks the DLSS row and lights the DLSS card',!$('foveatedDlssControls').hidden && $('setting-foveatedDlss').textContent.includes('Available in stereo with Quad Views off.') && $('featureCheck-dlss').checked && $('featureSummary-dlss').textContent.startsWith('Foveated Super Resolution on') && $('feature-dlss').classList.contains('on') && !$('input-quadViews').querySelector('[value=PimaxNative]').disabled);
     $('featureCheck-dlss').click(); check('Unchecking the DLSS row turns DLSS 5 and Foveated Super Resolution off',!ui.profile.foveatedDlss && !ui.profile.neuralRendering && ui.profile.quadViews === 'None');
     edit('foveatedDlss',true); edit('peripheralScale',.15);
     check('Stereo Foveated Super Resolution shows the 0.2 Cheeky writes',$('help-peripheralScale').textContent.includes('0.2 is written') && ui.effectiveFovea(ui.profile).periphery === .2 && !$('help-foveaWidth').textContent.includes('is written'));
@@ -886,9 +886,9 @@ window.runWebSmoke = async function() {
       // consent gate; Cockpit type and the canopy in Advanced, greyed with a reason while the space is off.
       { const seg = $('seg-cockpitSpace'), buttons = seg ? [...seg.querySelectorAll('button')] : [];
         check('Cockpit space: four choices, Subtle by default, its description and tag',buttons.map(b => b.textContent).join('/') === 'Off/Subtle/Normal/Strong' && ui.profile.cockpitSpace === 1
-          && seg.querySelector('[aria-checked="true"]').textContent === 'Subtle' && $('help-cockpitSpace').textContent === 'Puts cockpit sounds around you instead of inside your head.'
+          && seg.querySelector('[aria-checked="true"]').textContent === 'Subtle' && $('help-cockpitSpace').textContent === 'Adds reflections from the canopy and cockpit panels so sounds feel less enclosed in the headphones.'
           && [...$('setting-cockpitSpace').querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL') && !buttons.some(b => b.disabled)
-          && $('help-cockpitSpaceFamily').textContent === 'Automatic picks it from the aircraft you fly.' && ui.profile.cockpitSpaceFamily === 'auto' && ui.profile.cockpitSpaceCanopy === true && !f('cockpitSpaceFamily').input.disabled);
+          && $('help-cockpitSpaceFamily').textContent === 'Auto selects a cockpit based on your aircraft.' && ui.profile.cockpitSpaceFamily === 'auto' && ui.profile.cockpitSpaceCanopy === true && !f('cockpitSpaceFamily').input.disabled);
         buttons[0].click();
         check('Cockpit space Off greys Cockpit type and the canopy, with the reason',ui.profile.cockpitSpace === 0 && f('cockpitSpaceFamily').input.disabled && f('cockpitSpaceCanopy').input.disabled && why('cockpitSpaceFamily') === 'Turn on Cockpit space to change these.' && !f('binauralNearField').input.disabled);
         buttons[3].click(); edit('cockpitSpaceFamily','helicopter');
