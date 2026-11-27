@@ -22,7 +22,7 @@ local function native(name)
 end
 local cpuOptTick
 local cpuOptDll = lfs.writedir() .. [[Scripts\DcsQvCull\cpu-opt\dcs_cpu_opt.dll]]
-if ok and lfs.attributes(cpuOptDll, 'mode') == 'file' then
+if ok and type(lfs.attributes) == 'function' and lfs.attributes(cpuOptDll, 'mode') == 'file' then
   local standalone = lfs.writedir() .. [[Scripts\Hooks\DcsCpuOpt.lua]]
   if lfs.attributes(standalone, 'mode') == 'file' then
     log.write('DcsQvCull', log.WARNING, 'Experimental CPU optimizations skipped because the standalone DCS CPU Opt hook is installed.')
