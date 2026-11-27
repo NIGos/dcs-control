@@ -921,7 +921,7 @@ function buildFields() {
   field(cpuOpt,'engineCpuOptTerrain','Faster terrain lookups','Caches terrain index lookups. The cache is rebuilt when the underlying terrain data changes.','toggle',null,engine);
   field(cpuOpt,'engineCpuOptGroundRoutes','Faster ground vehicle route searches','Reduces the work needed to find a vehicle’s position on a long route.','toggle',null,engine);
   field(cpuOpt,'engineCpuOptLowPowerPacer','Low-power frame pacing on AMD','Lets supported AMD CPUs sleep briefly while waiting for a frame.','toggle',null,engine);
-  field(cpuOpt,'engineCpuOptSoundCull','Reduce distant sound updates','Reduces updates for distant, silent sounds. Turning on 3D headphone audio takes precedence after the next launch.','toggle',null,p => engine(p) && !p.binauralAudio);
+  field(cpuOpt,'engineCpuOptSoundCull','Reduce distant sound updates','Caps sound-engine updates at 60 Hz and updates distant silent sources less often. Turning on 3D headphone audio takes precedence after the next launch.','toggle',null,p => engine(p) && !p.binauralAudio);
   // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
   more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
   field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);
