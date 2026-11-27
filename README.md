@@ -19,7 +19,7 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 | ![Engine Optimizations](docs/screenshots/engine-optimizations.png) | ![Quad Views](docs/screenshots/quad-views-pimax-play.png) | ![Back to stock DCS](docs/screenshots/recovery-original-files.png) |
 
 <p align="center">
-  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.7.2-preview/DcsControl-0.7.2-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
   <sub><b>User Manual (PDF)</b>: Quick Start, engine optimizations, VR and 3D headphone audio</sub>
 </p>
 
@@ -96,7 +96,7 @@ Engine Optimizations then stay on whenever DCS starts. The VR features and CPU B
 
 - **[User Guide](docs/USER_GUIDE.md)**: every page of the app in order, what each feature costs, the in-flight keys, and what to do when something goes wrong.
 - **[Release notes](docs/RELEASE_NOTES.md)**: what changed in each version.
-- **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf)**: the illustrated manual for 0.7.1, with a new chapter on 3D headphone audio.
+- **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.2-preview/DcsControl-0.7.2-User-Manual.pdf)**: the illustrated manual for 0.7.2, including 3D headphone audio and the experimental CPU optimizations.
 - From 0.6 (the pages have changed since): the [5-minute video tour](https://youtu.be/hPQD7im2VKc) and [What's new in 0.6](https://youtu.be/m8BVXMIsXN8) on YouTube.
 
 ## Good to know
