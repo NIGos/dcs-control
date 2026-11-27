@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "hook_sigs.h"
+#include "ng_build.h"
 #include "sigscan.h"
 
 namespace reloc {
@@ -232,6 +233,20 @@ inline uint32_t ResolveIn(const uint8_t* base, const Table& t, size_t i, std::ve
         rva = 0;
         *why = "code differs (masked hash of its function)";
       }
+      // 2.9.32 recompiles drawShadow. Validate the known bytes and the original RTTI vtable slot.
+      if (!rva && &l == &hooksig::kLocs[hooksig::NG_ModelMaterialMT_drawShadow] &&
+          ngb::BuildOf(base) == ngb::k2932) {
+        constexpr uint32_t recorded = 0x17750, end = 0x17892;
+        const uint32_t target = ngb::At(base, recorded);
+        const char* vtableWhy = nullptr;
+        const uint32_t vtable = ResolveIn(base, t, hooksig::NG_ModelMaterialMT_vtbl, memo, &vtableWhy);
+        auto** slot = reinterpret_cast<void**>(const_cast<uint8_t*>(base) + vtable) + 5;
+        if (vtable && sigscan::InImage(base, slot, sizeof(*slot)) && PtrToRva(base, ReadSlot(slot)) == target &&
+            ngb::CodeIs(const_cast<uint8_t*>(base), recorded, end, 0x49534eb2132118cfull)) {
+          rva = target;
+          *why = nullptr;
+        }
+      }
       break;
     }
   }
@@ -243,6 +258,9 @@ inline uint32_t ResolveIn(const uint8_t* base, const Table& t, size_t i, std::ve
 // the masked one. False when the table has no such check.
 inline bool HashIn(const uint8_t* base, const Table& t, size_t i, uint32_t rva, uint32_t begin, uint32_t end,
                    uint64_t hash, bool* masked = nullptr) {
+  if (&t.locs[i] == &hooksig::kLocs[hooksig::NG_ModelMaterialMT_drawShadow] &&
+      ngb::BuildOf(base) == ngb::k2932 && rva == ngb::At(base, t.locs[i].rva))
+    return ngb::CodeIs(const_cast<uint8_t*>(base), begin, end, hash);
   const Loc& l = t.locs[i];
   if (masked) *masked = false;
   for (size_t k = 0; k < t.hashCount; ++k) {
