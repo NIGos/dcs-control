@@ -19,13 +19,13 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 | ![Engine Optimizations](docs/screenshots/engine-optimizations.png) | ![Quad Views](docs/screenshots/quad-views-pimax-play.png) | ![Back to stock DCS](docs/screenshots/recovery-original-files.png) |
 
 <p align="center">
-  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
-  <sub><b>User Manual (PDF, 44 pages)</b>: Quick Start, every page of the app, the Engine Optimizations explained</sub>
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
+  <sub><b>User Manual (PDF)</b>: Quick Start, engine optimizations, VR and 3D headphone audio</sub>
 </p>
 
 ## What's new in 0.7
 
-**New in 0.7.1:** **3D headphone audio** (experimental, off by default: real 3D sound for headphones, in VR and on a monitor), **cleaner generated frames** (experimental Fine-tune settings for NVIDIA frame generation, all off by default), Multi-threading without driver support on by default with AMD graphics (GitHub #27), and the Ultraleap crash fix (GitHub #35). Full list: [release notes](docs/RELEASE_NOTES.md).
+**New in 0.7.1:** compatibility with **DCS World 2.9.32.30490**, experimental **3D headphone audio** with cockpit acoustics, new NVIDIA frame generation controls, automatic selection of emulated command lists on AMD, and a startup fix for the Ultraleap OpenXR layer. [Release notes](docs/RELEASE_NOTES.md#071-preview).
 
 **New in 0.7.0:** 0.6.7 was never released, so coming from 0.6.6 all of this is new. Full list: [release notes](docs/RELEASE_NOTES.md).
 
@@ -49,6 +49,7 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 
 - **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR (in 0.5): about **+50-60 % FPS** and **p95 frame time −34 %**. How much you gain depends on how CPU-bound you are. It also fixes a DCS terrain loop that wastes CPU time.
 - **GPU savings** on the same page: Faster terrain and shader paths (on), and Cache distant shadows, Skip hidden water and Skip unused effects (experimental, off by default).
+- **3D headphone audio** (experimental): directional sound in stereo headphones, with optional cockpit reflections and support for personal SOFA measurements.
 - **CPU Boost:** gives DCS priority and its fastest cores while it runs.
 - **Free VRAM:** closes memory-hungry apps before the flight and reopens them after.
 
@@ -68,7 +69,7 @@ After each flight the Overview shows a **Last flight** summary.
 
 ## Requirements
 
-- **Windows 10 or 11, 64-bit** (tested on 11) and **DCS World 2.9** (tested on 2.9.30 and 2.9.31), Steam or standalone.
+- **Windows 10 or 11, 64-bit** (tested on 11) and **DCS World 2.9**, Steam or standalone. The 0.7.1 compatibility update was tested on Steam with **2.9.32.30490**.
 - **Engine Optimizations and CPU Boost** run with any graphics card. On AMD Radeon cards the driver lacks D3D11 command lists, so the multi-threaded shadows and G-buffer run on lists Windows emulates (on by default), with a smaller gain than on NVIDIA. Tested on a Radeon RX 7900 XTX.
 - **For the VR features:** an NVIDIA RTX graphics card, and either a Pimax headset with Pimax Play (or SteamVR with the Sboys driver), or a Meta Quest 3 with Virtual Desktop.
 - **For DLSS 5:** your own NVIDIA-signed `nvngx_dlssnr.dll`, version 310.8 (tested most) or 310.9. It is not included: NVIDIA does not offer it for download on its own, and DCS Control cannot provide it or point you to one.
@@ -76,10 +77,10 @@ After each flight the Overview shows a **Last flight** summary.
 
 ## Install
 
-1. Download `DcsControl-0.7.1-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it. It installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Windows may say the publisher is unknown: choose More info → Run anyway.
+1. Download `DcsControl-0.7.1-preview-Setup.exe` from the [0.7.1 preview release](https://github.com/NIGos/dcs-control/releases/tag/v0.7.1-preview) and double-click it. It installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Windows may say the publisher is unknown: choose More info → Run anyway.
 2. Or take `DcsControl-0.7.1-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it).
 
-The app tells you when a newer release is out and updates itself after checking the release signature. Uninstall it from Settings → Apps; press **Back to stock DCS** first. Details: [Install](docs/USER_GUIDE.md#install).
+From 0.6.3 or later, open **Help & support → Updates** to install this release. The app checks the release signature before running the setup. Uninstall it from Settings → Apps; press **Back to stock DCS** first. Details: [Install](docs/USER_GUIDE.md#install).
 
 ## First flight
 
@@ -93,7 +94,7 @@ Engine Optimizations then stay on whenever DCS starts. The VR features and CPU B
 
 - **[User Guide](docs/USER_GUIDE.md)**: every page of the app in order, what each feature costs, the in-flight keys, and what to do when something goes wrong.
 - **[Release notes](docs/RELEASE_NOTES.md)**: what changed in each version.
-- **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.0-preview/DcsControl-0.7.0-User-Manual.pdf)**: the printable book for 0.7, with a Quick Start and numbered screenshots.
+- **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf)**: the illustrated manual for 0.7.1, with a new chapter on 3D headphone audio.
 - From 0.6 (the pages have changed since): the [5-minute video tour](https://youtu.be/hPQD7im2VKc) and [What's new in 0.6](https://youtu.be/m8BVXMIsXN8) on YouTube.
 
 ## Good to know

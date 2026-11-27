@@ -1,30 +1,14 @@
 # 0.7.1 preview
 
-**3D headphone audio (experimental).** A new **Audio** page, off by default. DCS's left/right panning is replaced by real 3D sound for headphones: engines, wingmen, missiles and switches come from front, back, above and close beside you, and stay in place when you turn your head.
-- Generic ears (Neumann KU100, SADIE II) out of the box, a head size control (Small, Medium, Large or your own measure), and your own SOFA file if you have one (**Import SOFA…**).
-- Each sound keeps the loudness DCS gives it; 3D audio adds only where it comes from. Radio and intercom stay as DCS plays them. It works in VR and on a monitor, uses a little CPU on DCS's sound thread and no GPU.
-- **Alt+Shift+F6** in flight (or **Switch 3D audio off** on the page) compares it with DCS's own sound. Every setting applies in flight.
-- Feedback on GitHub is very welcome.
+- **DCS World 2.9.32.30490.** Updated the engine module and headphone audio for the [November DCS update](https://www.digitalcombatsimulator.com/en/news/changelog/release/2.9.32.30490/). Restored multi-threaded G-buffer recording, shadow texture handling and distant shadow caching on the new renderer.
+- **3D headphone audio** (experimental, off by default). Hear directional sounds in VR or on a monitor, including sounds above and behind you. Radio and intercom keep their original mix. Start with the included KU100 profile, adjust for your head size or import your own SOFA measurement. **Cockpit space** adds short reflections shaped for your aircraft. Press **Alt+Shift+F6** in flight to compare.
+- **Cleaner NVIDIA frame generation** (experimental, off by default). New **Fine-tune** controls address halos around aircraft, HUD stability against the sky and moving edges around the cockpit. **Keep distant aircraft whole** is also available and takes effect at the next DCS launch. Results vary by scene.
+- **AMD engine optimizations.** Multi-threading without driver support now defaults to Automatic, which enables it on AMD-only systems. Existing 0.7.0 profiles move to Automatic once. (#27)
+- **Ultraleap hand tracking.** Fixed a startup crash when Ultraleap, Quad Views and frame generation were installed together. Changes to the Ultraleap layer are applied when you next launch DCS. (#35)
+- **Launch and diagnostics.** Launch DCS and in-flight changes skip redundant file work. Diagnostic packages anonymize imported HRTF names. Pupil shift preserves the headset's display timing when eye tracking is unavailable.
 
-**Cleaner generated frames (experimental, NVIDIA frame generation).** Four new settings under Frame generation > Image quality > **Fine-tune**, all off by default and all changeable in flight.
-- **Clean edges against the sky**, **Keep the HUD steady over the sky**, **Sharper moving edges** and **Cleaner world beside the cockpit** give cleaner edges around your aircraft in the external view (F2). In test flights circling the aircraft they took away about a third of the halo around it at dusk, and a quarter on its leading edge by day. In the cockpit view they change little, and by day they can move the faint trailing copy of a crossing aircraft ahead of it.
-- GPU cost: a few microseconds per frame in those flights (at most about 0.1 ms at 2X and 0.7 ms at 3X in the offline worst case). With all of them off, frame generation is exactly as in 0.7.0.
-- Turning one on in flight no longer stalls the headset for a moment: what they need is prepared in the background, the first time one is turned on.
-- Please tell us on GitHub what you see.
+Profiles that leave the new settings at their defaults can still open in 0.7.0.
 
-**Multi-threading without driver support is now automatic: on for PCs with AMD graphics only** (AMD Radeon, GitHub #27): about 7 % more FPS on a Radeon RX 7900 XTX. Profiles from 0.7.0 switch to automatic once. On NVIDIA nothing changes: where DCS gets no command lists there (MFAA on, the integrated GPU, a hooking program) it stays off as before, the Engine Optimizations page says what gives the full gain, and you can still turn it on yourself.
-
-**Ultraleap hand tracking (GitHub #35).** DCS no longer crashes at start with Quad Views, frame generation and Ultraleap hand tracking installed. Turning Ultraleap's layer on or off in Windows (for example with OpenXR API Layers GUI) is now a change Launch DCS applies; Checks says when it waits for the next launch.
-
-**Profiles stay readable by 0.7.0.** A profile or preset that leaves the new settings at their defaults still opens in 0.7.0 (Go back, or an exported file). One that turns on 3D audio, a Fine-tune setting or changes Multi-threading without driver support does not.
-
-**Faster launch, smaller download.** Launch DCS and settings changed in flight are quicker, because files that did not change are no longer read or written again, and the download is smaller.
-
-**Fixes:**
-- Pupil shift: when the headset software refuses the eye-tracking extension, the head pose keeps its exact display time.
-- The Engine Optimizations page counts 3D audio among the features that need the engine module.
-- The README shows the User Manual's cover again and links the 0.7 manual.
-- The diagnostic package names your own HRTF sets "personal set 1" and so on, and leaves out 3D audio's file when it never ran.
 # 0.7.0 preview
 
 0.6.7 was never released, so everything it was going to bring is in 0.7 too.
