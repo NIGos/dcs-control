@@ -25,7 +25,7 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 
 ## What's new in 0.7
 
-**New in 0.7.2:** five optional CPU optimizations contributed by Rolln-dev, plus a setup fix for moved installations. [Release notes](docs/RELEASE_NOTES.md#072-preview).
+**New in 0.7.2:** five optional CPU optimizations from Rolln-dev, clearer settings, and fixes for 3D audio and moved installations. [Release notes](docs/RELEASE_NOTES.md#072-preview).
 
 **New in 0.7.1:** compatibility with **DCS World 2.9.32.30490**, experimental **3D headphone audio** with cockpit acoustics, new NVIDIA frame generation controls, automatic selection of emulated command lists on AMD, and a startup fix for the Ultraleap OpenXR layer. [Release notes](docs/RELEASE_NOTES.md#071-preview).
 

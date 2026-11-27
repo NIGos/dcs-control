@@ -54,7 +54,8 @@ window.runWebSmoke = async function() {
     { const until = async test => { for (let i = 0; i < 150 && !test(); i++) await sleep(20); return test(); };
       const notes = $('whatsNewNotes'), next = window.offlineFixture.updateVersion, short = next.split('-')[0];
       check("What's new opens at the first start of a new version with only this version's notes, as text",await until(() => $('whatsNewDialog').open)
-        && notes.textContent.includes('Fixture notes') && notes.textContent.includes('<b>not markup</b>') && !notes.querySelector('b b, script, img') && notes.querySelectorAll('li').length === 2 && !notes.textContent.includes('Older notes'));
+        && [...notes.querySelectorAll('h3.note-section')].map(h => h.textContent).join(', ') === 'Added, Fixed'
+        && notes.querySelectorAll(':scope > ul').length === 2 && notes.querySelector('li b')?.textContent === 'Fixture notes' && notes.textContent.includes('<b>not markup</b>') && !notes.querySelector('b b, script, img') && notes.querySelectorAll('li').length === 2 && !notes.textContent.includes('Older notes'));
       $('whatsNewClose').click();
       check("What's new shows once per version",!$('whatsNewDialog').open && !(await ui.request('whatsNew',{startup:true})).show);
       { const box = document.createElement('div'); box.append(ui.notesFragment('**Presets.** A new **Presets** page, kept in `presets`.\n\n**Loose bold** stays in its sentence.\n\n**Fixes:**\n- One <b>fix</b>\n- Two'));

@@ -1,10 +1,29 @@
 # 0.7.2 preview
 
-**Experimental CPU optimizations.** Five independent switches from Rolln-dev are now available under **Engine Optimizations → Experimental CPU optimizations**. Faster asset decompression can shorten some loading work. Experimental terrain and ground-vehicle route lookups use the current game data each time. Supported AMD CPUs can idle briefly while waiting for a frame. A separate audio option limits sound updates to 60 Hz and refreshes distant, silent sources less often. 3D headphone audio takes priority. All five switches start off and apply at the next DCS start.
+## Compatibility
 
-**Installer.** Setup checks the files after you move the application folder and can replace missing program files. Updates preserve the previous profiles for rollback, and uninstall removes Windows shortcuts and the Apps entry for the verified former location.
+- Verified with **DCS World 2.9.32.30490** on Steam.
+- The experimental terrain, ground-route and sound optimizations require matching Steam game binaries.
 
-**Compatibility.** Tested with DCS World **2.9.32.30490** on Steam. The optional terrain, ground-route and audio hooks only run on matching game binaries.
+## Added
+
+- Added five switches contributed by Rolln-dev under **Engine Optimizations → Experimental CPU optimizations**. Each is off by default and takes effect at the next DCS start.
+  - Faster decompression for supported texture and model archives.
+  - Faster terrain lookups.
+  - Faster ground vehicle route searches.
+  - Low-power frame pacing for supported AMD CPUs.
+  - A 60 Hz cap on sound updates and less frequent checks for distant, silent sources. 3D headphone audio takes priority.
+
+## Changed
+
+- Shortened setting labels and descriptions across the app. Updated the User Guide to match.
+
+## Fixed
+
+- Fixed setup failing after the application folder was moved. Setup can recover missing program files at the new location.
+- Preserved profiles for rollback after a moved installation is updated. Uninstall clears shortcuts and the Apps entry for the verified former location.
+- Fixed cockpit reverb continuing after DCS audio was muted.
+- Fixed HRTF filters being released too early during rapid profile changes or audio output switches.
 
 # 0.7.1 preview
 

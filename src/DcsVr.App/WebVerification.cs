@@ -338,7 +338,7 @@ internal static class WebVerification
             [download + name] = setup, [download + name + ".sig"] = System.Text.Encoding.ASCII.GetBytes(signature),
             [previousDownload + previousName] = previousSetup, [previousDownload + previousName + ".sig"] = System.Text.Encoding.ASCII.GetBytes(previousSignature) }, download + name);
         var notesPath = Path.Combine(Directory.CreateDirectory(Path.Combine(root, "release-notes")).FullName, "RELEASE_NOTES.md");
-        File.WriteAllText(notesPath, $"# {current.Short}{(current.Suffix.Length > 0 ? " " + current.Suffix : "")}\n\n**Fixture notes** for this version, <b>not markup</b>.\n- One\n- Two\n\n# 0.4.0 preview\n\nOlder notes that must not show.\n");
+        File.WriteAllText(notesPath, $"# {current.Short}{(current.Suffix.Length > 0 ? " " + current.Suffix : "")}\n\n## Added\n\n- **Fixture notes** for this version, <b>not markup</b>.\n\n## Fixed\n\n- Two\n\n# 0.4.0 preview\n\nOlder notes that must not show.\n");
         new AppSettingsStore(stateRoot).Save(new(true, "0.4.0-preview"));
         return (new Updates(stateRoot, handler, publicKeyPem: key.ExportSubjectPublicKeyInfoPem(), downloadRoot: Path.Combine(root, "update-downloads")), notesPath, next, handler);
     }
