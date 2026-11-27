@@ -1,11 +1,17 @@
 # 0.7.1 preview
 
-- **DCS World 2.9.32.30490.** Updated the engine module and headphone audio for the [November DCS update](https://www.digitalcombatsimulator.com/en/news/changelog/release/2.9.32.30490/). Restored multi-threaded G-buffer recording, shadow texture handling and distant shadow caching on the new renderer.
-- **3D headphone audio** (experimental, off by default). Hear directional sounds in VR or on a monitor, including sounds above and behind you. Radio and intercom keep their original mix. Start with the included KU100 profile, adjust for your head size or import your own SOFA measurement. **Cockpit space** adds short reflections shaped for your aircraft. Press **Alt+Shift+F6** in flight to compare.
-- **Cleaner NVIDIA frame generation** (experimental, off by default). New **Fine-tune** controls address halos around aircraft, HUD stability against the sky and moving edges around the cockpit. **Keep distant aircraft whole** is also available and takes effect at the next DCS launch. Results vary by scene.
-- **AMD engine optimizations.** Multi-threading without driver support now defaults to Automatic, which enables it on AMD-only systems. Existing 0.7.0 profiles move to Automatic once. (#27)
-- **Ultraleap hand tracking.** Fixed a startup crash when Ultraleap, Quad Views and frame generation were installed together. Changes to the Ultraleap layer are applied when you next launch DCS. (#35)
-- **Launch and diagnostics.** Launch DCS and in-flight changes skip redundant file work. Diagnostic packages anonymize imported HRTF names. Pupil shift preserves the headset's display timing when eye tracking is unavailable.
+
+**DCS World 2.9.32.30490.** Updated the engine module and headphone audio for the [November DCS update](https://www.digitalcombatsimulator.com/en/news/changelog/release/2.9.32.30490/). Restored multi-threaded G-buffer recording, shadow texture handling and distant shadow caching on the new renderer.
+
+**3D headphone audio.** Experimental and off by default. Hear directional sounds in VR or on a monitor, including sounds above and behind you. Radio and intercom keep their original mix. Start with the included KU100 profile, adjust for your head size or import your own SOFA measurement. **Cockpit space** adds short reflections shaped for your aircraft. Press **Alt+Shift+F6** in flight to compare.
+
+**Cleaner NVIDIA frame generation.** Experimental and off by default. New **Fine-tune** controls address halos around aircraft, HUD stability against the sky and moving edges around the cockpit. **Keep distant aircraft whole** is also available and takes effect at the next DCS launch. Results vary by scene.
+
+**AMD engine optimizations.** Multi-threading without driver support now defaults to Automatic, which enables it on AMD-only systems. Existing 0.7.0 profiles move to Automatic once. (#27)
+
+**Ultraleap hand tracking.** Fixed a startup crash when Ultraleap, Quad Views and frame generation were installed together. Changes to the Ultraleap layer are applied when you next launch DCS. (#35)
+
+**Launch and diagnostics.** Launch DCS and in-flight changes skip redundant file work. Diagnostic packages anonymize imported HRTF names. Pupil shift preserves the headset's display timing when eye tracking is unavailable.
 
 Profiles that leave the new settings at their defaults can still open in 0.7.0.
 
