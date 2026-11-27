@@ -25,6 +25,8 @@ Everything the app changes in DCS is backed up and comes back with one button, *
 
 ## What's new in 0.7
 
+**New in 0.7.2:** five optional CPU optimizations contributed by Rolln-dev, plus a setup fix for moved installations. [Release notes](docs/RELEASE_NOTES.md#072-preview).
+
 **New in 0.7.1:** compatibility with **DCS World 2.9.32.30490**, experimental **3D headphone audio** with cockpit acoustics, new NVIDIA frame generation controls, automatic selection of emulated command lists on AMD, and a startup fix for the Ultraleap OpenXR layer. [Release notes](docs/RELEASE_NOTES.md#071-preview).
 
 **New in 0.7.0:** 0.6.7 was never released, so coming from 0.6.6 all of this is new. Full list: [release notes](docs/RELEASE_NOTES.md).
@@ -77,8 +79,8 @@ After each flight the Overview shows a **Last flight** summary.
 
 ## Install
 
-1. Download `DcsControl-0.7.1-preview-Setup.exe` from the [0.7.1 preview release](https://github.com/NIGos/dcs-control/releases/tag/v0.7.1-preview) and double-click it. It installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Windows may say the publisher is unknown: choose More info → Run anyway.
-2. Or take `DcsControl-0.7.1-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it).
+1. Download `DcsControl-0.7.2-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. It installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Windows may say the publisher is unknown: choose More info → Run anyway.
+2. Or take `DcsControl-0.7.2-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it).
 
 From 0.6.3 or later, open **Help & support → Updates** to install this release. The app checks the release signature before running the setup. Uninstall it from Settings → Apps; press **Back to stock DCS** first. Details: [Install](docs/USER_GUIDE.md#install).
 

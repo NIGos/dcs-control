@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.7.1-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. A printable book with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf)**.
+**Version 0.7.2-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. A printable book with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.7.1-preview/DcsControl-0.7.1-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe. Please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -8,7 +8,7 @@
 
 ## Contents
 
-- [New in 0.7.1](#new-in-071) and [New in 0.7](#new-in-07)
+- [New in 0.7.2](#new-in-072), [New in 0.7.1](#new-in-071) and [New in 0.7](#new-in-07)
 - [What the app does](#what-the-app-does)
 - [Requirements](#requirements)
 - [Install](#install) and [Updates](#updates)
@@ -34,6 +34,11 @@
 - [Troubleshooting and FAQ](#troubleshooting-and-faq)
 - [Reporting a problem](#reporting-a-problem)
 - [Support](#support)
+
+## New in 0.7.2
+
+- Five switches contributed by Rolln-dev under **Engine Optimizations → Experimental CPU optimizations**. They cover asset decompression, terrain lookups, ground-vehicle route searches, AMD frame pacing and sound updates. They start off and take effect at the next DCS start.
+- Setup can recover the installation record after you move the DCS Control application folder, provided the installed files still pass verification.
 
 ## New in 0.7.1
 
@@ -107,7 +112,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-**With the setup (recommended):** download `DcsControl-0.7.1-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+**With the setup (recommended):** download `DcsControl-0.7.2-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
 
 - the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
 - whether DCS Control goes in the **Start menu** and on the **desktop**.
@@ -116,7 +121,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
 
-**Portable, from the ZIP:** download `DcsControl-0.7.1-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
+**Portable, from the ZIP:** download `DcsControl-0.7.2-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
 - **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
@@ -279,7 +284,7 @@ Not sure what to turn on? The **Feature guide** explains every feature in a few 
 - **GPU-bound guard** (always on) — when the graphics card, not the CPU, is the limit, the multi-threaded shadows and G-buffer cost a little GPU time for nothing. The module then steps them down (fewer shadow recorders, then no helper lists, then both paused) and back up when the CPU is the limit again. Each step is tried against the step before for 20 seconds each and kept only when it raises FPS by more than 2 %; a step that does not help is undone and not tried again for a while. It only switches between exact paths, so the image never changes. Every 10 seconds the module's log says whether the frame was CPU- or GPU-bound.
 - **Shader warm-up and cache** — while DCS runs, **Status in DCS** shows "Shader warm-up: 120 of 200 ready" with a thin bar until the module has prepared the shaders it needs (see [the FAQ](#engine-opt-warming-up)); the line goes away when it is done. Below it, "Shader cache: N variants, X MB" with **Clear cache** (only while DCS is closed). Under **Advanced**: **Prepare shaders in the main menu** (on) gets shaders a DCS or app update made stale ready while you are still in the menu, and **Compile threads** (Auto, 2, 4 or 6) sets how many CPU threads prepare them. Both take effect at the next DCS start.
 - **Multi-threading without driver support** (on by default): shown only on a PC whose graphics card lacks D3D11 command lists (AMD, for example); elsewhere it does nothing. See [the FAQ](#multi-threaded-shadows-and-g-buffer-are-unavailable).
-- **Experimental CPU optimizations** — five optional settings contributed by Rolln-dev. They apply at the next DCS start and stay active until DCS exits. Faster asset decompression applies to eligible texture and model archive entries. Terrain lookups and ground vehicle route searches shorten specific CPU tasks. Low-power frame pacing is for supported AMD CPUs. Reduce distant sound updates caps sound-engine updates at 60 Hz and refreshes distant, silent sources less often. It is inactive when 3D headphone audio is enabled. The diagnostic package includes the component log.
+- **Experimental CPU optimizations** — five optional settings contributed by Rolln-dev. They apply at the next DCS start and stay active until DCS exits. Faster asset decompression applies to eligible texture and model archive entries. Terrain lookups and ground vehicle route searches shorten specific CPU tasks. Low-power frame pacing is for supported AMD CPUs. **Reduce sound update work** caps sound-engine updates at 60 Hz and refreshes distant, silent sources less often, which can delay some sound updates. 3D headphone audio takes priority. Terrain, ground-route and sound hooks only run on matching DCS 2.9.32.30490 Steam binaries. The diagnostic package includes the component log.
 
 - **For developers:** Turbo mode, the Alternative Quad Views provider, DLSS 5's Depth convention and Motion scale, the Observe choice of the terrain prefetch fix and the Engine page's Developer options (Developer mode, Measurement hooks, Streaming timer refresh) are hidden. They appear only with `"developerOptions": true` set by hand in the profile; without it a profile loads them at their safe values (Turbo off, the bundled Quad Views, the game's depth and motion, Observe as Off, Developer mode off).
 

@@ -1,3 +1,11 @@
+# 0.7.2 preview
+
+**Experimental CPU optimizations.** Five independent switches from Rolln-dev are now available under **Engine Optimizations → Experimental CPU optimizations**. Faster asset decompression can shorten some loading work, and new terrain and ground-vehicle route lookups reduce CPU work where those paths are used. Supported AMD CPUs can idle briefly while waiting for a frame. A separate audio option limits sound updates to 60 Hz and refreshes distant, silent sources less often. 3D headphone audio takes priority. All five switches start off and apply at the next DCS start.
+
+**Installer.** Updates and uninstalls can now recover an intact installation that was moved to another folder. Setup checks the files before updating the installation record.
+
+**Compatibility.** Tested with DCS World **2.9.32.30490** on Steam. The optional terrain, ground-route and audio hooks only run on matching game binaries.
+
 # 0.7.1 preview
 
 
