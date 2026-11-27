@@ -48,6 +48,7 @@ public sealed class ApplicationInstaller(string destination)
         // Journals an earlier update left before its consolidated baseline (cut short while pruning) go first.
         PruneSuperseded();
         var journals = Live(Transactions.List());
+        journals = RebaseMovedBaseline(journals);
         ValidateJournalScope(journals);
         // An update cut short (power loss, the setup ended) is rolled back first, so the next update can run.
         var interrupted = Interrupted(journals);
@@ -204,6 +205,7 @@ public sealed class ApplicationInstaller(string destination)
     {
         EnsureAppClosed();
         var journals = Live(Transactions.List());
+        journals = RebaseMovedBaseline(journals);
         ValidateJournalScope(journals);
         if (!journals.Any(j => j.Status != "restored")) throw new InvalidOperationException("No application installation to restore.");
         // An update cut short is rolled back first, as before an update, so its half-written files are not "modified".
@@ -227,11 +229,69 @@ public sealed class ApplicationInstaller(string destination)
         foreach (var entry in journal.Entries.Where(e => e.Applied && !e.Reverted)) result.TryAdd(entry.Path, entry);
         return result;
     }
+    // A moved folder still has absolute paths from the previous location. Rebase only a completed baseline whose
+    // entries match the local release ledger and whose recorded payload is intact. An interrupted journal can contain
+    // backups and delete operations tied to its original destination, so it still has to be recovered there.
+    private IReadOnlyList<TransactionJournal> RebaseMovedBaseline(IReadOnlyList<TransactionJournal> journals)
+    {
+        if (journals is not [ { Consolidated: true, Status: "applied", ProfileId: "application" } journal ] ||
+            journal.Entries.FirstOrDefault()?.Root is not { } previousRoot ||
+            !Path.IsPathFullyQualified(previousRoot) ||
+            Root.Equals(previousRoot, StringComparison.OrdinalIgnoreCase))
+            return journals;
+
+        var ledger = PathPolicy.UnderRoot(Root, "installation.json");
+        if (!File.Exists(ledger)) return journals;
+        var ledgerBytes = File.ReadAllBytes(ledger);
+        ReleaseManifest manifest;
+        try { manifest = JsonData.Deserialize<ReleaseManifest>(Encoding.UTF8.GetString(ledgerBytes)); }
+        catch (System.Text.Json.JsonException) { return journals; }
+        if (manifest.SchemaVersion != 1 || manifest.Product is not ("DcsControl" or "DcsVrControl") ||
+            manifest.Files is not { Count: > 0 and <= 10000 })
+            return journals;
+
+        var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["installation.json"] = Hashing.BytesSha256(ledgerBytes)
+        };
+        foreach (var file in manifest.Files.Where(f => !f.Path.Equals(InstallCommand, StringComparison.OrdinalIgnoreCase)))
+        {
+            var path = PathPolicy.UnderRoot(Root, file.Path);
+            if (file.Path.StartsWith(".installer", StringComparison.OrdinalIgnoreCase) ||
+                !expected.TryAdd(Path.GetRelativePath(Root, path), file.Sha256))
+                return journals;
+        }
+        if (expected.Count != journal.Entries.Count) return journals;
+
+        var prior = Path.GetFullPath(previousRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var entries = new List<JournalEntry>(journal.Entries.Count);
+        foreach (var entry in journal.Entries)
+        {
+            if (entry is not { Applied: true, Reverted: false, Deleted: false, BackupFile: null, PreviousSha256: null,
+                    PendingSha256: null, IniValues: null, LuaChanges: null, RuntimeLogs: null } ||
+                !string.Equals(entry.Root, previousRoot, StringComparison.OrdinalIgnoreCase) ||
+                !Path.IsPathFullyQualified(entry.Path) ||
+                !entry.Path.StartsWith(prior, StringComparison.OrdinalIgnoreCase))
+                return journals;
+
+            var path = PathPolicy.UnderRoot(Root, entry.Path[prior.Length..]);
+            if (!expected.Remove(Path.GetRelativePath(Root, path), out var digest) ||
+                !string.Equals(digest, entry.InstalledSha256, StringComparison.OrdinalIgnoreCase) ||
+                !File.Exists(path) || !string.Equals(Hashing.FileSha256(path), digest, StringComparison.OrdinalIgnoreCase))
+                return journals;
+            entries.Add(entry with { Path = path, Root = Root });
+        }
+
+        var rebased = journal with { Entries = entries };
+        Transactions.Replace(rebased);
+        return [rebased];
+    }
+
     private void ValidateJournalScope(IReadOnlyList<TransactionJournal> journals)
     {
         foreach (var entry in journals.SelectMany(j => j.Entries))
             if (!Path.GetFullPath(entry.Path).StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Application journal contains an out-of-scope destination.");
+                throw new InvalidDataException("Application journal contains an out-of-scope destination. If you moved the DCS Control folder, return it to its previous location or install in a new empty folder. Keep the old folder until recovery is complete.");
     }
     /// <summary>Owned files must be unmodified. A missing file is tolerated: antivirus may have quarantined it
     /// (Defender removes the version.dll that 0.4.1 and earlier installed), and there is nothing left to protect.</summary>

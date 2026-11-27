@@ -3356,6 +3356,37 @@ Test("Application installer rejects out-of-scope journal paths", () =>
     AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal));
     Throws<InvalidDataException>(() => installer.Uninstall()); Require(File.ReadAllText(outside) == "protected");
 });
+Test("A moved application with an intact baseline can be upgraded and uninstalled", () =>
+{
+    var initial = ReleaseFixture("moved-v1", "1", "first");
+    var update = ReleaseFixture("moved-v2", "2", "second");
+    var original = Path.Combine(root, "app-install/moved-original");
+    var target = Path.Combine(root, "app-install/moved-target");
+    new ApplicationInstaller(original).Install(initial);
+    AtomicFile.WriteText(Path.Combine(original, "notes.txt"), "keep");
+    Directory.Move(original, target);
+
+    var installer = new ApplicationInstaller(target);
+    installer.Install(update);
+    Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "second");
+    Require(!Directory.Exists(original));
+    Require(installer.Uninstall().Complete);
+    Require(File.ReadAllText(Path.Combine(target, "notes.txt")) == "keep");
+});
+Test("A moved installer baseline with changed payload still refuses to remove files", () =>
+{
+    var initial = ReleaseFixture("moved-edited-v1", "1", "first");
+    var original = Path.Combine(root, "app-install/moved-edited-original");
+    var target = Path.Combine(root, "app-install/moved-edited-target");
+    new ApplicationInstaller(original).Install(initial);
+    Directory.Move(original, target);
+    AtomicFile.WriteText(Path.Combine(target, "app.bin"), "changed");
+    var installer = new ApplicationInstaller(target);
+    Throws<InvalidDataException>(() => installer.Install(initial));
+    Throws<InvalidDataException>(() => installer.Uninstall());
+    Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "changed");
+    Require(File.Exists(Path.Combine(target, "readme.txt")) && !Directory.Exists(original));
+});
 Test("An interrupted update that cannot be rolled back says what to do (not \"reinstall\", which takes the same path)", () =>
 {
     var source = ReleaseFixture("stuck-v1", "1", "first"); var next = ReleaseFixture("stuck-v2", "2", "second"); var target = Path.Combine(root, "app-install/stuck");
