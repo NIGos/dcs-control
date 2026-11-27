@@ -230,7 +230,7 @@ public sealed class ApplicationInstaller(string destination)
         return result;
     }
     // A moved folder still has absolute paths from the previous location. Rebase only a completed baseline whose
-    // entries match the local release ledger and whose recorded payload is intact. An interrupted journal can contain
+    // entries match the local release ledger and whose remaining payload is unmodified. An interrupted journal can contain
     // backups and delete operations tied to its original destination, so it still has to be recovered there.
     private IReadOnlyList<TransactionJournal> RebaseMovedBaseline(IReadOnlyList<TransactionJournal> journals)
     {
@@ -276,8 +276,10 @@ public sealed class ApplicationInstaller(string destination)
 
             var path = PathPolicy.UnderRoot(Root, entry.Path[prior.Length..]);
             if (!expected.Remove(Path.GetRelativePath(Root, path), out var digest) ||
-                !string.Equals(digest, entry.InstalledSha256, StringComparison.OrdinalIgnoreCase) ||
-                !File.Exists(path) || !string.Equals(Hashing.FileSha256(path), digest, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(digest, entry.InstalledSha256, StringComparison.OrdinalIgnoreCase))
+                return journals;
+            // As in VerifyOwned, a missing file can be restored from the release. A directory or modified file stays protected.
+            if (Directory.Exists(path) || File.Exists(path) && !string.Equals(Hashing.FileSha256(path), digest, StringComparison.OrdinalIgnoreCase))
                 return journals;
             entries.Add(entry with { Path = path, Root = Root });
         }

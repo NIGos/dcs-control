@@ -38,7 +38,7 @@
 ## New in 0.7.2
 
 - Five switches contributed by Rolln-dev under **Engine Optimizations → Experimental CPU optimizations**. They cover asset decompression, terrain lookups, ground-vehicle route searches, AMD frame pacing and sound updates. They start off and take effect at the next DCS start.
-- Setup can recover the installation record after you move the DCS Control application folder, provided the installed files still pass verification.
+- Setup can recover the installation record after you move the DCS Control application folder, provided the application files still present pass verification.
 
 ## New in 0.7.1
 

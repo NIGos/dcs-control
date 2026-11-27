@@ -1808,6 +1808,17 @@ Test("An installation from before the rename keeps its state folder; a new one u
     Directory.CreateDirectory(Path.Combine(earlier, "DcsControl"));
     Require(ControlService.StateRootIn(earlier) == Path.Combine(earlier, "DcsControl"));
 });
+Test("Disabled experimental CPU settings stay out of saved profiles and still appear in the interface", () =>
+{
+    var profile = JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"engineOptimizations\":true}");
+    var saved = JsonData.Serialize(profile);
+    var node = JsonData.ProfileNode(profile);
+    string[] keys = ["engineCpuOptInflate", "engineCpuOptTerrain", "engineCpuOptGroundRoutes", "engineCpuOptLowPowerPacer", "engineCpuOptSoundCull"];
+    Require(keys.All(k => !saved.Contains(k, StringComparison.Ordinal)), "0.7.1 rejects unknown profile keys even when false");
+    Require(keys.All(k => node[k]?.GetValue<bool>() == false), "the interface still sees the disabled defaults");
+    var selected = profile with { EngineCpuOptInflate = true, EngineCpuOptSoundCull = true };
+    Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(selected)) == selected, "selected options round-trip");
+});
 Test("Experimental CPU options deploy independently, leave DCS files alone, and restore", () =>
 {
     var exe = Make("cpu-opt/bin/DCS.exe", "fixture");
@@ -1833,7 +1844,11 @@ Test("Experimental CPU options deploy independently, leave DCS files alone, and 
     originals.Apply(plan);
     var log = Path.Combine(cpuOptDir, "DcsCpuOpt.log");
     AtomicFile.WriteText(log, "native log");
-    Require(originals.RestoreOriginals().Complete && !File.Exists(log) && !File.Exists(ini.Path));
+    originals.Apply(planner.Build(new VrProfile { Desktop = true, EngineOptimizations = true }, inventory, managed));
+    Require(!File.Exists(Path.Combine(cpuOptDir, "dcs_cpu_opt.dll")) && !File.Exists(log) && !File.Exists(ini.Path),
+        "reapplying with the options off removes their files, so the next launch cannot use the stale options");
+    originals.Apply(plan);
+    Require(originals.RestoreOriginals().Complete && !File.Exists(ini.Path));
     Make("cpu-opt/saved/DCS/Scripts/Hooks/DcsCpuOpt.lua", "-- standalone mod");
     Throws<InvalidDataException>(() => planner.Build(profile, inventory, managed));
 });
@@ -3372,6 +3387,22 @@ Test("A moved application with an intact baseline can be upgraded and uninstalle
     Require(!Directory.Exists(original));
     Require(installer.Uninstall().Complete);
     Require(File.ReadAllText(Path.Combine(target, "notes.txt")) == "keep");
+});
+Test("A moved installation can recover a missing owned file without touching user files", () =>
+{
+    var source = ReleaseFixture("moved-missing-v1", "1", "first");
+    var original = Path.Combine(root, "app-install/moved-missing-original");
+    var target = Path.Combine(root, "app-install/moved-missing-target");
+    new ApplicationInstaller(original).Install(source);
+    AtomicFile.WriteText(Path.Combine(original, "notes.txt"), "keep");
+    File.Delete(Path.Combine(original, "app.bin"));
+    Directory.Move(original, target);
+
+    var installer = new ApplicationInstaller(target);
+    installer.Install(source);
+    Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "first");
+    Require(File.ReadAllText(Path.Combine(target, "notes.txt")) == "keep");
+    Require(!Directory.Exists(original));
 });
 Test("A moved installer baseline with changed payload still refuses to remove files", () =>
 {
