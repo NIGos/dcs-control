@@ -516,10 +516,13 @@ void MixWrap(void* rend, float* out, uint32_t frames) {
       double e = 0;
       for (uint32_t i = 0; i < 2 * frames; ++i) e += double(out[i]) * out[i];
       const float g = static_cast<float>(std::sqrt(e / blk.ePreMaster));
-      if (std::isfinite(g) && g > 0.01f && g < 4.0f) {
-        b->masterGain = b->masterKnown ? b->masterGain + 0.3f * (g - b->masterGain) : g;
+      if (std::isfinite(g) && g < 4.0f) {
+        // A silent post-master block with signal before it is a mute. Drop the cached gain immediately so a
+        // room tail mixed after the stock mixer cannot bypass the mute.
+        b->masterGain = b->masterKnown && g != 0.0f && b->masterGain != 0.0f
+                            ? b->masterGain + 0.3f * (g - b->masterGain) : g;
         b->masterKnown = true;
-        g_cnt.masterGainDb.store(20.0f * std::log10(b->masterGain), std::memory_order_relaxed);
+        g_cnt.masterGainDb.store(20.0f * std::log10(std::max(b->masterGain, 1e-6f)), std::memory_order_relaxed);
       }
     }
     roomTicks += blk.roomRenderTicks;
@@ -936,6 +939,9 @@ void Bind(void* rend, const char* how) {
     }
   }
   b->lastUseQpc.store(Qpc());
+  // Partial retirement notifications belong to the old renderer pair, which keeps its own sets until freed.
+  g_retiredByCore.clear();
+  g_retiredByRoom.clear();
   audr::Binding* old = g_binding.exchange(b, std::memory_order_acq_rel);
   if (old) {
     old->retired.store(true);
@@ -1043,6 +1049,9 @@ void ReadConfig(bool force) {
       std::wstring used;
       binaural::HrtfSet* set = SetFor(c.hrtf, b->rate, &why, &used);
       if (set && used != g_hrtfName) {
+        // Selecting a set again invalidates any retirement notification left from its earlier use.
+        g_retiredByCore.erase(std::remove(g_retiredByCore.begin(), g_retiredByCore.end(), set), g_retiredByCore.end());
+        g_retiredByRoom.erase(std::remove(g_retiredByRoom.begin(), g_retiredByRoom.end(), set), g_retiredByRoom.end());
         audr::CoreSetHrtf(b->core, set);
         if (std::find(b->given.begin(), b->given.end(), set) == b->given.end()) b->given.push_back(set);
         if (b->room) {  // the room's buses use the voices' set (retired by both; an idle room is shown it once)
@@ -1569,13 +1578,13 @@ void ControlTick() {
       }
       if (inRoom != g_retiredByRoom.end()) g_retiredByRoom.erase(inRoom);
       g_retiredByCore.erase(g_retiredByCore.begin() + static_cast<ptrdiff_t>(k));
-      for (size_t i = 0; i < g_sets.size(); ++i)
-        if (g_sets[i].set == s) {
-          audr::CoreReleaseHrtf(g_sets[i].set);
-          g_sets.erase(g_sets.begin() + static_cast<ptrdiff_t>(i));
-          b->given.erase(std::remove(b->given.begin(), b->given.end(), s), b->given.end());
-          break;
-        }
+      b->given.erase(std::remove(b->given.begin(), b->given.end(), s), b->given.end());
+      if (audr::SetStillHeld(s, g_curSet, b, g_retiredBindings)) continue;
+      const auto set = std::find_if(g_sets.begin(), g_sets.end(), [s](const LoadedSet& entry) { return entry.set == s; });
+      if (set != g_sets.end()) {
+        audr::CoreReleaseHrtf(set->set);
+        g_sets.erase(set);
+      }
     }
   }
   HandleEvents();

@@ -1020,7 +1020,15 @@ static void TestHrtfSwap(const std::vector<std::uint32_t>& file, const std::vect
     std::printf("C14 HRTF swap: old set retired after the swap, diffuse EQ recomputed (shelves differ by %.2f dB), front/diffuse energy %.3f/%.3f -> %.3f/%.3f, kappa %.3f -> %.3f\n",
                 eqDiff, fA, dA, room_probe::EFront(rig.room), room_probe::EDiff(rig.room), kA, room_probe::Kappa(rig.room));
     CHECK(eqDiff > 0.01 && std::fabs(room_probe::EDiff(rig.room) - dA) > 1e-4f && std::fabs(room_probe::Kappa(rig.room) - kA) > 1e-4f);
-    ReleaseHrtf(const_cast<HrtfSet*>(retired));
+    // B is in use. Briefly select A, then B again before the room has reported retirement.
+    const HrtfSet* first = rig.set;
+    rig.room.SetHrtf(first);
+    run(3);
+    rig.room.SetHrtf(second);
+    run(3);
+    CHECK(rig.room.TakeRetiredHrtf() == first);
+    CHECK(rig.room.TakeRetiredHrtf() == nullptr);  // the second set is still active
+    ReleaseHrtf(const_cast<HrtfSet*>(first));
     rig.set = second;  // the rig frees it
 }
 

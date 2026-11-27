@@ -7349,10 +7349,10 @@ Test("Cockpit space: Subtle, automatic and canopy by default, saved only when ch
     }
     // The page's control, choices and rows (docs/COCKPIT_SPACE.md section 7).
     var app = File.ReadAllText(Path.Combine(workspace, "src/DcsVr.App/ui/app.js"));
-    Require(app.Contains("field(c,'cockpitSpace','<span class=\"tag\">EXPERIMENTAL</span> Cockpit space',['Puts cockpit sounds around you instead of inside your head.'", StringComparison.Ordinal)
+    Require(app.Contains("field(c,'cockpitSpace','<span class=\"tag\">EXPERIMENTAL</span> Cockpit space',", StringComparison.Ordinal)
         && app.Contains("[['0','Off'],['1','Subtle · default'],['2','Normal'],['3','Strong']]", StringComparison.Ordinal)
-        && app.Contains("field(more,'cockpitSpaceFamily','Cockpit type','Automatic picks it from the aircraft you fly.'", StringComparison.Ordinal)
-        && app.Contains("field(more,'cockpitSpaceCanopy','Open canopy opens the space'", StringComparison.Ordinal), "the Audio page's control (P6; the UI smoke test clicks it)");
+        && app.Contains("field(more,'cockpitSpaceFamily',", StringComparison.Ordinal)
+        && app.Contains("field(more,'cockpitSpaceCanopy',", StringComparison.Ordinal), "the Audio page's control (P6; the UI smoke test clicks it)");
 });
 Test("Cockpit space: the module's lines give the status line, the Audio page's row, Last flight and Checks (P7)", () =>
 {

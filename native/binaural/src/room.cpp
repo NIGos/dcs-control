@@ -484,10 +484,10 @@ struct Room::Impl {
     // The buses' shortened copies of the voices' sets (control thread; declared before `bus`, freed by ~Room after it).
     struct BusSet {
         const HrtfSet* orig;
-        HrtfSet* copy;  // null: the bus renderer got `orig` itself (no memory for a copy)
+        HrtfSet* copy;  // null: the bus renderer uses the original filters
+        double kept;
     };
     std::vector<BusSet> busSets;
-    std::vector<const HrtfSet*> retiredOrig;
     double busKeptWorst = 1.0;
 
     Renderer bus;
@@ -740,17 +740,21 @@ bool Room::Init(std::uint32_t sampleRate, std::uint32_t maxSources, char* error,
 void Room::SetHrtf(const HrtfSet* set) {
     Impl& m = *impl_;
     if (!m.inited || !set) return;
-    if (!m.busSets.empty() && m.busSets.back().orig == set) return;  // already the buses' set
-    // The buses render a copy of the set with shorter filters (kBusTaps48); the room never reads `set` on the audio
-    // thread, so it is retired as soon as the buses let go of its copy.
-    double kept = 1.0;
-    const int forced = g_forceBusTaps.load();
-    const std::uint32_t taps = static_cast<std::uint32_t>(
-        std::lround(double(forced > 0 ? static_cast<std::uint32_t>(forced) : kBusTaps48) * set->sampleRate / 48000.0));
-    HrtfSet* copy = taps < set->taps ? CopyHrtfShortened(*set, taps, &kept) : nullptr;
-    const HrtfSet* forBus = copy ? copy : set;
-    m.busSets.push_back({set, copy});
-    if (copy) m.busKeptWorst = kept;
+    // Reuse the bus filters while still owned. A second copy for the same input would let the room report the
+    // original as retired when the first copy finishes, even after the original has been selected again.
+    auto entry = std::find_if(m.busSets.begin(), m.busSets.end(), [set](const Impl::BusSet& b) { return b.orig == set; });
+    if (entry == m.busSets.end()) {
+        double kept = 1.0;
+        const int forced = g_forceBusTaps.load();
+        const std::uint32_t taps = static_cast<std::uint32_t>(
+            std::lround(double(forced > 0 ? static_cast<std::uint32_t>(forced) : kBusTaps48) * set->sampleRate / 48000.0));
+        HrtfSet* copy = taps < set->taps ? CopyHrtfShortened(*set, taps, &kept) : nullptr;
+        m.busSets.push_back({set, copy, kept});
+        entry = m.busSets.end() - 1;
+    }
+    const HrtfSet* forBus = entry->copy ? entry->copy : set;
+    if (m.busGiven.load(std::memory_order_relaxed) == forBus) return;
+    m.busKeptWorst = entry->kept;
     m.bus.SetHrtf(forBus);
     m.busGiven.store(forBus, std::memory_order_release);
     if (set->sampleRate != m.fs) return;
@@ -759,25 +763,18 @@ void Room::SetHrtf(const HrtfSet* set) {
 const HrtfSet* Room::TakeRetiredHrtf() {
     Impl& m = *impl_;
     if (!m.inited) return nullptr;
-    while (const HrtfSet* r = m.bus.TakeRetiredHrtf()) {
-        bool found = false;
-        for (std::size_t i = 0; i < m.busSets.size(); ++i) {
-            const Impl::BusSet b = m.busSets[i];
-            if (b.copy == r || (!b.copy && b.orig == r)) {
-                m.retiredOrig.push_back(b.orig);
-                if (b.copy) ReleaseHrtf(b.copy);
-                m.busSets.erase(m.busSets.begin() + static_cast<std::ptrdiff_t>(i));
-                found = true;
-                break;
-            }
-        }
-        if (!found) m.retiredOrig.push_back(r);
-    }
-    if (m.retiredOrig.empty()) return nullptr;
-    const HrtfSet* r = m.retiredOrig.front();
-    m.retiredOrig.erase(m.retiredOrig.begin());
-    return r;
+    const HrtfSet* retired = m.bus.TakeRetiredHrtf();
+    if (!retired) return nullptr;
+    const auto entry = std::find_if(m.busSets.begin(), m.busSets.end(), [retired](const Impl::BusSet& b) {
+        return (b.copy ? b.copy : b.orig) == retired;
+    });
+    if (entry == m.busSets.end()) return retired;
+    const Impl::BusSet b = *entry;
+    m.busSets.erase(entry);
+    if (b.copy) ReleaseHrtf(b.copy);
+    return b.orig;
 }
+
 void Room::SetHeadRadius(float metres) {
     if (impl_->inited) impl_->bus.SetHeadRadius(metres);
 }

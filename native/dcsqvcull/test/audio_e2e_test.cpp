@@ -1223,6 +1223,38 @@ void GrowShrink() {
   g_fakeMasterGain = 1.0f;
 }
 
+void RoomTailHonoursMute() {
+  Rig r;
+  RigUp(r, Ini(2).c_str());
+  SetCtxCockpitGain(r, kWorldCtx, true);
+  const int voice = AddBoth(r, kCockpitCtx, true, 2, kEngine, 0.12f, 88, 1.0f, 77);
+  PosBoth(r, voice, -0.13, 0.42, 0.0);
+  r.w.SetOrient(voice, kIdentity);
+  CreateVoice(r, voice);
+  audio::LuaAircraft("F-16C_50");
+  audio::LuaState(0.0, 1, 1);
+  Bind(r);
+  Tick();
+  std::vector<float> actual(960), stock(960);
+  for (int k = 0; k < 80; ++k) {
+    SimFrame(r);
+    Block(r, actual.data(), stock.data(), 480);
+  }
+  // Let the mixer observe the muted gain before it stops invoking the voice renderer.
+  g_fakeMasterGain = 0.0f;
+  SimFrame(r);
+  Block(r, actual.data(), stock.data(), 480);
+  W<uint8_t>(r.w.voices[voice], kVSkip, 1), W<uint8_t>(r.ref.voices[voice], kVSkip, 1);
+  const auto flushes = audio::g_cnt.roomFlushAfterMix.load();
+  SimFrame(r);
+  Block(r, actual.data(), stock.data(), 480);
+  Check(audio::g_cnt.roomFlushAfterMix.load() > flushes &&
+            std::all_of(actual.begin(), actual.end(), [](float sample) { return sample == 0.0f; }),
+        "cockpit space e2e: room tail added after the mix stays silent after the master is muted");
+  RigDown(r);
+  g_fakeMasterGain = 1.0f;
+}
+
 void RunAll() {
   printf("---- cockpit space end to end (real Room)\n");
   Externalisation();
@@ -1230,6 +1262,7 @@ void RunAll() {
   LiveMix();
   BuildUp();
   GrowShrink();
+  RoomTailHonoursMute();
   Clicks();
   OffExact();
   Cpu();
