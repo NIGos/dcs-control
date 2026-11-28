@@ -728,6 +728,7 @@ void LoadConfig(bool initial) {
   g_pacerLowPowerOn = c.pacerLowPower && !g_engineOff.load();
   ApplyPacer();
   g_taskClockOn = c.taskClock && !g_engineOff.load();
+  ApplyTimerConfig();
   ApplyTaskClock();
   g_frameHeapOn = c.frameHeapSlabs && !g_engineOff.load();
   if (g_frameHeapOn.load()) ApplyFrameHeap();
@@ -753,7 +754,6 @@ void LoadConfig(bool initial) {
   g_d3dMode = c.d3dFilter ? 1 : 0;
   g_shadowTight = c.shadowTight;
   g_shadowDebugInvert = c.shadowDebugInvert;
-  ApplyTimerConfig();
   Log("config: enabled=%d debugHole=%d keepFraction=%.3f safetyNdc=%.3f saccadeDeg=%.2f "
       "saccadeHold=%d focusRatio=%.2f apexTol=%.3f collectThreadsMax=%d",
       c.enabled, c.debugHole, c.keepFraction, c.safetyNdc, c.saccadeDeg, c.saccadeHoldFrames,

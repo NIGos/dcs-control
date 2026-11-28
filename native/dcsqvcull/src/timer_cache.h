@@ -12,7 +12,7 @@
 namespace timercache {
 
 using GetTimeFn = double (*)();
-GetTimeFn g_orig = nullptr;
+std::atomic<GetTimeFn> g_orig{nullptr};
 std::atomic<bool> g_on{false};
 std::atomic<int> g_periodUs{1000};
 std::atomic<double> g_cached{0.0};
@@ -33,7 +33,7 @@ std::atomic<bool> g_stopUpdater{false};
 std::atomic<std::atomic<double>*> g_mirror{nullptr};
 
 double Hook() {
-  if (!g_on.load(std::memory_order_relaxed)) return g_orig();
+  if (!g_on.load(std::memory_order_relaxed)) return g_orig.load(std::memory_order_acquire)();
   return g_cached.load(std::memory_order_relaxed);
 }
 
@@ -44,7 +44,7 @@ DWORD WINAPI Updater(void*) {
   HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                         TIMER_ALL_ACCESS);
   while (!g_stopUpdater.load()) {
-    const double now = g_orig();
+    const double now = g_orig.load(std::memory_order_acquire)();
     g_cached.store(now, std::memory_order_relaxed);
     if (std::atomic<double>* m = g_mirror.load(std::memory_order_relaxed)) m->store(now, std::memory_order_relaxed);
     g_refreshes.fetch_add(1, std::memory_order_relaxed);
@@ -85,6 +85,8 @@ void** FindImport(HMODULE module, const char* dll, const char* func) {
 
 // Installs the hook (cache disabled until g_on is set). Returns false if unavailable.
 bool Install(int periodUs) {
+  static std::mutex installLock;
+  std::lock_guard<std::mutex> lock(installLock);
   if (g_orig) return true;
   HMODULE dx = GetModuleHandleW(L"dx11backend.dll");
   if (!dx) {
@@ -98,6 +100,7 @@ bool Install(int periodUs) {
   }
   g_periodUs = periodUs;
   GetTimeFn orig = reinterpret_cast<GetTimeFn>(SlotOriginal(slot));
+  if (!orig) return false;
   g_orig = orig;
   g_cached = orig();
   HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<Updater>, nullptr, 0, nullptr);

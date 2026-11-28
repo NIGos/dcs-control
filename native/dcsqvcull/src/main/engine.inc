@@ -52,6 +52,7 @@ void SetEngineOff(bool off) {
   g_pacerLowPowerOn = g_cfg.pacerLowPower && !off;
   ApplyPacer();
   g_taskClockOn = g_cfg.taskClock && !off;
+  ApplyTimerConfig();
   ApplyTaskClock();
   g_frameHeapOn = g_cfg.frameHeapSlabs && !off;
   g_shadowTexSkipOn = g_cfg.shadowTexSkip && !off;
@@ -73,7 +74,6 @@ void SetEngineOff(bool off) {
   ApplyPrefetch();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
-  ApplyTimerConfig();
   // The switch takes a while (the prefetch fix's module scan): the containment window (2 s after the mark) counts
   // from its end, which covers the recorders' first frames back on.
   g_sceneChangeQpc.store(defrec::Qpc(), std::memory_order_release);

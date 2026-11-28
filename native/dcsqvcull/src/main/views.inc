@@ -45,10 +45,19 @@ std::atomic<uint32_t> g_isolate{0};
 std::atomic<void (*)(bool begin, bool inRight)> g_onPass{nullptr};
 }  // namespace tvc
 
-void ApplyTimerConfig() {
+bool NeedsTimerCache(const Config& cfg, bool engineOff, bool perceptionOnly) {
+  return !engineOff && !perceptionOnly && ((cfg.shaderTimeCache && cfg.shaderTimeCacheUs > 0) ||
+                                         cfg.taskClock || cfg.texDedupe || cfg.suiteBenchTimer);
+}
+
+void ApplyTimerConfig(bool startup) {
+  const bool engineOff = g_engineOff.load();
+  if (!timercache::g_orig && (startup || g_startInstallsDone.load()) &&
+      NeedsTimerCache(g_cfg, engineOff, g_perceptionOnly.load()))
+    timercache::Install(g_cfg.shaderTimeCacheUs);
   if (!timercache::g_orig) return;
   timercache::g_periodUs = g_cfg.shaderTimeCacheUs;
-  timercache::g_on = g_cfg.shaderTimeCache && g_cfg.shaderTimeCacheUs > 0 && !g_engineOff.load();
+  timercache::g_on = g_cfg.shaderTimeCache && g_cfg.shaderTimeCacheUs > 0 && !engineOff;
 }
 
 // ---------------------------------------------------------------------------

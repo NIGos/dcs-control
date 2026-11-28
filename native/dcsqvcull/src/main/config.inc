@@ -348,7 +348,7 @@ void Chime(DWORD freq, DWORD ms) {
   if (!g_mute && g_beeps.load(std::memory_order_relaxed)) Beep(freq, ms);
 }
 double g_tscHz = 0;
-void ApplyTimerConfig();
+void ApplyTimerConfig(bool startup = false);
 void BenchUseCompactTexTable(bool on);
 void ApplyBigPages(bool on);
 void ApplyParUpload(bool on);
