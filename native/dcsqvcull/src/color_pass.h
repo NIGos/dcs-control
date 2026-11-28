@@ -1796,6 +1796,11 @@ inline int ToneDrawPre(ID3D11DeviceContext* c, int v) {
   Bound b;
   const int why = CheckBound(c, v, b);
   if (why != kRjCount) {
+    static bool lutHint = false;
+    if (why == kRjLut && !lutHint && g_log) {
+      lutHint = true;
+      g_log("colour: DCS colour grading is active; turn it off in DCS graphics settings to use DCS Control's colour and tone-map effects");
+    }
     g_rejects[why]++;
     b.Release();
     // A size not seen yet at any CopyToHMDPass (a resolution change): learn again at once (1 s cooldown: a target
