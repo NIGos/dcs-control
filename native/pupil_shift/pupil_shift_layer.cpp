@@ -2344,19 +2344,28 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
     bool app_enabled{};
     for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i)
         app_enabled |= std::strcmp(info->enabledExtensionNames[i], XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) == 0;
-    const Availability availability = app_enabled ? Availability::present : wanted ? probe_eye_gaze(next_gipa) : Availability::absent;
+    // Quad Views can be below us before its own downstream dispatcher has been set up.
+    bool can_probe = true;
+    for (auto* layer = next_info.nextInfo; layer; layer = layer->next) {
+        if (std::strcmp(layer->layerName, "XR_APILAYER_MBUCCHIA_quad_views_foveated") == 0) {
+            can_probe = false;
+            break;
+        }
+    }
+    const Availability availability = app_enabled ? Availability::present :
+        wanted ? (can_probe ? probe_eye_gaze(next_gipa) : Availability::unknown) : Availability::absent;
     bool inject = wanted && !app_enabled && !qv_fixed && availability != Availability::absent;
     // A runtime whose extension list cannot be read (unknown) is taken as offering it, as for the layer's own request:
     // Quad Views asks for it on its own list, so an unknown here must not leave the fixed focus without a gaze.
     const bool below = wanted && !app_enabled && qv_fixed && availability != Availability::absent;
     // The head pose feed ([HeadPose] Publish=1 at instance creation): XR_KHR_win32_convert_performance_counter_time for
-    // the display time in QPC, added only when the runtime says it offers it (a pure conversion; nothing else changes).
+    // the display time in QPC. If the chain cannot be queried yet, try it and retry without it on refusal.
     const bool head_pose_at_create = GetPrivateProfileIntW(L"HeadPose", L"Publish", 0, (module_dir + L"PupilShift.ini").c_str()) != 0;
     bool app_time{};
     for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i)
         app_time |= std::strcmp(info->enabledExtensionNames[i], XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0;
     bool inject_time = head_pose_at_create && !app_time &&
-        probe_extension(next_gipa, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == Availability::present;
+        (!can_probe || probe_extension(next_gipa, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == Availability::present);
     std::vector<const char*> extensions;
     const auto forward = [&]() {
         extensions.clear();

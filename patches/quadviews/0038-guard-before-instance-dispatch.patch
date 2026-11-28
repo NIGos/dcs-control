@@ -1,0 +1,37 @@
+Quad Views may receive a global query from an upstream layer during instance
+creation. Its downstream dispatcher is not necessarily populated yet.
+
+diff --git a/openxr-api-layer/framework/dispatch_generator.py b/openxr-api-layer/framework/dispatch_generator.py
+--- a/openxr-api-layer/framework/dispatch_generator.py
++++ b/openxr-api-layer/framework/dispatch_generator.py
+@@ -240,6 +240,13 @@
+ 
+ 	XrResult OpenXrApi::xrGetInstanceProcAddrInternal(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
+ 	{
++		if (!function || !name) {
++			return XR_ERROR_VALIDATION_FAILURE;
++		}
++		*function = nullptr;
++		if (!m_xrGetInstanceProcAddr) {
++			return XR_ERROR_FUNCTION_UNSUPPORTED;
++		}
+ 		XrResult result = m_xrGetInstanceProcAddr(instance, name, function);
+ 
+ 		const std::string apiName(name);
+diff --git a/openxr-api-layer/framework/dispatch.gen.cpp b/openxr-api-layer/framework/dispatch.gen.cpp
+--- a/openxr-api-layer/framework/dispatch.gen.cpp
++++ b/openxr-api-layer/framework/dispatch.gen.cpp
+@@ -694,6 +694,13 @@
+ 
+ 	XrResult OpenXrApi::xrGetInstanceProcAddrInternal(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
+ 	{
++		if (!function || !name) {
++			return XR_ERROR_VALIDATION_FAILURE;
++		}
++		*function = nullptr;
++		if (!m_xrGetInstanceProcAddr) {
++			return XR_ERROR_FUNCTION_UNSUPPORTED;
++		}
+ 		XrResult result = m_xrGetInstanceProcAddr(instance, name, function);
+ 
+ 		const std::string apiName(name);
