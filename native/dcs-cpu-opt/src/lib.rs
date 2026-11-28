@@ -10,17 +10,42 @@ use std::sync::Mutex;
 
 mod zlib_opt;
 
+#[repr(C)]
+#[derive(Default)]
+struct GuardFailure {
+    kind: u32,
+    thread: u32,
+    error: u32,
+}
+
 extern "C" {
     fn DcsCpuOpt_WriteGuardedPatch(target: *mut u8, bytes: *const u8, len: usize,
-        expected_at: *const u8, expected: *const u8, expected_len: usize) -> i32;
+        expected_at: *const u8, expected: *const u8, expected_len: usize, failure: *mut GuardFailure) -> i32;
     fn DcsCpuOpt_AllocNearPatch(target: *const u8, len: usize) -> *mut u8;
 }
 
 unsafe fn write_guarded_patch<const N: usize, const M: usize>(
     target: *mut u8, bytes: &[u8; N], expected_at: *const u8, expected: &[u8; M],
-) -> bool {
-    DLL_PINNED.load(Ordering::Acquire)
-        && DcsCpuOpt_WriteGuardedPatch(target, bytes.as_ptr(), N, expected_at, expected.as_ptr(), M) != 0
+) -> Result<(), String> {
+    if !DLL_PINNED.load(Ordering::Acquire) {
+        return Err("CPU optimization DLL was not pinned".into());
+    }
+    let mut failure = GuardFailure::default();
+    if DcsCpuOpt_WriteGuardedPatch(target, bytes.as_ptr(), N, expected_at, expected.as_ptr(), M, &mut failure) != 0 {
+        return Ok(());
+    }
+    let reason = match failure.kind {
+        1 => "thread walk failed",
+        2 => "thread walk exceeded capacity",
+        3 => "thread ID unavailable",
+        4 => "thread suspension failed",
+        5 => "thread context unavailable",
+        6 => "instruction pointer inside patch",
+        7 => "expected bytes changed",
+        8 => "page protection change failed",
+        _ => "reason unavailable",
+    };
+    Err(format!("{reason}, thread_id={}, status=0x{:08x}", failure.thread, failure.error))
 }
 
 // Expected first 15 bytes of ed_sound.dll!SND_process (DCS 2.9.31.29434, SHA-256 dc52bc85...)
@@ -364,9 +389,9 @@ unsafe fn patch_vis_pacer(target: *mut u8, timeout_cycles: u32) -> Result<(), St
     };
     ptr::copy_nonoverlapping(code.as_ptr(), stub, code.len());
     FlushInstructionCache(GetCurrentProcess(), stub as *const c_void, code.len());
-    if !write_guarded_patch(site, &patch, target, &EXPECTED_VIS_SPIN_LOOP) {
+    if let Err(reason) = write_guarded_patch(site, &patch, target, &EXPECTED_VIS_SPIN_LOOP) {
         VirtualFree(stub as *mut c_void, 0, MEM_RELEASE);
-        return Err("guarded Visualizer.dll patch refused".to_string());
+        return Err(format!("guarded Visualizer.dll patch refused: {reason}"));
     }
     Ok(())
 }
@@ -1588,11 +1613,11 @@ unsafe fn patch_inline<const N: usize>(
     patch[6..14].copy_from_slice(&detour.to_le_bytes());
     // Threads can run as soon as the guarded write returns. Publish the callable original first.
     original.store(tramp as u64, Ordering::Release);
-    if !write_guarded_patch(target, &patch, target, expected) {
+    if let Err(reason) = write_guarded_patch(target, &patch, target, expected) {
         // A refused single-site write installed no jump, so no caller can use this trampoline.
         original.store(0, Ordering::Release);
         VirtualFree(tramp as *mut c_void, 0, MEM_RELEASE);
-        return Err(format!("guarded patch refused at 0x{:x}", target as usize));
+        return Err(format!("guarded patch refused at 0x{:x}: {reason}", target as usize));
     }
     Ok(())
 }
@@ -2004,13 +2029,16 @@ mod tests {
             // Change a byte outside the overwritten range.
             *mem.add(17) = 0x90;
             let site = mem.add(VIS_PAUSE_OFFSET);
-            let refused = DcsCpuOpt_WriteGuardedPatch(site, patch.as_ptr(), patch.len(), mem, expected.as_ptr(), expected.len());
+            let mut failure = GuardFailure::default();
+            let refused = DcsCpuOpt_WriteGuardedPatch(site, patch.as_ptr(), patch.len(), mem, expected.as_ptr(), expected.len(), &mut failure);
+            let refusal_kind = failure.kind;
             let unchanged = std::slice::from_raw_parts(site, patch.len()) == &expected[VIS_PAUSE_OFFSET..VIS_PAUSE_OFFSET + patch.len()];
             *mem.add(17) = expected[17];
-            let accepted = DcsCpuOpt_WriteGuardedPatch(site, patch.as_ptr(), patch.len(), mem, expected.as_ptr(), expected.len());
+            let accepted = DcsCpuOpt_WriteGuardedPatch(site, patch.as_ptr(), patch.len(), mem, expected.as_ptr(), expected.len(), &mut failure);
             let applied = std::slice::from_raw_parts(site, patch.len()) == patch;
             VirtualFree(mem as *mut c_void, 0, MEM_RELEASE);
             assert_eq!(refused, 0);
+            assert_eq!(refusal_kind, 7);
             assert!(unchanged);
             assert_eq!(accepted, 1);
             assert!(applied);

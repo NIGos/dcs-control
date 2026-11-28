@@ -8,10 +8,10 @@
 
 extern "C" int DcsCpuOpt_WriteGuardedPatch(uint8_t* target, const uint8_t* bytes, size_t length,
                                            const uint8_t* expectedAddr, const uint8_t* expected,
-                                           size_t expectedLength) {
+                                           size_t expectedLength, qvpatch::Failure* failure) {
   const qvpatch::Site site{target, bytes, length, expected, expectedAddr, expectedLength};
   // A failed thread walk or context check must never fall back to an unverified write.
-  return qvpatch::WriteSuspendedProcess(&site, 1, 20, true) ? 1 : 0;
+  return qvpatch::WriteSuspendedProcess(&site, 1, 20, true, failure) ? 1 : 0;
 }
 
 extern "C" void* DcsCpuOpt_AllocNearPatch(const void* target, size_t length) {
