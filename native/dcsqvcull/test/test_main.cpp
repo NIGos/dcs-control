@@ -1317,7 +1317,7 @@ int main() {
       return ED_FakeTime();
     };
     timercache::g_periodUs = 1000;
-    timercache::g_cached = timercache::g_orig();
+    timercache::g_cached = timercache::g_orig.load()();
     const uint64_t refresh0 = timercache::g_refreshes.load();
     HANDLE t = CreateThread(nullptr, 0, timercache::Updater, nullptr, 0, nullptr);
     auto waitFor = [](auto cond) {

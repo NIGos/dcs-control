@@ -154,7 +154,7 @@ DWORD WINAPI WorkerThread(void*) {
     if (g_cfg.costWeights) partw::Install();
     if (g_cfg.texDedupe) texbind::Install(g_tscHz);
     ApplyShadowTexSkip();
-    if (timercache::Install(g_cfg.shaderTimeCacheUs)) ApplyTimerConfig();
+    ApplyTimerConfig(true);
     ApplyTaskClock();
     if (g_cfg.d3dMeter && !d3ds::Install()) Log("d3d meter: not installed");
   }

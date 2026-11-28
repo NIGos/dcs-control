@@ -48,7 +48,7 @@ Snap Take() {
   s.cbUploadAttached = cbupload::g_attached.load();
   s.shadowtexAttached = shadowtex::g_attached.load();
   s.plodSwap = plod::g_swapOn.load();
-  s.timerOrig = reinterpret_cast<const void*>(timercache::g_orig);
+  s.timerOrig = reinterpret_cast<const void*>(timercache::g_orig.load());
   s.partwOrig = reinterpret_cast<const void*>(partw::g_orig);
   s.drawSlot = d3ds::g_rendererDrawSlot;
   s.govStage = g_govStage.load();

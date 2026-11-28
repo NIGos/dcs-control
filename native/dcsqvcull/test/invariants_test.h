@@ -685,6 +685,21 @@ void SystemDllLoads() {
 }
 
 void Run() {
+  {
+    Config off;
+    off.shaderTimeCache = off.taskClock = off.texDedupe = off.suiteBenchTimer = false;
+    Config shader = off, task = off, textures = off, bench = off;
+    shader.shaderTimeCache = true;
+    shader.shaderTimeCacheUs = 1000;
+    task.taskClock = true;
+    textures.texDedupe = true;
+    bench.suiteBenchTimer = true;
+    Check(!NeedsTimerCache(off, false, false) && NeedsTimerCache(shader, false, false) &&
+              NeedsTimerCache(task, false, false) && NeedsTimerCache(textures, false, false) &&
+              NeedsTimerCache(bench, false, false) && !NeedsTimerCache(shader, true, false) &&
+              !NeedsTimerCache(shader, false, true),
+          "timer cache startup: all clock consumers off keeps DCS's clock untouched; actual consumers can enable it");
+  }
   const std::string off = ReadText(IniDir() + L"engine_all_off.ini"), on = ReadText(IniDir() + L"engine_all_on.ini");
   Registration();
   SystemDllLoads();
